@@ -1,12 +1,27 @@
 # @balcsida/pi-provider-litellm
 
+[![npm version](https://img.shields.io/npm/v/@balcsida/pi-provider-litellm.svg)](https://www.npmjs.com/package/@balcsida/pi-provider-litellm)
+
 LiteLLM proxy provider extension for [pi-mono](https://github.com/badlogic/pi-mono).
 
 Discovers models from a self-hosted LiteLLM proxy and registers them under the `litellm` provider. Supports `/login litellm` and `/litellm-refresh`. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404.
 
 ## Install
 
-Pi loads extensions from `~/.pi/agent/extensions/` (global) or `<cwd>/.pi/extensions/` (project-local). Until pi adds npm-package resolution, the install path is a clone:
+```bash
+pi install npm:@balcsida/pi-provider-litellm
+```
+
+Pi fetches the package from npm and registers it. Add `-l` to install into project settings (`.pi/settings.json`) instead of global.
+
+To try it without installing (one-off, current run only):
+
+```bash
+pi -e npm:@balcsida/pi-provider-litellm
+```
+
+<details>
+<summary>Alternative: install from source</summary>
 
 ```bash
 git clone https://github.com/balcsida/pi-provider-litellm.git ~/.pi/agent/extensions/pi-provider-litellm
@@ -15,7 +30,7 @@ npm install
 npm run build
 ```
 
-After this, pi will discover the extension on next start.
+</details>
 
 ## Configure
 
