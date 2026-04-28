@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-28
+
+### Added
+
+- `pi-package` keyword so the package surfaces in the [pi.dev/packages](https://pi.dev/packages) gallery.
+
+### Changed
+
+- README install instructions now use `pi install npm:@balcsida/pi-provider-litellm` (and `pi -e` for ephemeral trials), with the source-clone path kept as a fallback.
+
 ## [0.1.0] - 2026-04-27
 
 ### Added
