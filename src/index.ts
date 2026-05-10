@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { AuthStorage, getAgentDir } from "@mariozechner/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { discoverModels, normalizeBaseUrl } from "./discover.js";
 import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
@@ -40,11 +40,15 @@ async function resolveCredentials(): Promise<ResolvedCredentials> {
   const envKey = process.env[ENV_API_KEY]?.trim();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
   const authKey =
-    entry?.type === "oauth" ? entry.access?.trim() : entry?.type === "api_key" ? entry.key?.trim() : undefined;
-  const rawBase = envBase || authBase;
+    entry?.type === "oauth"
+      ? entry.access?.trim()
+      : entry?.type === "api_key"
+        ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
+        : undefined;
+  const rawBase = authBase || envBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
-    apiKey: envKey || authKey || undefined,
+    apiKey: authKey || envKey || undefined,
   };
 }
 
