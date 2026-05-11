@@ -1,4 +1,4 @@
-import type { ProviderModelConfig } from "@mariozechner/pi-coding-agent";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type {
   DiscoveryOptions,
   DiscoveryResult,

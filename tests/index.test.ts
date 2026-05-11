@@ -29,7 +29,7 @@ async function makeAgentDir(): Promise<string> {
 
 async function loadExtension(agentDir: string): Promise<(pi: TestPi) => Promise<void>> {
   vi.resetModules();
-  vi.doMock("@mariozechner/pi-coding-agent", () => {
+  vi.doMock("@earendil-works/pi-coding-agent", () => {
     class TestAuthStorage {
       constructor(private readonly authPath: string) {}
 
@@ -59,11 +59,15 @@ function createPi(): TestPi {
   return {
     providers: [],
     commands: new Map(),
+    handlers: new Map(),
     registerProvider(name: string, config: TestProviderConfig) {
       this.providers.push({ name, config });
     },
     registerCommand(name: string, command: TestCommand) {
       this.commands.set(name, command);
+    },
+    on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any) {
+      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
     },
   };
 }
@@ -71,19 +75,21 @@ function createPi(): TestPi {
 type TestPi = {
   providers: Array<{ name: string; config: TestProviderConfig }>;
   commands: Map<string, TestCommand>;
+  handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   registerProvider(name: string, config: TestProviderConfig): void;
   registerCommand(name: string, command: TestCommand): void;
+  on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
 afterEach(() => {
   for (const key of ENV_KEYS) {
     const original = ORIGINAL_ENV.get(key);
-    if (original === undefined) delete process.env[key];
+    if (original === undefined) process.env[key] = undefined;
     else process.env[key] = original;
   }
   vi.restoreAllMocks();
   vi.resetModules();
-  vi.unmock("@mariozechner/pi-coding-agent");
+  vi.unmock("@earendil-works/pi-coding-agent");
 });
 
 describe("extension startup", () => {

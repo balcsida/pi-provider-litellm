@@ -1,10 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
-import { AuthStorage, getAgentDir } from "@mariozechner/pi-coding-agent";
+import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
+import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, normalizeBaseUrl } from "./discover.js";
+import { getSessionIdFromFile } from "./litellm.js";
 import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
@@ -230,5 +232,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify(`LiteLLM refresh failed: ${message}`, "error");
       }
     },
+  });
+
+  setupLiteLLMCostTracking(pi);
+
+  let sessionId: string | undefined;
+  pi.on("session_start", async (_event, ctx) => {
+    sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+  });
+
+  pi.on("before_provider_request", (event) => {
+    if (!sessionId) return;
+    if (typeof event.payload !== "object" || event.payload === null) return;
+    return {
+      ...(event.payload as Record<string, unknown>),
+      litellm_session_id: sessionId,
+    };
   });
 }
