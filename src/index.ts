@@ -241,7 +241,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
   });
 
-  pi.on("before_provider_request", (event) => {
+  pi.on("before_provider_request", (event, ctx) => {
+    if (ctx.model?.provider !== PROVIDER_NAME) return;
     if (!sessionId) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
     return {
