@@ -66,6 +66,29 @@ Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the 
 
 `LITELLM_DISCOVERY_TIMEOUT_MS=0` only disables startup and refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
+## Real LiteLLM smoke workflow
+
+The `LiteLLM Smoke` GitHub Actions workflow starts a real LiteLLM proxy on the runner, discovers models through this extension's smoke runner, and sends real `/v1/chat/completions` requests through the proxy.
+
+The required baseline route uses GitHub Models with the workflow `GITHUB_TOKEN` and `models: read` permission, so it can run without adding provider secrets. Direct vendor routes are added only when these repository secrets exist:
+
+| Secret | Default smoke model | Notes |
+|---|---|---|
+| `OPENAI_API_KEY` | `gpt-4.1-nano` | Cheap direct OpenAI/GPT route |
+| `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` | Cheap direct Claude route |
+| `GEMINI_API_KEY` | `gemini-2.5-flash-lite` | Cheap/free-tier-friendly Gemini route |
+
+Optional repository variables override model choices without editing the workflow:
+
+| Variable | Default |
+|---|---|
+| `GH_MODELS_SMOKE_MODEL` | `openai/gpt-4o-mini` |
+| `OPENAI_SMOKE_MODEL` | `gpt-4.1-nano` |
+| `ANTHROPIC_SMOKE_MODEL` | `claude-haiku-4-5-20251001` |
+| `GEMINI_SMOKE_MODEL` | `gemini-2.5-flash-lite` |
+
+Manual runs include a `require_vendors` input. When enabled, the workflow fails before starting LiteLLM unless all three direct vendor secrets are configured. Scheduled and push runs keep the GitHub Models baseline required and skip missing direct vendors.
+
 ## Slash commands
 
 - `/litellm-refresh` — force re-fetch the model list, ignoring cache
