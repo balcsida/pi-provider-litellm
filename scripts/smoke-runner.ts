@@ -1,0 +1,134 @@
+import { discoverModels, normalizeBaseUrl } from "../src/discover.js";
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const SMOKE_PROMPT = "Reply with one short word.";
+
+export type SmokeCompletion = {
+  modelId: string;
+  content: string;
+};
+
+export type SmokeResult = {
+  source: "model_info" | "models_list";
+  discoveredCount: number;
+  completions: SmokeCompletion[];
+};
+
+export type SmokeOptions = {
+  baseUrl: string;
+  apiKey: string;
+  modelIds: string[];
+  timeoutMs?: number;
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+    };
+  }>;
+};
+
+export function parseSmokeModels(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(/[,\s]+/)
+    .map((model) => model.trim())
+    .filter((model) => model.length > 0);
+}
+
+function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer),
+  };
+}
+
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    const body = await response.text();
+    return body ? `: ${body.slice(0, 500)}` : "";
+  } catch {
+    return "";
+  }
+}
+
+async function smokeChatCompletion(
+  baseUrl: string,
+  apiKey: string,
+  modelId: string,
+  timeoutMs: number,
+): Promise<SmokeCompletion> {
+  const { signal, cancel } = withTimeout(timeoutMs);
+  try {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: SMOKE_PROMPT }],
+        max_tokens: 16,
+        temperature: 0,
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`/v1/chat/completions for ${modelId} returned ${response.status}${await readErrorBody(response)}`);
+    }
+    const data = (await response.json()) as ChatCompletionResponse;
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || content.trim().length === 0) {
+      throw new Error(`/v1/chat/completions for ${modelId} returned no assistant text`);
+    }
+    return { modelId, content };
+  } finally {
+    cancel();
+  }
+}
+
+export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
+  const baseUrl = normalizeBaseUrl(options.baseUrl);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (options.modelIds.length === 0) {
+    throw new Error("At least one smoke model must be configured in LITELLM_SMOKE_MODELS");
+  }
+
+  const discovery = await discoverModels(baseUrl, options.apiKey, { timeoutMs });
+  const discovered = new Set(discovery.models.map((model) => model.id));
+  const missing = options.modelIds.filter((modelId) => !discovered.has(modelId));
+  if (missing.length > 0) {
+    throw new Error(`Requested smoke models were not discovered: ${missing.join(", ")}`);
+  }
+
+  const completions: SmokeCompletion[] = [];
+  for (const modelId of options.modelIds) {
+    completions.push(await smokeChatCompletion(baseUrl, options.apiKey, modelId, timeoutMs));
+  }
+
+  return {
+    source: discovery.source,
+    discoveredCount: discovery.models.length,
+    completions,
+  };
+}
+
+export async function runSmokeFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SmokeResult> {
+  const baseUrl = env.LITELLM_BASE_URL?.trim();
+  const apiKey = env.LITELLM_API_KEY?.trim();
+  if (!baseUrl || !apiKey) {
+    throw new Error("LITELLM_BASE_URL and LITELLM_API_KEY must be set");
+  }
+
+  const timeoutMs = env.LITELLM_SMOKE_TIMEOUT_MS ? Number.parseInt(env.LITELLM_SMOKE_TIMEOUT_MS, 10) : DEFAULT_TIMEOUT_MS;
+  return runSmoke({
+    baseUrl,
+    apiKey,
+    modelIds: parseSmokeModels(env.LITELLM_SMOKE_MODELS),
+    timeoutMs: Number.isNaN(timeoutMs) || timeoutMs <= 0 ? DEFAULT_TIMEOUT_MS : timeoutMs,
+  });
+}

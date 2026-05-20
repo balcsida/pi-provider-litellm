@@ -1,29 +1,19 @@
-// Manual integration smoke test against a real LiteLLM proxy.
-// Reads credentials from env (LITELLM_BASE_URL, LITELLM_API_KEY).
+// Manual and CI integration smoke test against a real LiteLLM proxy.
+// Reads LITELLM_BASE_URL, LITELLM_API_KEY, and LITELLM_SMOKE_MODELS.
 // Run: npx tsx scripts/smoke.ts
-//
-// Prints discovered models. Does not write to the cache file.
 
-import { discoverModels, normalizeBaseUrl } from "../src/discover.js";
+import { runSmokeFromEnv } from "./smoke-runner.js";
 
 async function main(): Promise<void> {
-  const baseUrl = process.env.LITELLM_BASE_URL?.trim();
-  const apiKey = process.env.LITELLM_API_KEY?.trim();
-  if (!baseUrl || !apiKey) {
-    console.error("LITELLM_BASE_URL and LITELLM_API_KEY must be set.");
-    process.exit(2);
-  }
-  const result = await discoverModels(normalizeBaseUrl(baseUrl), apiKey, {
-    timeoutMs: 10_000,
-  });
+  const result = await runSmokeFromEnv();
   console.log(`Source: ${result.source}`);
-  console.log(`Discovered ${result.models.length} models:`);
-  for (const m of result.models) {
-    console.log(`  - ${m.id}  (ctx=${m.contextWindow}, max=${m.maxTokens}, compat=${JSON.stringify(m.compat)})`);
+  console.log(`Discovered ${result.discoveredCount} models.`);
+  for (const completion of result.completions) {
+    console.log(`Smoke OK: ${completion.modelId} -> ${JSON.stringify(completion.content)}`);
   }
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });
