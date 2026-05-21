@@ -1,3 +1,5 @@
+import { getModels, getProviders } from "@earendil-works/pi-ai";
+import type { Api, KnownProvider, Model } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type {
   DiscoveryOptions,
@@ -11,6 +13,7 @@ import type {
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
+const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
@@ -47,6 +50,33 @@ export function buildCompat(modelId: string): ProviderModelConfig["compat"] {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
+}
+
+function toKnownProvider(provider: string | undefined): KnownProvider | undefined {
+  if (!provider) return undefined;
+  const normalized = provider.toLowerCase();
+  return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as KnownProvider) : undefined;
+}
+
+function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
+  const prefixProvider = toKnownProvider(id.split("/")[0]);
+  const candidates = [toKnownProvider(ownedBy), prefixProvider].filter(
+    (provider): provider is KnownProvider => provider !== undefined,
+  );
+
+  for (const provider of candidates) {
+    const exact = getModels(provider).find((model) => model.id === id);
+    if (exact) return exact;
+    const providerQualified = getModels(provider).find((model) => model.id === `${provider}/${id}`);
+    if (providerQualified) return providerQualified;
+  }
+
+  for (const provider of getProviders()) {
+    const exact = getModels(provider).find((model) => model.id === id);
+    if (exact) return exact;
+  }
+
+  return undefined;
 }
 
 function withTimeout(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
@@ -111,14 +141,16 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
 function mapFromModelsList(entry: ModelsListEntry): ProviderModelConfig | undefined {
   const id = entry.id;
   if (!id) return undefined;
+  const catalogModel = findCatalogModel(id, entry.owned_by);
   return {
     id,
-    name: `${id} (no metadata)`,
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
+    name: catalogModel?.name ?? `${id} (no metadata)`,
+    reasoning: catalogModel?.reasoning ?? false,
+    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    input: catalogModel?.input ?? ["text"],
+    cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
   };
 }

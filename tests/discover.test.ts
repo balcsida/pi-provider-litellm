@@ -192,6 +192,34 @@ describe("discoverModels fallback to /v1/models", () => {
     });
   }
 
+  it("uses catalog metadata when LiteLLM returns provider ownership", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [{ id: "gpt-5.5", object: "model", owned_by: "openai" }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("models_list");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      reasoning: true,
+      thinkingLevelMap: { off: null, xhigh: "xhigh" },
+      input: ["text", "image"],
+      contextWindow: 272000,
+      maxTokens: 128000,
+      compat: { supportsStore: false },
+    });
+  });
+
   it("throws when /model/info returns a non-401/403/404 error", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
     await expect(discoverModels("https://litellm.example.com", "sk-test", {})).rejects.toThrow(/500/);

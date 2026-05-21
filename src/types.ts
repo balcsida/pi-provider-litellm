@@ -41,6 +41,7 @@ export interface ModelInfoResponse {
 
 export interface ModelsListEntry {
   id?: string;
+  owned_by?: string;
 }
 
 export interface ModelsListResponse {
