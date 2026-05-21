@@ -1,5 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { discoverModels } from "./discover.js";
 import { resolveCredentials } from "./litellm.js";
 
 export interface ModelCostInfo {

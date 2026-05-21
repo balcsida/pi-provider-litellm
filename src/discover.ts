@@ -1,5 +1,5 @@
-import { getModels, getProviders } from "@earendil-works/pi-ai";
 import type { Api, KnownProvider, Model } from "@earendil-works/pi-ai";
+import { getModels, getProviders } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type {
   DiscoveryOptions,

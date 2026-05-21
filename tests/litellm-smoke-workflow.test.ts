@@ -12,9 +12,13 @@ function readWorkflow(): string {
 describe("LiteLLM smoke workflow", () => {
   it("uses the GitHub Models smoke model as a complete LiteLLM model id", () => {
     const workflow = readWorkflow();
+    const defaultModelExpression =
+      "GH_MODELS_SMOKE_MODEL: $" + "{{ vars.GH_MODELS_SMOKE_MODEL || 'openai/gpt-4o-mini' }}";
+    const smokeModelExpansion = "model: $" + "{GH_MODELS_SMOKE_MODEL}";
+    const prefixedSmokeModelExpansion = "model: openai/$" + "{GH_MODELS_SMOKE_MODEL}";
 
-    expect(workflow).toContain("GH_MODELS_SMOKE_MODEL: ${{ vars.GH_MODELS_SMOKE_MODEL || 'openai/gpt-4o-mini' }}");
-    expect(workflow).toContain("model: ${GH_MODELS_SMOKE_MODEL}");
-    expect(workflow).not.toContain("model: openai/${GH_MODELS_SMOKE_MODEL}");
+    expect(workflow).toContain(defaultModelExpression);
+    expect(workflow).toContain(smokeModelExpansion);
+    expect(workflow).not.toContain(prefixedSmokeModelExpansion);
   });
 });
