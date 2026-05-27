@@ -55,7 +55,7 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.75.4",
+    "@earendil-works/pi-ai": "^0.76.0",
     "@earendil-works/pi-coding-agent": "^0.75.4"
   },
   "overrides": {
@@ -64,7 +64,7 @@
     "protobufjs": "8.2.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.75.4",
+    "@earendil-works/pi-ai": "^0.76.0",
     "@earendil-works/pi-coding-agent": "^0.75.4",
     "@biomejs/biome": "^2.4.15",
     "@types/node": "^25.9.1",
