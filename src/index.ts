@@ -6,7 +6,7 @@ import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
-import { getSessionIdFromFile } from "./litellm.js";
+import { CLI_BASE_URL_FLAG, CLI_HOST_FLAG, getCliBaseUrl, getSessionIdFromFile } from "./litellm.js";
 import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
@@ -41,6 +41,7 @@ async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
 
 async function resolveCredentials(): Promise<ResolvedCredentials> {
   const entry = await readAuthEntry();
+  const cliBase = getCliBaseUrl();
   const envBase = process.env[ENV_BASE_URL]?.trim();
   const envKey = process.env[ENV_API_KEY]?.trim();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
@@ -50,7 +51,7 @@ async function resolveCredentials(): Promise<ResolvedCredentials> {
       : entry?.type === "api_key"
         ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
         : undefined;
-  const rawBase = authBase || envBase;
+  const rawBase = cliBase || authBase || envBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
     apiKey: authKey || envKey || undefined,
@@ -227,6 +228,15 @@ function normalizeThinkTags(message: AssistantMessage): AssistantMessage | undef
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
+  pi.registerFlag(CLI_HOST_FLAG, {
+    description: "LiteLLM proxy host URL (alias for --litellm-base-url)",
+    type: "string",
+  });
+  pi.registerFlag(CLI_BASE_URL_FLAG, {
+    description: "LiteLLM proxy base URL",
+    type: "string",
+  });
+
   const creds = await resolveCredentials();
   const cache = await readCache(getCachePath());
   const fp = creds.apiKey ? fingerprint(creds.apiKey) : undefined;

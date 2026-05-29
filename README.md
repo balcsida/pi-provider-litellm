@@ -12,10 +12,22 @@ pi install npm:pi-provider-litellm
 
 Pi fetches the package from npm and registers it. Add `-l` to install into project settings (`.pi/settings.json`) instead of global.
 
+After installing, you can pass the LiteLLM host when starting pi:
+
+```bash
+pi --litellm-host https://litellm.your-domain.com
+```
+
 To try it without installing (one-off, current run only):
 
 ```bash
 pi -e npm:pi-provider-litellm
+```
+
+With a one-off extension run, pass the host after the extension source:
+
+```bash
+pi -e npm:pi-provider-litellm --litellm-host https://litellm.your-domain.com
 ```
 
 <details>
@@ -50,6 +62,14 @@ export LITELLM_API_KEY="sk-..."
 ```
 
 Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists.
+
+### Option C — CLI host parameter
+
+```bash
+pi --litellm-host https://litellm.your-domain.com
+```
+
+`--litellm-host` supplies the LiteLLM base URL for the current pi run and accepts URLs with or without a trailing `/v1`. `--litellm-base-url` is also supported as an alias. The CLI host parameter takes precedence over saved login base URLs and `LITELLM_BASE_URL`; API keys still come from `/login litellm` or `LITELLM_API_KEY`.
 
 ## Use
 

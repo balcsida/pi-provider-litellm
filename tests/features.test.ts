@@ -17,12 +17,22 @@ type TestCommand = {
   handler: (args: string[], ctx: { ui: { notify: (message: string, type: string) => void } }) => Promise<void> | void;
 };
 
+type TestFlag = {
+  description?: string;
+  type: "boolean" | "string";
+  default?: boolean | string;
+};
+
 type TestPi = {
   providers: Array<{ name: string; config: TestProviderConfig }>;
   commands: Map<string, TestCommand>;
+  flags: Map<string, TestFlag>;
+  flagValues: Map<string, boolean | string>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   registerProvider(name: string, config: TestProviderConfig): void;
   registerCommand(name: string, command: TestCommand): void;
+  registerFlag(name: string, flag: TestFlag): void;
+  getFlag(name: string): boolean | string | undefined;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
@@ -65,12 +75,21 @@ function createPi(): TestPi {
   return {
     providers: [],
     commands: new Map(),
+    flags: new Map(),
+    flagValues: new Map(),
     handlers: new Map(),
     registerProvider(name: string, config: TestProviderConfig) {
       this.providers.push({ name, config });
     },
     registerCommand(name: string, command: TestCommand) {
       this.commands.set(name, command);
+    },
+    registerFlag(name: string, flag: TestFlag) {
+      this.flags.set(name, flag);
+      if (flag.default !== undefined && !this.flagValues.has(name)) this.flagValues.set(name, flag.default);
+    },
+    getFlag(name: string) {
+      return this.flagValues.get(name);
     },
     on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);

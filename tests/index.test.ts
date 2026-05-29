@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const ENV_KEYS = ["LITELLM_BASE_URL", "LITELLM_API_KEY", "LITELLM_DISCOVERY_TIMEOUT_MS", "STORED_LITELLM_KEY"];
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+const ORIGINAL_ARGV = [...process.argv];
 
 type TestProviderConfig = {
   baseUrl?: string;
@@ -21,6 +22,12 @@ type TestProviderConfig = {
 type TestCommand = {
   description: string;
   handler: (args: string[], ctx: { ui: { notify: (message: string, type: string) => void } }) => Promise<void> | void;
+};
+
+type TestFlag = {
+  description?: string;
+  type: "boolean" | "string";
+  default?: boolean | string;
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -73,6 +80,15 @@ function createPi(): TestPi {
     registerCommand(name: string, command: TestCommand) {
       this.commands.set(name, command);
     },
+    flags: new Map(),
+    flagValues: new Map(),
+    registerFlag(name: string, flag: TestFlag) {
+      this.flags.set(name, flag);
+      if (flag.default !== undefined && !this.flagValues.has(name)) this.flagValues.set(name, flag.default);
+    },
+    getFlag(name: string) {
+      return this.flagValues.get(name);
+    },
     on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
     },
@@ -82,9 +98,13 @@ function createPi(): TestPi {
 type TestPi = {
   providers: Array<{ name: string; config: TestProviderConfig }>;
   commands: Map<string, TestCommand>;
+  flags: Map<string, TestFlag>;
+  flagValues: Map<string, boolean | string>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   registerProvider(name: string, config: TestProviderConfig): void;
   registerCommand(name: string, command: TestCommand): void;
+  registerFlag(name: string, flag: TestFlag): void;
+  getFlag(name: string): boolean | string | undefined;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
@@ -94,6 +114,7 @@ afterEach(() => {
     if (original === undefined) process.env[key] = undefined;
     else process.env[key] = original;
   }
+  process.argv = [...ORIGINAL_ARGV];
   vi.restoreAllMocks();
   vi.resetModules();
   vi.unmock("@earendil-works/pi-coding-agent");
@@ -122,6 +143,27 @@ describe("extension startup", () => {
     await extension(createPi());
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-key"]);
+  });
+
+  it("uses the LiteLLM host CLI parameter before LITELLM_BASE_URL", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://env-litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    process.argv = [...ORIGINAL_ARGV, "--litellm-host", " https://cli-litellm.example.com/v1 "];
+    const seenUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      seenUrls.push(String(input));
+      return jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+      });
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(seenUrls).toEqual(["https://cli-litellm.example.com/model/info"]);
+    expect(pi.providers[0]?.config.baseUrl).toBe("https://cli-litellm.example.com/v1");
   });
 
   it("does not fetch on refresh when discovery timeout is zero", async () => {

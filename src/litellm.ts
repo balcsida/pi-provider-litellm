@@ -10,6 +10,8 @@ export const ENV_BASE_URL = "LITELLM_BASE_URL";
 export const ENV_API_KEY = "LITELLM_API_KEY";
 export const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 export const ENV_OFFLINE = "LITELLM_OFFLINE";
+export const CLI_HOST_FLAG = "litellm-host";
+export const CLI_BASE_URL_FLAG = "litellm-base-url";
 export const DEFAULT_TIMEOUT_MS = 5000;
 export const LOGIN_TIMEOUT_MS = 10_000;
 export const CACHE_FILENAME = "litellm-models.json";
@@ -32,8 +34,36 @@ async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
   }
 }
 
+export function getCliFlagValue(name: string, argv = process.argv): string | undefined {
+  const flag = `--${name}`;
+  const prefix = `${flag}=`;
+  let value: string | undefined;
+
+  for (let index = 2; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === "--") break;
+    if (arg.startsWith(prefix)) {
+      value = arg.slice(prefix.length);
+      continue;
+    }
+    if (arg !== flag) continue;
+
+    const next = argv[index + 1];
+    if (next === undefined || next.startsWith("-")) continue;
+    value = next;
+    index++;
+  }
+
+  return value?.trim() || undefined;
+}
+
+export function getCliBaseUrl(): string | undefined {
+  return getCliFlagValue(CLI_HOST_FLAG) ?? getCliFlagValue(CLI_BASE_URL_FLAG);
+}
+
 export async function resolveCredentials(): Promise<ResolvedCredentials> {
   const entry = await readAuthEntry();
+  const cliBase = getCliBaseUrl();
   const envBase = process.env[ENV_BASE_URL]?.trim();
   const envKey = process.env[ENV_API_KEY]?.trim();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
@@ -43,7 +73,7 @@ export async function resolveCredentials(): Promise<ResolvedCredentials> {
       : entry?.type === "api_key"
         ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
         : undefined;
-  const rawBase = authBase || envBase;
+  const rawBase = cliBase || authBase || envBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
     apiKey: authKey || envKey || undefined,
