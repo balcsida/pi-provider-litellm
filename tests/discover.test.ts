@@ -18,6 +18,11 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl("https://x.example.com///")).toBe("https://x.example.com");
   });
 
+  it("defaults bare hosts to https", () => {
+    expect(normalizeBaseUrl("x.example.com")).toBe("https://x.example.com");
+    expect(normalizeBaseUrl("x.example.com/v1")).toBe("https://x.example.com");
+  });
+
   it("strips a single trailing /v1 suffix", () => {
     expect(normalizeBaseUrl("https://x.example.com/v1")).toBe("https://x.example.com");
     expect(normalizeBaseUrl("https://x.example.com/v1/")).toBe("https://x.example.com");

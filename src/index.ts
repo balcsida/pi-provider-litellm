@@ -6,7 +6,13 @@ import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
-import { CLI_BASE_URL_FLAG, CLI_HOST_FLAG, getCliBaseUrl, getSessionIdFromFile } from "./litellm.js";
+import {
+  CLI_BASE_URL_FLAG,
+  CLI_HOST_FLAG,
+  getCliBaseUrl,
+  getConfiguredBaseUrl,
+  getSessionIdFromFile,
+} from "./litellm.js";
 import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
@@ -42,6 +48,7 @@ async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
 async function resolveCredentials(): Promise<ResolvedCredentials> {
   const entry = await readAuthEntry();
   const cliBase = getCliBaseUrl();
+  const configBase = await getConfiguredBaseUrl();
   const envBase = process.env[ENV_BASE_URL]?.trim();
   const envKey = process.env[ENV_API_KEY]?.trim();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
@@ -51,7 +58,7 @@ async function resolveCredentials(): Promise<ResolvedCredentials> {
       : entry?.type === "api_key"
         ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
         : undefined;
-  const rawBase = cliBase || authBase || envBase;
+  const rawBase = cliBase || configBase || authBase || envBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
     apiKey: authKey || envKey || undefined,

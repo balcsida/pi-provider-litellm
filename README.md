@@ -12,10 +12,19 @@ pi install npm:pi-provider-litellm
 
 Pi fetches the package from npm and registers it. Add `-l` to install into project settings (`.pi/settings.json`) instead of global.
 
-After installing, you can pass the LiteLLM host when starting pi:
+Pi's package installer currently only accepts package-manager options such as `-l`; extension-specific install flags are rejected before this package is loaded. To persist the LiteLLM host in Pi config, use the package object form in `~/.pi/agent/settings.json` or `.pi/settings.json`:
 
-```bash
-pi --litellm-host https://litellm.your-domain.com
+```json
+{
+  "packages": [
+    {
+      "source": "npm:pi-provider-litellm",
+      "config": {
+        "litellmHost": "litellm.your-domain.com"
+      }
+    }
+  ]
+}
 ```
 
 To try it without installing (one-off, current run only):
@@ -54,22 +63,41 @@ Inside pi:
 
 You'll be prompted for the base URL and API key. Credentials are persisted to `~/.pi/agent/auth.json`.
 
-### Option B — environment variables
+### Option B — saved package config
+
+Add `config.litellmHost` to this package entry in `~/.pi/agent/settings.json` or `.pi/settings.json`:
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:pi-provider-litellm",
+      "config": {
+        "litellmHost": "litellm.your-domain.com"
+      }
+    }
+  ]
+}
+```
+
+`litellmHost` accepts URLs with or without a scheme and with or without a trailing `/v1`. Bare hosts default to `https://`. `litellmBaseUrl` is also supported as an alias.
+
+### Option C — environment variables
 
 ```bash
 export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_API_KEY="sk-..."
 ```
 
-Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists.
+Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no CLI host, saved package host, or saved login base URL exists.
 
-### Option C — CLI host parameter
+### Option D — runtime CLI host parameter
 
 ```bash
 pi --litellm-host https://litellm.your-domain.com
 ```
 
-`--litellm-host` supplies the LiteLLM base URL for the current pi run and accepts URLs with or without a trailing `/v1`. `--litellm-base-url` is also supported as an alias. The CLI host parameter takes precedence over saved login base URLs and `LITELLM_BASE_URL`; API keys still come from `/login litellm` or `LITELLM_API_KEY`.
+`--litellm-host` supplies the LiteLLM base URL for the current pi run. `--litellm-base-url` is also supported as an alias. The CLI host parameter takes precedence over saved package host config, saved login base URLs, and `LITELLM_BASE_URL`; API keys still come from `/login litellm` or `LITELLM_API_KEY`.
 
 ## Use
 

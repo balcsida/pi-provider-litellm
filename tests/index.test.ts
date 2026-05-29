@@ -166,6 +166,38 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.config.baseUrl).toBe("https://cli-litellm.example.com/v1");
   });
 
+  it("uses the saved package LiteLLM host before LITELLM_BASE_URL", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        packages: [
+          {
+            source: "npm:pi-provider-litellm",
+            config: { litellmHost: " settings-litellm.example.com/v1 " },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://env-litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    const seenUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      seenUrls.push(String(input));
+      return jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+      });
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(seenUrls).toEqual(["https://settings-litellm.example.com/model/info"]);
+    expect(pi.providers[0]?.config.baseUrl).toBe("https://settings-litellm.example.com/v1");
+  });
+
   it("does not fetch on refresh when discovery timeout is zero", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
