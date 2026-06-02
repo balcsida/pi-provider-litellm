@@ -234,3 +234,95 @@ describe("extension startup", () => {
     });
   });
 });
+
+describe("getApiBaseUrl (base URL construction)", () => {
+  it("appends /v1 for root URLs (no path)", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "LITELLM_API_KEY" } }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
+  });
+
+  it("keeps subpath base URLs unchanged (no extra /v1)", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "LITELLM_API_KEY" } }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://host.example.com/custom/path/litellm";
+    process.env.LITELLM_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.baseUrl).toBe("https://host.example.com/custom/path/litellm");
+  });
+
+  it("appends /v1 for root URL with explicit trailing slash", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "LITELLM_API_KEY" } }),
+      "utf8",
+    );
+    // normalizeBaseUrl strips trailing slash, then getApiBaseUrl adds /v1
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com/";
+    process.env.LITELLM_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
+  });
+
+  it("handles invalid URLs gracefully (fallback to /v1)", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "LITELLM_API_KEY" } }),
+      "utf8",
+    );
+    // Set an invalid base URL that passes normalizeBaseUrl but fails URL parsing
+    process.env.LITELLM_BASE_URL = ":::invalid-url:::";
+    process.env.LITELLM_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unreachable"));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // When discovery fails and there's no cache, the default baseUrl is used.
+    // The fallback constructor in registerProvider uses getApiBaseUrl on the
+    // env base URL, which for invalid URLs appends /v1 as safe fallback.
+    // Since discovery failed, models is empty, and registerProvider is still called.
+    expect(pi.providers[0]?.config.baseUrl).toBe(":::invalid-url:::/v1");
+  });
+});
