@@ -134,7 +134,7 @@ async function refreshLiteLLM(credentials: OAuthCredentials): Promise<OAuthCrede
 function modifyLiteLLMModels(models: Model<Api>[], cred: OAuthCredentials): Model<Api>[] {
   const baseUrl = (cred as { baseUrl?: string }).baseUrl;
   if (!baseUrl) return models;
-  return models.map((m) => (m.provider === PROVIDER_NAME ? { ...m, baseUrl: `${baseUrl}/v1` } : m));
+  return models.map((m) => (m.provider === PROVIDER_NAME ? { ...m, baseUrl: getApiBaseUrl(baseUrl) } : m));
 }
 
 function prepareLiteLLMRequestPayload(
@@ -162,6 +162,18 @@ function prepareLiteLLMRequestPayload(
   }
 
   return next;
+}
+
+function getApiBaseUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    if (url.pathname === "/" || url.pathname === "") {
+      return `${baseUrl}/v1`;
+    }
+    return baseUrl;
+  } catch {
+    return `${baseUrl}/v1`;
+  }
 }
 
 function normalizeThinkTags(message: AssistantMessage): AssistantMessage | undefined {
@@ -288,7 +300,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   function registerProvider(baseUrl: string | undefined, models: ProviderModelConfig[]): void {
     pi.registerProvider(PROVIDER_NAME, {
-      baseUrl: baseUrl ? `${baseUrl}/v1` : "https://litellm.example.com/v1",
+      baseUrl: baseUrl ? getApiBaseUrl(baseUrl) : "https://litellm.example.com/v1",
       apiKey: ENV_API_KEY,
       api: "openai-completions",
       models,
