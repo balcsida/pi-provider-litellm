@@ -379,7 +379,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       // resolveConfigValue). So a short-lived/rotating helper token stays fresh. The OAuth hooks
       // remain registered for `/login litellm` users. See the regression test
       // "re-runs the helper command on every request" in tests/index.test.ts.
-      apiKey: getApiKeyHelperCommand() ?? ENV_API_KEY,
+      apiKey: getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`,
       api: "openai-completions",
       models,
       oauth,
