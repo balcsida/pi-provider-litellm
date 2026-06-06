@@ -68,6 +68,16 @@ async function writeHelper(
   return helperPath;
 }
 
+async function writeFailingHelper(agentDir: string): Promise<string> {
+  const helperPath = join(agentDir, "litellm-token-helper.sh");
+  await writeFile(
+    helperPath,
+    `#!/usr/bin/env bash\ncount_file="${join(agentDir, "helper-count")}"\ncount=0\n[ -f "$count_file" ] && count=$(cat "$count_file")\necho $((count + 1)) > "$count_file"\nprintf 'idp offline' >&2\nexit 42\n`,
+    { mode: 0o700 },
+  );
+  return helperPath;
+}
+
 async function readHelperCount(agentDir: string): Promise<number> {
   try {
     return Number(await readFile(join(agentDir, "helper-count"), "utf8"));
@@ -351,6 +361,28 @@ describe("extension startup", () => {
       await extension(pi);
       expect(fetchMock).toHaveBeenCalledTimes(fetches ? 1 : 0);
       expect(await readHelperCount(agentDir)).toBe(helperRuns);
+      expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it("uses cached helper-backed models when forced discovery cannot execute the helper", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeFailingHelper(agentDir);
+    const originalArgv = process.argv;
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.argv = [...process.argv, "--list-models"];
+    await writeModelCache(agentDir, helperPath);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    try {
+      const extension = await loadExtension(agentDir);
+      const pi = createPi();
+      await extension(pi);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await readHelperCount(agentDir)).toBe(1);
       expect(pi.providers[0]?.config.models).toEqual(cachedModels);
     } finally {
       process.argv = originalArgv;

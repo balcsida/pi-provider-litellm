@@ -315,12 +315,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     getDiscoveryTimeoutMs() > 0 &&
     (!cacheValid || isListModelsMode());
 
+  let credentialWarning: string | undefined;
   if (shouldFetch) {
-    creds = await resolveCredentials();
-    fp = creds.apiKeyFingerprint;
+    try {
+      creds = await resolveCredentials();
+      fp = creds.apiKeyFingerprint;
+    } catch (error) {
+      if (!cacheValid || !cache) throw error;
+      credentialWarning = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`LiteLLM: discovery failed (${credentialWarning}); using cached models.\n`);
+      models = cache.models;
+    }
   }
 
-  if (shouldFetch && creds.baseUrl && creds.apiKey && fp) {
+  if (shouldFetch && !credentialWarning && creds.baseUrl && creds.apiKey && fp) {
     const timeoutMs = getDiscoveryTimeoutMs();
     const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
       timeoutMs,
