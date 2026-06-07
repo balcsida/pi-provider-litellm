@@ -55,8 +55,8 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.75.4 <0.77.0",
-    "@earendil-works/pi-coding-agent": ">=0.75.4 <0.77.0"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   },
   "overrides": {
     "basic-ftp": "6.0.1",

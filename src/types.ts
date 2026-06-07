@@ -55,4 +55,5 @@ export type AuthFileEntry =
 export interface ResolvedCredentials {
   baseUrl?: string;
   apiKey?: string;
+  apiKeyFingerprint?: string;
 }

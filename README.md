@@ -61,6 +61,7 @@ Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the 
 
 | Variable | Default | Effect |
 |---|---|---|
+| `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. Registered as a `!command` provider key; Pi re-runs it on every request (the per-request auth path is uncached), so rotating/short-lived tokens stay fresh. |
 | `LITELLM_OFFLINE` | unset | If `1`, skip discovery on this start; use cache only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Discovery fetch timeout in ms; `0` to skip discovery |
 
@@ -117,6 +118,7 @@ If the cache is older than 24 hours, the extension refreshes it in the backgroun
 | "discovered no models" | Proxy returned an empty list — check pi's startup log for the actual response |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 
 ## License
 
