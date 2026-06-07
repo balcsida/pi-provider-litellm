@@ -64,7 +64,7 @@
     "protobufjs": "8.2.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.76.0",
+    "@earendil-works/pi-ai": "^0.78.1",
     "@earendil-works/pi-coding-agent": "^0.76.0",
     "@biomejs/biome": "^2.4.15",
     "@types/node": "^25.9.1",
