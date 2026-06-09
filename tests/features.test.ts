@@ -82,9 +82,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
   vi.unmock("@earendil-works/pi-coding-agent");
-  process.env.LITELLM_BASE_URL = undefined;
-  process.env.LITELLM_API_KEY = undefined;
-  process.env.LITELLM_DISCOVERY_TIMEOUT_MS = undefined;
+  delete process.env.LITELLM_BASE_URL;
+  delete process.env.LITELLM_API_KEY;
+  delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
 });
 
 describe("feature parity", () => {

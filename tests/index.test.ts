@@ -159,7 +159,7 @@ type TestPi = {
 afterEach(() => {
   for (const key of ENV_KEYS) {
     const original = ORIGINAL_ENV.get(key);
-    if (original === undefined) process.env[key] = undefined;
+    if (original === undefined) delete process.env[key];
     else process.env[key] = original;
   }
   vi.restoreAllMocks();
