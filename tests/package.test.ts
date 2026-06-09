@@ -36,8 +36,26 @@ describe("dependency security overrides", () => {
       packages?: Record<string, { version?: string }>;
     };
 
-    expect([undefined, "6.0.1"]).toContain(lockfile.packages?.["node_modules/basic-ftp"]?.version);
-    expect(lockfile.packages?.["node_modules/protobufjs"]?.version).toBe("8.2.1");
-    expect(lockfile.packages?.["node_modules/fast-xml-builder"]?.version).toBe("1.2.0");
+    const copiesOf = (name: string): Record<string, string> =>
+      Object.fromEntries(
+        Object.entries(lockfile.packages ?? {})
+          .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+          .map(([path, pkg]) => [path, pkg.version ?? "missing"]),
+      );
+
+    // basic-ftp left the dependency tree entirely; its override is vestigial.
+    expect(Object.values(copiesOf("basic-ftp")).every((version) => version === "6.0.1")).toBe(true);
+    const fastXmlBuilderCopies = Object.values(copiesOf("fast-xml-builder"));
+    expect(fastXmlBuilderCopies).not.toHaveLength(0);
+    expect(fastXmlBuilderCopies.every((version) => version === "1.2.0")).toBe(true);
+    // pi-coding-agent publishes its own "overrides" field, so npm isolates its
+    // subtree from root overrides (none of plain, @google/genai-scoped, or
+    // pi-coding-agent-scoped overrides reach it; verified with npm 11.16).
+    // Its nested protobufjs copy therefore stays on the latest 7.x until that
+    // is fixed upstream. Any other copy or version drift must fail this test.
+    expect(copiesOf("protobufjs")).toEqual({
+      "node_modules/protobufjs": "8.2.1",
+      "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs": "7.5.9",
+    });
   });
 });
