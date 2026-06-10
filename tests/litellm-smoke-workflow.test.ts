@@ -17,7 +17,6 @@ describe("LiteLLM smoke workflow", () => {
   it("routes smoke completions through VidaiMock instead of real LLM APIs", () => {
     const workflow = readWorkflow();
 
-    expect(workflow).toContain("VIDAIMOCK_VERSION: v0.2.7");
     expect(workflow).toContain("Start VidaiMock");
     expect(workflow).toContain("Wait for VidaiMock");
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
@@ -43,6 +42,14 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).not.toContain("GEMINI_API_KEY");
     expect(workflow).not.toContain("require_vendors");
     expect(workflow).not.toContain("model_name: kimi-vidaimock");
+  });
+
+  it("uses minimal permissions and a pinned, checksum-verified VidaiMock build", () => {
+    const workflow = readWorkflow();
+
+    expect(workflow).toMatch(/permissions:\n {2}contents: read/);
+    expect(workflow).toMatch(/VIDAIMOCK_VERSION: v\d+\.\d+\.\d+$/m);
+    expect(workflow).toMatch(/sha256sum -c "\$\{asset%\.tar\.gz\}\.sha256"/);
   });
 
   it("documents the mocked smoke workflow without provider secrets", () => {
