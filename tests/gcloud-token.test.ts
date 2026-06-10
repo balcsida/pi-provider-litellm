@@ -80,6 +80,33 @@ describe("getGcloudToken", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("does not reuse a cached token after the ADC identity changes", async () => {
+    const firstPath = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "first-client",
+      client_secret: "first-secret",
+      refresh_token: "first-refresh",
+    });
+    const secondPath = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "second-client",
+      client_secret: "second-secret",
+      refresh_token: "second-refresh",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "first-token" }))
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "second-token" }));
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-10T12:00:00.000Z").getTime());
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = firstPath;
+    await expect(getGcloudToken()).resolves.toBe("first-token");
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = secondPath;
+    await expect(getGcloudToken()).resolves.toBe("second-token");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("returns null and warns when no ADC file exists", async () => {
     delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
     delete process.env.HOME;

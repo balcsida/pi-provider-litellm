@@ -42,6 +42,7 @@ export interface ModelInfoResponse {
 export interface HealthModelEntry {
   model?: string;
   model_id?: string;
+  api_base?: string;
 }
 
 export interface HealthResponse {
@@ -65,11 +66,13 @@ export interface ResolvedCredentials {
   baseUrl?: string;
   apiKey?: string;
   apiKeyFingerprint?: string;
+  apiKeyConfig?: string;
 }
 
 export interface LiteLLMMcpTool {
   name: string;
   server_name: string;
+  server_id?: string;
   description: string;
   input_schema: Record<string, unknown>;
 }

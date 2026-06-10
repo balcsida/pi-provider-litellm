@@ -95,6 +95,21 @@ async function writeFailingHelper(agentDir: string): Promise<string> {
   return helperPath;
 }
 
+async function writeAdcFile(agentDir: string, name: string, refreshToken: string): Promise<string> {
+  const adcPath = join(agentDir, `${name}.json`);
+  await writeFile(
+    adcPath,
+    JSON.stringify({
+      type: "authorized_user",
+      client_id: `${name}-client`,
+      client_secret: `${name}-secret`,
+      refresh_token: refreshToken,
+    }),
+    "utf8",
+  );
+  return adcPath;
+}
+
 async function readHelperCount(agentDir: string): Promise<number> {
   try {
     return Number(await readFile(join(agentDir, "helper-count"), "utf8"));
@@ -198,6 +213,85 @@ describe("extension startup", () => {
     await extension(pi);
 
     expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+  });
+
+  it("registers the env key when gcloud ADC auth falls back during discovery", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = join(agentDir, "missing-adc.json");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const seenAuthHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenAuthHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+        return jsonResponse(200, {
+          data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to read ADC file"));
+    expect(seenAuthHeaders).toEqual(["Bearer env-key"]);
+    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+    const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
+      apiKeyFingerprint: string;
+    };
+    expect(cache.apiKeyFingerprint).toBe(fingerprint("env-key"));
+  });
+
+  it("refreshes the model cache when the gcloud ADC identity changes", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
+    const seenModelAuthHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        const body = String(init?.body ?? "");
+        return jsonResponse(200, {
+          access_token: body.includes("refresh_token=second-refresh") ? "second-token" : "first-token",
+        });
+      }
+      if (url.endsWith("/model/info")) {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        seenModelAuthHeaders.push(authorization);
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: authorization === "Bearer second-token" ? "second-model" : "first-model",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "first-adc", "first-refresh");
+    let extension = await loadExtension(agentDir);
+    let pi = createPi();
+    await extension(pi);
+    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["first-model"]);
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "second-adc", "second-refresh");
+    extension = await loadExtension(agentDir);
+    pi = createPi();
+    await extension(pi);
+
+    expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
+    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "second-model",
+    ]);
   });
 
   it('treats literal "undefined" env values as unset', async () => {

@@ -324,6 +324,41 @@ describe("discoverModels fallback to /health", () => {
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
   });
+
+  it("uses healthy endpoint model names when /health entries do not include model ids", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 404 });
+      if (url.endsWith("/v1/models")) return new Response(null, { status: 404 });
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "azure/gpt-35-turbo", api_base: "https://azure.example.com" },
+            { model: "anthropic/claude-3-5-sonnet", api_base: "https://anthropic.example.com" },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(urls).toEqual([
+      "https://litellm.example.com/model/info",
+      "https://litellm.example.com/v1/models",
+      "https://litellm.example.com/health",
+    ]);
+    expect(result.source).toBe("health");
+    expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
+    expect(result.models[1]).toMatchObject({
+      name: "anthropic/claude-3-5-sonnet",
+      contextWindow: 128000,
+      maxTokens: 16384,
+      compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+    });
+  });
 });
 
 describe("discoverModels timeout", () => {

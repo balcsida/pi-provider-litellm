@@ -11,6 +11,7 @@ const ADC_FILENAME = "application_default_credentials.json";
 
 let cachedToken: string | null = null;
 let cachedAt = 0;
+let cachedTokenKey: string | null = null;
 
 interface AuthorizedUserCredentials {
   type: "authorized_user";
@@ -58,12 +59,46 @@ function getAdcPath(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
+function getCredentialsCacheKey(credentials: GoogleCredentials): string | null {
+  if (isAuthorizedUserCredentials(credentials)) {
+    return `${GCLOUD_TOKEN_CACHE_KEY}:authorized_user:${credentials.client_id}:${credentials.refresh_token}`;
+  }
+  return null;
+}
+
 async function readCredentials(path: string): Promise<GoogleCredentials | null> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as GoogleCredentials;
   } catch {
     return null;
   }
+}
+
+export async function getGcloudTokenCacheKey(): Promise<string | null> {
+  const adcPath = getAdcPath();
+  if (!adcPath) {
+    console.warn(
+      "LiteLLM gcloud auth: No Google ADC file found. Set GOOGLE_APPLICATION_CREDENTIALS or run `gcloud auth application-default login`.",
+    );
+    return null;
+  }
+
+  const credentials = await readCredentials(adcPath);
+  if (!credentials) {
+    console.warn(`LiteLLM gcloud auth: Failed to read ADC file: ${adcPath}`);
+    return null;
+  }
+
+  const cacheKey = getCredentialsCacheKey(credentials);
+  if (cacheKey) return cacheKey;
+
+  if (credentials.type === "service_account") {
+    console.warn("LiteLLM gcloud auth: Service account credentials are not supported; use authorized_user ADC.");
+    return null;
+  }
+
+  console.warn(`LiteLLM gcloud auth: Unknown credential type: ${credentials.type ?? "missing"}`);
+  return null;
 }
 
 async function exchangeRefreshToken(credentials: AuthorizedUserCredentials): Promise<string | null> {
@@ -98,8 +133,6 @@ async function exchangeRefreshToken(credentials: AuthorizedUserCredentials): Pro
 }
 
 export async function getGcloudToken(): Promise<string | null> {
-  if (cachedToken && Date.now() - cachedAt < CACHE_TTL_MS) return cachedToken;
-
   const adcPath = getAdcPath();
   if (!adcPath) {
     console.warn(
@@ -114,10 +147,15 @@ export async function getGcloudToken(): Promise<string | null> {
     return null;
   }
 
+  const cacheKey = getCredentialsCacheKey(credentials);
+  if (cacheKey && cachedToken && cachedTokenKey === cacheKey && Date.now() - cachedAt < CACHE_TTL_MS)
+    return cachedToken;
+
   if (isAuthorizedUserCredentials(credentials)) {
     const token = await exchangeRefreshToken(credentials);
     if (token) {
       cachedToken = token;
+      cachedTokenKey = cacheKey;
       cachedAt = Date.now();
     }
     return token;
@@ -134,5 +172,6 @@ export async function getGcloudToken(): Promise<string | null> {
 
 export function resetGcloudTokenCache(): void {
   cachedToken = null;
+  cachedTokenKey = null;
   cachedAt = 0;
 }

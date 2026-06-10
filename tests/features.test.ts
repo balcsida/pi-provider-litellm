@@ -99,8 +99,20 @@ afterEach(() => {
 describe("feature parity", () => {
   it("registers a command-backed gcloud token provider key when ADC auth is enabled", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const adcPath = join(agentDir, "adc.json");
+    await writeFile(
+      adcPath,
+      JSON.stringify({
+        type: "authorized_user",
+        client_id: "client-id",
+        client_secret: "client-secret",
+        refresh_token: "refresh-token",
+      }),
+      "utf8",
+    );
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
     const extension = await loadExtension(agentDir);
@@ -119,18 +131,20 @@ describe("feature parity", () => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
       if (url.endsWith("/mcp-rest/tools/list")) {
-        return jsonResponse(200, [
-          {
-            name: "search",
-            server_name: "brave",
-            description: "Search the web",
-            input_schema: {
-              type: "object",
-              properties: { query: { type: "string" } },
-              required: ["query"],
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: {
+                type: "object",
+                properties: { query: { type: "string" } },
+                required: ["query"],
+              },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
             },
-          },
-        ]);
+          ],
+        });
       }
       throw new Error(`unexpected URL: ${url}`);
     });

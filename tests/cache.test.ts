@@ -83,6 +83,20 @@ describe("readCache", () => {
     await writeFile(path, JSON.stringify(cache), "utf8");
     expect(await readCache(path)).toEqual(cache);
   });
+
+  it("accepts cache files populated from the health discovery fallback", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-"));
+    const path = join(dir, "health.json");
+    const cache = {
+      baseUrl: "https://x.example.com",
+      apiKeyFingerprint: fingerprint("k"),
+      fetchedAt: 12345,
+      source: "health" as const,
+      models: [],
+    };
+    await writeFile(path, JSON.stringify(cache), "utf8");
+    expect(await readCache(path)).toEqual(cache);
+  });
 });
 
 describe("writeCache", () => {

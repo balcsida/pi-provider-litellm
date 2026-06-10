@@ -16,10 +16,49 @@ afterEach(() => {
 
 describe("discoverMcpTools", () => {
   it("returns tools from LiteLLM MCP REST discovery", async () => {
+    const inputSchema = {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "web-search",
+            description: "Search the web",
+            inputSchema,
+            mcp_info: { server_name: "Brave API", server_id: "brave-api" },
+          },
+        ],
+      }),
+    );
+
+    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).resolves.toEqual([
+      {
+        name: "web-search",
+        server_name: "Brave API",
+        server_id: "brave-api",
+        description: "Search the web",
+        input_schema: inputSchema,
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://litellm.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk-test" }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("keeps compatibility with older array-shaped discovery responses", async () => {
     const tools: LiteLLMMcpTool[] = [
       {
         name: "web-search",
         server_name: "Brave API",
+        server_id: "Brave API",
         description: "Search the web",
         input_schema: {
           type: "object",
@@ -63,7 +102,7 @@ describe("executeMcpTool", () => {
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ Authorization: "Bearer sk-test" }),
-        body: JSON.stringify({ server: "brave", tool: "search", args: { query: "pi" } }),
+        body: JSON.stringify({ server_id: "brave", name: "search", arguments: { query: "pi" } }),
       }),
     );
   });
@@ -76,6 +115,7 @@ describe("createMcpToolDefinitions", () => {
         {
           name: "web-search",
           server_name: "Brave API",
+          server_id: "brave-api",
           description: "Search the web",
           input_schema: {
             type: "object",
@@ -125,18 +165,20 @@ describe("createMcpToolDefinitions", () => {
   it("uses a fresh token when a generated tool executes", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
-        jsonResponse(200, [
-          {
-            name: "search",
-            server_name: "brave",
-            description: "Search",
-            input_schema: {
-              type: "object",
-              properties: { query: { type: "string" } },
-              required: ["query"],
+        jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search",
+              inputSchema: {
+                type: "object",
+                properties: { query: { type: "string" } },
+                required: ["query"],
+              },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
             },
-          },
-        ] satisfies LiteLLMMcpTool[]),
+          ],
+        }),
       )
       .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
     const getApiKey = vi.fn().mockResolvedValueOnce("discovery-token").mockResolvedValueOnce("execution-token");
@@ -155,6 +197,7 @@ describe("createMcpToolDefinitions", () => {
     expect(getApiKey).toHaveBeenCalledTimes(2);
     expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]).toMatchObject({
       headers: expect.objectContaining({ Authorization: "Bearer execution-token" }),
+      body: JSON.stringify({ server_id: "brave-api", name: "search", arguments: { query: "pi" } }),
     });
   });
 });

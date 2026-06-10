@@ -8,8 +8,8 @@ import { fingerprint, readCache, writeCache } from "./cache.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import {
-  GCLOUD_TOKEN_CACHE_KEY,
   getGcloudToken,
+  getGcloudTokenCacheKey,
   getGcloudTokenCommand,
   isGcloudTokenAuthEnabled,
 } from "./gcloud-token.js";
@@ -104,35 +104,46 @@ async function resolveCredentials({ executeHelpers = true } = {}): Promise<Resol
   const envHelperCommand = getApiKeyHelperCommand();
   const useGcloudToken = isGcloudTokenAuthEnabled();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
+  const gcloudCacheKey = useGcloudToken && !entry ? ((await getGcloudTokenCacheKey()) ?? undefined) : undefined;
   const authKey =
     entry?.type === "oauth"
       ? (executeHelpers ? resolveOAuthApiKey(entry) : entry.access).trim()
       : entry?.type === "api_key"
         ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
         : undefined;
-  const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
-  const apiKey =
-    authKey ||
-    gcloudKey ||
-    (executeHelpers && envHelperCommand ? executeApiKeyCommand(envHelperCommand) : undefined) ||
-    envKey;
-  const apiKeyFingerprint =
-    entry?.type === "oauth" && entry.refresh.startsWith("!")
-      ? fingerprint(entry.refresh)
-      : authKey
-        ? fingerprint(authKey)
-        : useGcloudToken
-          ? fingerprint(GCLOUD_TOKEN_CACHE_KEY)
-          : envHelperCommand
-            ? fingerprint(envHelperCommand)
-            : envKey
-              ? fingerprint(envKey)
-              : undefined;
+  const gcloudKey = executeHelpers && gcloudCacheKey ? (await getGcloudToken())?.trim() : undefined;
+  const helperKey =
+    !authKey && !gcloudKey && executeHelpers && envHelperCommand ? executeApiKeyCommand(envHelperCommand) : undefined;
+  const apiKey = authKey || gcloudKey || helperKey || envKey;
+
+  let apiKeyFingerprint: string | undefined;
+  let apiKeyConfig: string | undefined;
+  if (entry?.type === "oauth" && entry.refresh.startsWith("!")) {
+    apiKeyFingerprint = fingerprint(entry.refresh);
+  } else if (authKey) {
+    apiKeyFingerprint = fingerprint(authKey);
+  } else if (gcloudKey) {
+    apiKeyFingerprint = fingerprint(gcloudCacheKey ?? gcloudKey);
+    apiKeyConfig = getGcloudTokenCommand();
+  } else if (!executeHelpers && gcloudCacheKey) {
+    apiKeyFingerprint = fingerprint(gcloudCacheKey);
+    apiKeyConfig = getGcloudTokenCommand();
+  } else if (helperKey && envHelperCommand) {
+    apiKeyFingerprint = fingerprint(envHelperCommand);
+    apiKeyConfig = envHelperCommand;
+  } else if (!executeHelpers && envHelperCommand) {
+    apiKeyFingerprint = fingerprint(envHelperCommand);
+    apiKeyConfig = envHelperCommand;
+  } else if (envKey) {
+    apiKeyFingerprint = fingerprint(envKey);
+    apiKeyConfig = `$${ENV_API_KEY}`;
+  }
   const rawBase = authBase || envBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
     apiKey: apiKey || undefined,
     apiKeyFingerprint,
+    apiKeyConfig,
   };
 }
 
@@ -150,11 +161,6 @@ function isOffline(): boolean {
 
 function isListModelsMode(): boolean {
   return process.argv.includes("--list-models");
-}
-
-function getProviderApiKeyConfig(): string {
-  if (isGcloudTokenAuthEnabled()) return getGcloudTokenCommand();
-  return getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`;
 }
 
 async function discoverWithFallback(
@@ -395,7 +401,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     modifyModels: modifyLiteLLMModels,
   };
 
-  function registerProvider(baseUrl: string | undefined, models: ProviderModelConfig[]): void {
+  function registerProvider(
+    baseUrl: string | undefined,
+    models: ProviderModelConfig[],
+    apiKeyConfig = creds.apiKeyConfig ?? getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`,
+  ): void {
     pi.registerProvider(PROVIDER_NAME, {
       baseUrl: baseUrl ? `${baseUrl}/v1` : "https://litellm.example.com/v1",
       // When LITELLM_API_KEY_HELPER is set we register the helper as a `!command` provider key.
@@ -405,7 +415,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       // resolveConfigValue). So a short-lived/rotating helper token stays fresh. The OAuth hooks
       // remain registered for `/login litellm` users. See the regression test
       // "re-runs the helper command on every request" in tests/index.test.ts.
-      apiKey: getProviderApiKeyConfig(),
+      apiKey: apiKeyConfig,
       api: "openai-completions",
       models,
       oauth,
@@ -481,7 +491,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       source: result.source,
       models: result.models,
     });
-    registerProvider(fresh.baseUrl, result.models);
+    registerProvider(fresh.baseUrl, result.models, fresh.apiKeyConfig);
     updateCosts(result.models);
     cacheFetchedAt = now;
     await registerMcpTools(fresh.baseUrl, fresh.apiKey);

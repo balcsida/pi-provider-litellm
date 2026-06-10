@@ -252,6 +252,23 @@ function mapFromHealthModelInfo(
   };
 }
 
+function mapFromHealthEndpoint(entry: { model?: string }): ProviderModelConfig | undefined {
+  const id = entry.model;
+  if (!id) return undefined;
+  const catalogModel = findCatalogModel(id);
+  return {
+    id,
+    name: catalogModel?.name ?? id,
+    reasoning: catalogModel?.reasoning ?? false,
+    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    input: catalogModel?.input ?? ["text"],
+    cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    compat: buildCompat(id),
+  };
+}
+
 function mapFromModelsList(
   entry: ModelsListEntry,
   modelsDev: ModelsDevResponse | undefined,
@@ -280,19 +297,18 @@ async function discoverFromHealth(
 ): Promise<ProviderModelConfig[]> {
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
-  const endpoints = (healthResult.data.healthy_endpoints ?? []).filter(
-    (entry) => typeof entry.model_id === "string" && entry.model_id,
-  );
+  const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
   const models = await Promise.all(
     endpoints.map(async (endpoint) => {
+      if (!endpoint.model_id) return mapFromHealthEndpoint(endpoint);
       const infoResult = await fetchJson<ModelInfoResponse>(
-        `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id!)}`,
+        `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id)}`,
         apiKey,
         options,
       );
-      if (!infoResult.ok) return undefined;
+      if (!infoResult.ok) return mapFromHealthEndpoint(endpoint);
       const entry = infoResult.data.data?.[0];
-      return entry ? mapFromHealthModelInfo(entry, endpoint.model) : undefined;
+      return entry ? mapFromHealthModelInfo(entry, endpoint.model) : mapFromHealthEndpoint(endpoint);
     }),
   );
   return models.filter((model): model is ProviderModelConfig => model !== undefined);
