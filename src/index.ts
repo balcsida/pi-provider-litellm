@@ -102,7 +102,11 @@ function openInBrowser(url: string): void {
     .unref();
 }
 
-async function generateVirtualKey(baseUrl: string, userToken: string, signal?: AbortSignal): Promise<string> {
+async function generateVirtualKey(
+  baseUrl: string,
+  userToken: string,
+  signal?: AbortSignal,
+): Promise<{ key: string; expiresAt?: number }> {
   const response = await fetch(`${baseUrl}/key/generate`, {
     method: "POST",
     headers: {
@@ -116,9 +120,10 @@ async function generateVirtualKey(baseUrl: string, userToken: string, signal?: A
     const text = await response.text().catch(() => "");
     throw new Error(`Virtual key generation failed (${response.status}): ${text}`);
   }
-  const data = (await response.json()) as { key?: unknown };
+  const data = (await response.json()) as { key?: unknown; expires?: unknown };
   if (typeof data.key !== "string" || !data.key) throw new Error("No key in response from /key/generate");
-  return data.key;
+  const expiresMs = typeof data.expires === "string" ? Date.parse(data.expires) : Number.NaN;
+  return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
 }
 
 function getLiteLLMApiKey(credentials: OAuthCredentials): string {
@@ -256,9 +261,13 @@ async function loginLiteLLM(
     if (wantVirtualKey !== "n") {
       try {
         callbacks.onProgress?.("Generating virtual key...");
-        apiKey = await generateVirtualKey(baseUrl, rawToken, callbacks.signal);
+        const generated = await generateVirtualKey(baseUrl, rawToken, callbacks.signal);
+        apiKey = generated.key;
         refresh = "";
-        expires = PERMANENT_TOKEN_EXPIRES_AT;
+        expires =
+          generated.expiresAt === undefined
+            ? PERMANENT_TOKEN_EXPIRES_AT
+            : Math.max(Date.now(), generated.expiresAt - TOKEN_REFRESH_LEAD_MS);
         callbacks.onProgress?.("Virtual key generated and will be used for API calls.");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

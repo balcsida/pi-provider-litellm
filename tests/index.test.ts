@@ -824,6 +824,37 @@ describe("extension startup", () => {
     expect(seenAuthorizations[0]).toBe(`Bearer ${jwt}`);
   });
 
+  it("enterprise SSO login honors the expiry returned with a generated virtual key", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
+    const keyExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/key/generate"))
+        return jsonResponse(200, { key: "sk-expiring", expires: keyExpiresAt.toISOString() });
+      if (url.endsWith("/model/info"))
+        return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const credential = await pi.providers[0]?.config.oauth?.login({
+      onPrompt: async (options) => {
+        if (options.placeholder) return "https://litellm.example.com";
+        if (options.message.includes("Select login method")) return "2";
+        if (options.message.includes("SSO token")) return jwt;
+        return "y";
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(credential).toMatchObject({ access: "sk-expiring", refresh: "" });
+    expect(credential?.expires).toBe(keyExpiresAt.getTime() - 5 * 60 * 1000);
+  });
+
   it("enterprise SSO login uses JWT directly when user declines virtual key generation", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";

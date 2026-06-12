@@ -55,7 +55,7 @@ If your LiteLLM proxy requires SSO/OAuth authentication (enterprise deployments)
 5. Copy your token from the LiteLLM UI and paste it at the prompt (copying a full `Bearer ...` header value is fine — the prefix is stripped automatically)
 6. When prompted to generate a virtual key, press Enter to accept (recommended) or enter `n` to use the JWT directly
 
-When you generate a virtual key, the resulting `sk-...` key is stored as your credential and used for all API requests. Virtual keys are stable and long-lived — they do not expire unless revoked in LiteLLM.
+When you generate a virtual key, the resulting `sk-...` key is stored as your credential and used for all API requests. If the proxy's key policy attaches an expiry to the generated key, Pi will prompt you to re-authenticate when it nears expiry; otherwise the key is treated as permanent until revoked in LiteLLM.
 
 When using a JWT directly, the extension reads its `exp` claim and Pi will prompt you to re-authenticate when the token nears expiry. Run `/login litellm` again to refresh.
 
