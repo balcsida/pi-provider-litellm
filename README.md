@@ -168,7 +168,7 @@ If the cache is older than 24 hours, the extension refreshes it in the backgroun
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
-| Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may not be enterprise edition, or your user account lacks key-generation permission; the JWT is used directly as a fallback |
+| Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
 | MCP tools not showing | Verify the proxy exposes `/mcp-rest/tools/list` and run `/litellm-refresh` after fixing the proxy |
 | Skills not affecting prompts | Verify the proxy exposes `/v1/skills` and returns enabled skills |

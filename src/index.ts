@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext, ProviderModelConfig } from "@earen
 import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
+import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent, withTimeout } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -107,23 +107,28 @@ async function generateVirtualKey(
   userToken: string,
   signal?: AbortSignal,
 ): Promise<{ key: string; expiresAt?: number }> {
-  const response = await fetch(`${baseUrl}/key/generate`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${userToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({}),
-    signal,
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Virtual key generation failed (${response.status}): ${text}`);
+  const { signal: boundedSignal, cancel } = withTimeout(LOGIN_TIMEOUT_MS, signal);
+  try {
+    const response = await fetch(`${baseUrl}/key/generate`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${userToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+      signal: boundedSignal,
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Virtual key generation failed (${response.status}): ${text}`);
+    }
+    const data = (await response.json()) as { key?: unknown; expires?: unknown };
+    if (typeof data.key !== "string" || !data.key) throw new Error("No key in response from /key/generate");
+    const expiresMs = typeof data.expires === "string" ? Date.parse(data.expires) : Number.NaN;
+    return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
+  } finally {
+    cancel();
   }
-  const data = (await response.json()) as { key?: unknown; expires?: unknown };
-  if (typeof data.key !== "string" || !data.key) throw new Error("No key in response from /key/generate");
-  const expiresMs = typeof data.expires === "string" ? Date.parse(data.expires) : Number.NaN;
-  return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
 }
 
 function getLiteLLMApiKey(credentials: OAuthCredentials): string {

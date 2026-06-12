@@ -122,7 +122,7 @@ function findModelsDevModel(
   return catalog?.[provider]?.models?.[modelId];
 }
 
-function withTimeout(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
+export function withTimeout(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal?.reason);
   if (signal) {
