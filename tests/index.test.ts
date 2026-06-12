@@ -769,7 +769,7 @@ describe("extension startup", () => {
 
     expect(authInfos).toEqual([
       {
-        url: "https://litellm.example.com/login",
+        url: "https://litellm.example.com/sso/key/generate",
         instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
       },
     ]);

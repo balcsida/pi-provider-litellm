@@ -238,7 +238,7 @@ async function loginLiteLLM(
 
   if (method === "2") {
     callbacks.onAuth?.({
-      url: `${baseUrl}/login`,
+      url: `${baseUrl}/sso/key/generate`,
       instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
     });
     const rawToken = (await callbacks.onPrompt({ message: "Paste your SSO token from the LiteLLM UI:" }))

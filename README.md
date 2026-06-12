@@ -51,7 +51,7 @@ If your LiteLLM proxy requires SSO/OAuth authentication (enterprise deployments)
 1. Run `/login litellm` inside pi
 2. Enter the proxy URL
 3. At the login method prompt, enter `2` for SSO / Enterprise JWT
-4. Your default browser opens the LiteLLM login page (e.g. `https://litellm.your-domain.com/login`) automatically — the URL is also displayed in case it can't be opened. Authenticate via SSO
+4. Your default browser opens the LiteLLM SSO login URL (e.g. `https://litellm.your-domain.com/sso/key/generate`) automatically — the URL is also displayed in case it can't be opened. Authenticate via SSO
 5. Copy your token from the LiteLLM UI and paste it at the prompt (copying a full `Bearer ...` header value is fine — the prefix is stripped automatically)
 6. When prompted to generate a virtual key, press Enter to accept (recommended) or enter `n` to use the JWT directly
 
