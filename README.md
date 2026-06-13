@@ -44,6 +44,21 @@ You can also run `/login`, select `Use a subscription`, then select `LiteLLM`.
 
 You'll be prompted for the base URL and API key. Credentials are persisted to `~/.pi/agent/auth.json`.
 
+#### Enterprise SSO login
+
+If your LiteLLM proxy requires SSO/OAuth authentication (enterprise deployments), you can authenticate via a browser SSO flow and optionally pair the resulting JWT with a stable virtual key:
+
+1. Run `/login litellm` inside pi
+2. Enter the proxy URL
+3. At the login method prompt, enter `2` for SSO / Enterprise JWT
+4. Your default browser opens the LiteLLM SSO login URL (e.g. `https://litellm.your-domain.com/sso/key/generate`) automatically — the URL is also displayed in case it can't be opened. Authenticate via SSO
+5. Copy your token from the LiteLLM UI and paste it at the prompt (copying a full `Bearer ...` header value is fine — the prefix is stripped automatically)
+6. When prompted to generate a virtual key, press Enter to accept (recommended) or enter `n` to use the JWT directly
+
+When you generate a virtual key, the resulting `sk-...` key is stored as your credential and used for all API requests. If the proxy's key policy attaches an expiry to the generated key, Pi will prompt you to re-authenticate when it nears expiry; otherwise the key is treated as permanent until revoked in LiteLLM.
+
+When using a JWT directly, the extension reads its `exp` claim and Pi will prompt you to re-authenticate when the token nears expiry. Run `/login litellm` again to refresh.
+
 ### Option B — environment variables
 
 ```bash
@@ -153,6 +168,8 @@ If the cache is older than 24 hours, the extension refreshes it in the backgroun
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
+| Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
+| Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
 | MCP tools not showing | Verify the proxy exposes `/mcp-rest/tools/list` and run `/litellm-refresh` after fixing the proxy |
 | Skills not affecting prompts | Verify the proxy exposes `/v1/skills` and returns enabled skills |
 
