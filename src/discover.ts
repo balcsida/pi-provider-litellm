@@ -120,6 +120,26 @@ function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?:
   return { provider: toKnownProvider(ownedBy), modelId: id };
 }
 
+// Resolve the catalog model for a /model/info entry. With LiteLLM aliases,
+// model_name may be a public alias (e.g. "ds-pro") while the real catalog key
+// is carried in litellm_params.model or model_info.key (e.g.
+// "deepseek/deepseek-v4-pro"). Match the alias first, then fall back to the
+// underlying key so thinkingLevelMap (xhigh etc.) is still carried.
+function findCatalogModelForInfo(entry: ModelInfoEntry): Model<Api> | undefined {
+  const info = entry.model_info ?? {};
+  const id = entry.model_name;
+  if (id) {
+    const direct = findCatalogModel(id, info.litellm_provider);
+    if (direct) return direct;
+  }
+  const underlyingKey = entry.litellm_params?.model ?? info.key;
+  if (underlyingKey && underlyingKey !== id) {
+    const { provider, modelId } = getFallbackProviderAndModel(underlyingKey, info.litellm_provider);
+    return findCatalogModel(modelId, provider);
+  }
+  return undefined;
+}
+
 function findModelsDevModel(
   catalog: ModelsDevResponse | undefined,
   id: string,
@@ -219,10 +239,10 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isSelectableMode(info.mode)) return undefined;
-  // Borrow the thinking-level map from the catalog when the model id is known
+  // Borrow the thinking-level map from the catalog when the model is known
   // (e.g. deepseek-v4-pro), so per-model levels like "xhigh" stay available.
   // The proxy's /model/info does not carry this mapping.
-  const catalogModel = findCatalogModel(id, info.litellm_provider);
+  const catalogModel = findCatalogModelForInfo(entry);
   return {
     id,
     name: id,

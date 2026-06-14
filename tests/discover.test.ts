@@ -225,6 +225,40 @@ describe("discoverModels via /model/info", () => {
     // catalog entry for deepseek-v4-pro maps xhigh -> "max"
     expect(model?.thinkingLevelMap?.xhigh).toBe("max");
   });
+
+  it("resolves thinkingLevelMap via the underlying key when model_name is an alias", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            // public alias "ds-pro"; real catalog key in litellm_params.model
+            {
+              model_name: "ds-pro",
+              litellm_params: { model: "deepseek/deepseek-v4-pro" },
+              model_info: { mode: "chat", supports_reasoning: true, litellm_provider: "deepseek" },
+            },
+            // same, but the key is carried in model_info.key instead
+            {
+              model_name: "ds-pro-2",
+              model_info: {
+                mode: "chat",
+                supports_reasoning: true,
+                litellm_provider: "deepseek",
+                key: "deepseek/deepseek-v4-pro",
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.find((m) => m.id === "ds-pro")?.thinkingLevelMap?.xhigh).toBe("max");
+    expect(result.models.find((m) => m.id === "ds-pro-2")?.thinkingLevelMap?.xhigh).toBe("max");
+  });
 });
 
 describe("discoverModels fallback to /v1/models", () => {

@@ -22,6 +22,9 @@ export interface DiscoveryOptions {
 
 export interface ModelInfoEntry {
   model_name?: string;
+  litellm_params?: {
+    model?: string;
+  };
   model_info?: {
     mode?: string;
     input_cost_per_token?: number;
@@ -33,6 +36,7 @@ export interface ModelInfoEntry {
     supports_reasoning?: boolean;
     supports_vision?: boolean;
     litellm_provider?: string;
+    key?: string;
   };
 }
 
