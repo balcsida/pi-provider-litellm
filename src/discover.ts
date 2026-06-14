@@ -14,6 +14,14 @@ import type {
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
+// LiteLLM exposes Responses-API models (e.g. ChatGPT-subscription routes) with
+// mode "responses". They are still callable via /chat/completions through the
+// proxy, so treat them as selectable alongside "chat". Other modes (embedding,
+// image_generation, ...) remain filtered out.
+const SELECTABLE_MODES = new Set(["chat", "responses"]);
+function isSelectableMode(mode: string | undefined): boolean {
+  return !mode || SELECTABLE_MODES.has(mode);
+}
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
 let modelsDevCatalog: ModelsDevResponse | undefined;
@@ -210,7 +218,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
   const id = entry.model_name;
   if (!id) return undefined;
   const info = entry.model_info ?? {};
-  if (info.mode && info.mode !== "chat") return undefined;
+  if (!isSelectableMode(info.mode)) return undefined;
   return {
     id,
     name: id,
@@ -234,7 +242,7 @@ function mapFromHealthModelInfo(
 ): ProviderModelConfig | undefined {
   const model = mapFromModelInfo(entry);
   if (model || !fallbackId) return model;
-  if (entry.model_info?.mode && entry.model_info.mode !== "chat") return undefined;
+  if (!isSelectableMode(entry.model_info?.mode)) return undefined;
   return {
     id: fallbackId,
     name: fallbackId,

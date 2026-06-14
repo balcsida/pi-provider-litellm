@@ -180,6 +180,27 @@ describe("discoverModels via /model/info", () => {
       compat: { supportsStore: false },
     });
   });
+
+  it("keeps responses-mode models (e.g. ChatGPT subscription) and drops other non-chat modes", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            { model_name: "chatgpt-5.5", model_info: { mode: "responses", supports_reasoning: true } },
+            { model_name: "openai/text-embedding-3-large", model_info: { mode: "embedding" } },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("model_info");
+    expect(result.models.map((m) => m.id)).toEqual(["chatgpt-5.5"]);
+    expect(result.models[0]).toMatchObject({ id: "chatgpt-5.5", reasoning: true });
+  });
 });
 
 describe("discoverModels fallback to /v1/models", () => {
