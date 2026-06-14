@@ -262,6 +262,30 @@ describe("discoverModels via /model/info", () => {
     expect(result.models.find((m) => m.id === "ds-pro")?.thinkingLevelMap?.xhigh).toBe("max");
     expect(result.models.find((m) => m.id === "ds-pro-2")?.thinkingLevelMap?.xhigh).toBe("max");
   });
+
+  it("strips the LiteLLM bridge segment (responses/) to match the catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "gpt5",
+              litellm_params: { model: "openai/responses/gpt-5.5" },
+              model_info: { mode: "responses", supports_reasoning: true, litellm_provider: "openai" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // catalog entry for gpt-5.5 carries a thinkingLevelMap; without stripping
+    // "responses/" the lookup misses and the map is undefined.
+    expect(result.models.find((m) => m.id === "gpt5")?.thinkingLevelMap?.xhigh).toBe("xhigh");
+  });
 });
 
 describe("discoverModels fallback to /v1/models", () => {

@@ -120,6 +120,15 @@ function getFallbackProviderAndModel(id: string, ownedBy?: string): { provider?:
   return { provider: toKnownProvider(ownedBy), modelId: id };
 }
 
+// LiteLLM bridge routes prefix the model id with a transport segment (e.g.
+// "responses/gpt-5.5"). Drop a leading known bridge segment so the bare
+// catalog id can match.
+const BRIDGE_SEGMENTS = new Set(["responses"]);
+function stripBridgeSegment(modelId: string): string {
+  const [first, ...rest] = modelId.split("/");
+  return rest.length > 0 && BRIDGE_SEGMENTS.has(first) ? rest.join("/") : modelId;
+}
+
 // Resolve the catalog model for a /model/info entry. With LiteLLM aliases,
 // model_name may be a public alias (e.g. "ds-pro") while the real catalog key
 // is carried in litellm_params.model or model_info.key (e.g.
@@ -135,7 +144,13 @@ function findCatalogModelForInfo(entry: ModelInfoEntry): Model<Api> | undefined 
   const underlyingKey = entry.litellm_params?.model ?? info.key;
   if (underlyingKey && underlyingKey !== id) {
     const { provider, modelId } = getFallbackProviderAndModel(underlyingKey, info.litellm_provider);
-    return findCatalogModel(modelId, provider);
+    const viaKey = findCatalogModel(modelId, provider);
+    if (viaKey) return viaKey;
+    // LiteLLM bridge routes insert a transport segment between provider and
+    // model (e.g. "openai/responses/gpt-5.5" -> modelId "responses/gpt-5.5").
+    // Strip it so the catalog id ("gpt-5.5") matches.
+    const stripped = stripBridgeSegment(modelId);
+    if (stripped !== modelId) return findCatalogModel(stripped, provider);
   }
   return undefined;
 }
