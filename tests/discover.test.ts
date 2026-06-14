@@ -201,6 +201,30 @@ describe("discoverModels via /model/info", () => {
     expect(result.models.map((m) => m.id)).toEqual(["chatgpt-5.5"]);
     expect(result.models[0]).toMatchObject({ id: "chatgpt-5.5", reasoning: true });
   });
+
+  it("borrows thinkingLevelMap from the catalog for known model ids (keeps xhigh etc.)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "deepseek-v4-pro",
+              model_info: { mode: "chat", supports_reasoning: true, litellm_provider: "deepseek" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("model_info");
+    const model = result.models.find((m) => m.id === "deepseek-v4-pro");
+    // catalog entry for deepseek-v4-pro maps xhigh -> "max"
+    expect(model?.thinkingLevelMap?.xhigh).toBe("max");
+  });
 });
 
 describe("discoverModels fallback to /v1/models", () => {

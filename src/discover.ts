@@ -219,10 +219,15 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isSelectableMode(info.mode)) return undefined;
+  // Borrow the thinking-level map from the catalog when the model id is known
+  // (e.g. deepseek-v4-pro), so per-model levels like "xhigh" stay available.
+  // The proxy's /model/info does not carry this mapping.
+  const catalogModel = findCatalogModel(id, info.litellm_provider);
   return {
     id,
     name: id,
     reasoning: info.supports_reasoning ?? false,
+    thinkingLevelMap: catalogModel?.thinkingLevelMap,
     input: info.supports_vision ? ["text", "image"] : ["text"],
     cost: {
       input: (info.input_cost_per_token ?? 0) * 1_000_000,

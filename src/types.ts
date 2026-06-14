@@ -32,6 +32,7 @@ export interface ModelInfoEntry {
     max_output_tokens?: number;
     supports_reasoning?: boolean;
     supports_vision?: boolean;
+    litellm_provider?: string;
   };
 }
 
