@@ -224,6 +224,9 @@ describe("discoverModels via /model/info", () => {
     const model = result.models.find((m) => m.id === "deepseek-v4-pro");
     // catalog entry for deepseek-v4-pro maps xhigh -> "max"
     expect(model?.thinkingLevelMap?.xhigh).toBe("max");
+    // context window/max tokens fall back to the catalog when /model/info omits them
+    expect(model?.contextWindow).toBe(1_000_000);
+    expect(model?.maxTokens).toBe(384_000);
   });
 
   it("resolves thinkingLevelMap via the underlying key when model_name is an alias", async () => {

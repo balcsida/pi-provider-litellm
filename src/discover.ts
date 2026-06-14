@@ -255,8 +255,8 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
       cacheRead: (info.cache_read_input_token_cost ?? 0) * 1_000_000,
       cacheWrite: (info.cache_creation_input_token_cost ?? 0) * 1_000_000,
     },
-    contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
+    contextWindow: info.max_input_tokens ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: info.max_output_tokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
   };
 }
