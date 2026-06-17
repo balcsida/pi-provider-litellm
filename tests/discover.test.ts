@@ -221,6 +221,36 @@ describe("discoverModels fallback to /v1/models", () => {
     });
   }
 
+  it("uses Pi catalog metadata when models.dev is unavailable", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [{ id: "gpt-5.5", object: "model", owned_by: "openai" }],
+        });
+      }
+      if (url === "https://models.dev/api.json") return new Response(null, { status: 503 });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(urls).toContain("https://models.dev/api.json");
+    expect(result.source).toBe("models_list");
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 272000,
+      maxTokens: 128000,
+      compat: { supportsStore: false },
+    });
+  });
+
   it("uses models.dev metadata when LiteLLM returns provider ownership", async () => {
     const urls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

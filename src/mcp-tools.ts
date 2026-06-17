@@ -115,36 +115,6 @@ function sanitizeName(name: string): string {
   return sanitized || "tool";
 }
 
-function isMappableSchema(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object") return false;
-  const schema = value as Record<string, unknown>;
-  if ("$ref" in schema || "anyOf" in schema || "oneOf" in schema || "allOf" in schema) return false;
-  if (["string", "number", "integer", "boolean"].includes(String(schema.type))) return true;
-  if (schema.type === "array") {
-    const items = schema.items as Record<string, unknown> | undefined;
-    return items?.type === "string";
-  }
-  return false;
-}
-
-function mapPropertySchema(name: string, schema: Record<string, unknown>): TSchema {
-  const description = typeof schema.description === "string" ? schema.description : name;
-  switch (schema.type) {
-    case "string":
-      return Type.String({ description });
-    case "number":
-      return Type.Number({ description });
-    case "integer":
-      return Type.Integer({ description });
-    case "boolean":
-      return Type.Boolean({ description });
-    case "array":
-      return Type.Array(Type.String(), { description });
-    default:
-      return Type.Unknown({ description });
-  }
-}
-
 function buildParameters(inputSchema: Record<string, unknown>): TSchema {
   const properties = inputSchema.properties as Record<string, unknown> | undefined;
   if (!properties || typeof properties !== "object") {
@@ -153,21 +123,7 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
     });
   }
 
-  const required = Array.isArray(inputSchema.required)
-    ? inputSchema.required.filter((key) => typeof key === "string")
-    : [];
-  const mapped: Record<string, TSchema> = {};
-  for (const [key, property] of Object.entries(properties)) {
-    if (!isMappableSchema(property)) {
-      return Type.Object({
-        args: Type.Record(Type.String(), Type.Unknown(), { description: "Tool arguments as key-value pairs" }),
-      });
-    }
-    const field = mapPropertySchema(key, property);
-    mapped[key] = required.includes(key) ? field : Type.Optional(field);
-  }
-
-  return Type.Object(mapped);
+  return Type.Unsafe(inputSchema);
 }
 
 export async function createMcpToolDefinitions(
