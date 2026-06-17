@@ -140,7 +140,7 @@ describe("createMcpToolDefinitions", () => {
     expect(Object.keys(parameters.properties ?? {})).toEqual(["query", "limit", "safe", "tags"]);
   });
 
-  it("falls back to a single args object for complex schemas", async () => {
+  it("passes complex object schemas through to Pi tools", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
         {
@@ -158,8 +158,10 @@ describe("createMcpToolDefinitions", () => {
 
     const definitions = await createMcpToolDefinitions("https://litellm.example.com", async () => "sk-test");
 
-    const parameters = definitions[0]?.parameters as { properties?: Record<string, unknown> };
-    expect(Object.keys(parameters.properties ?? {})).toEqual(["args"]);
+    expect(definitions[0]?.parameters).toMatchObject({
+      properties: { nested: { type: "object", properties: { value: { type: "string" } } } },
+      required: ["nested"],
+    });
   });
 
   it("uses a fresh token when a generated tool executes", async () => {
