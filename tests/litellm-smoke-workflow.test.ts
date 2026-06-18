@@ -20,6 +20,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Start VidaiMock");
     expect(workflow).toContain("Wait for VidaiMock");
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
+    expect(workflow).toContain("LITELLM_LICENSE: $" + "{{ secrets.LITELLM_LICENSE }}");
     expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
@@ -29,6 +30,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
+    expect(workflow).toContain("-e LITELLM_LICENSE");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
     expect(workflow).toContain("Run Pi CLI smoke");
     expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");

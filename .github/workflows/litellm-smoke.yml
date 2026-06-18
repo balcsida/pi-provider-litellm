@@ -25,6 +25,7 @@ jobs:
       LITELLM_BASE_URL: http://127.0.0.1:4000
       LITELLM_API_KEY: sk-ci-litellm-smoke
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
+      LITELLM_LICENSE: ${{ secrets.LITELLM_LICENSE }}
       LITELLM_IMAGE: docker.litellm.ai/berriai/litellm:main-latest
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
@@ -115,6 +116,7 @@ jobs:
             -p 4000:4000 \
             -v "$PWD/.tmp/litellm_config.yaml:/app/config.yaml:ro" \
             -e LITELLM_MASTER_KEY \
+            -e LITELLM_LICENSE \
             "$LITELLM_IMAGE" \
             --config /app/config.yaml
 
