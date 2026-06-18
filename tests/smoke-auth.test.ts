@@ -1,3 +1,6 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAuthSmoke, runAuthSmokeFromEnv } from "../scripts/smoke-auth.js";
 
@@ -10,6 +13,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.resetModules();
 });
 
 describe("runAuthSmoke", () => {
@@ -56,7 +60,7 @@ describe("runAuthSmoke", () => {
     ]);
   });
 
-  it("checks virtual-key auth and enterprise admin-route enforcement", async () => {
+  it("checks virtual-key auth, enterprise admin-route enforcement, and SSO login", async () => {
     const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
@@ -78,6 +82,9 @@ describe("runAuthSmoke", () => {
       }
       if (url.endsWith("/key/generate") && auth === "Bearer sk-virtual") {
         return jsonResponse(403, { error: "admin only" });
+      }
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "vidaimock-openai", model_info: { mode: "chat" } }] });
       }
       if (url.endsWith("/v1/chat/completions")) {
         return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
@@ -102,18 +109,83 @@ describe("runAuthSmoke", () => {
         "master-key-chat",
         "virtual-key-chat",
         "enterprise-admin-route",
+        "sso-login",
+        "sso-virtual-key-chat",
       ],
     });
-    expect(requests.filter((request) => request.url.endsWith("/key/generate"))).toMatchObject([
-      {
+    expect(requests.filter((request) => request.url.endsWith("/key/generate"))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          auth: "Bearer sk-master",
+          body: { models: ["vidaimock-openai"], duration: "1h" },
+        }),
+        expect.objectContaining({
+          auth: "Bearer sk-virtual",
+          body: { models: ["vidaimock-openai"], duration: "1h" },
+        }),
+      ]),
+    );
+  });
+});
+
+describe("runSsoLoginSmoke", () => {
+  it("drives the extension SSO login callback path and validates the generated key", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-smoke-auth-"));
+    const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
+
+    vi.doMock("@earendil-works/pi-coding-agent", () => ({
+      AuthStorage: {
+        create: () => ({ getApiKey: async () => undefined }),
+      },
+      defineTool: (tool: unknown) => tool,
+      getAgentDir: () => agentDir,
+    }));
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      const headers = init?.headers as Record<string, string> | undefined;
+      const auth = headers?.Authorization;
+      requests.push({
+        url,
+        auth,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "vidaimock-openai", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/key/generate")) {
+        expect(auth).toBe("Bearer sk-master");
+        return jsonResponse(200, { key: "sk-sso-virtual" });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        expect(auth).toBe("Bearer sk-sso-virtual");
+        return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const { runSsoLoginSmoke } = await import("../scripts/smoke-auth.js");
+    await runSsoLoginSmoke({
+      baseUrl: "http://127.0.0.1:4000",
+      masterKey: "sk-master",
+      modelId: "vidaimock-openai",
+      timeoutMs: 1000,
+    });
+
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        url: "http://127.0.0.1:4000/key/generate",
         auth: "Bearer sk-master",
-        body: { models: ["vidaimock-openai"], duration: "1h" },
-      },
-      {
-        auth: "Bearer sk-virtual",
-        body: { models: ["vidaimock-openai"], duration: "1h" },
-      },
-    ]);
+        body: {},
+      }),
+    );
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        url: "http://127.0.0.1:4000/v1/chat/completions",
+        auth: "Bearer sk-sso-virtual",
+      }),
+    );
   });
 });
 

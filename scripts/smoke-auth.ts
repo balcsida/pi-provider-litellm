@@ -2,6 +2,9 @@
 // Reads LITELLM_BASE_URL, LITELLM_API_KEY, LITELLM_CLI_SMOKE_MODEL, and optional LITELLM_LICENSE.
 // Run: npx tsx scripts/smoke-auth.ts
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { normalizeBaseUrl } from "../src/discover.js";
 
@@ -32,6 +35,29 @@ type ChatCompletionResponse = {
 
 type KeyGenerateResponse = {
   key?: unknown;
+};
+
+type SmokeOAuthCredential = {
+  access: string;
+};
+
+type SmokeProviderConfig = {
+  oauth?: {
+    login: (callbacks: {
+      onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
+      onAuth?: (info: { url: string; instructions?: string }) => void;
+      onProgress?: (message: string) => void;
+      signal?: AbortSignal;
+    }) => Promise<SmokeOAuthCredential>;
+  };
+};
+
+type SmokePi = {
+  providers: Array<{ name: string; config: SmokeProviderConfig }>;
+  registerProvider: (name: string, config: SmokeProviderConfig) => void;
+  registerCommand: () => void;
+  registerTool: () => void;
+  on: () => void;
 };
 
 function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
@@ -167,6 +193,61 @@ async function expectAdminOnlyKeyGenerate(
   await expectAuthFailure("/key/generate with virtual key", response);
 }
 
+function createSmokePi(): SmokePi {
+  return {
+    providers: [],
+    registerProvider(name, config) {
+      this.providers.push({ name, config });
+    },
+    registerCommand: () => undefined,
+    registerTool: () => undefined,
+    on: () => undefined,
+  };
+}
+
+export async function runSsoLoginSmoke(
+  options: Required<Pick<AuthSmokeOptions, "baseUrl" | "masterKey" | "modelId">> & {
+    timeoutMs: number;
+  },
+): Promise<void> {
+  const baseUrl = normalizeBaseUrl(options.baseUrl);
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR ??= await mkdtemp(join(tmpdir(), "pi-litellm-sso-smoke-"));
+  try {
+    const extension = (await import("../src/index.js")).default as unknown as (pi: SmokePi) => Promise<void>;
+    const pi = createSmokePi();
+    await extension(pi);
+
+    const oauth = pi.providers.find((provider) => provider.name === "litellm")?.config.oauth;
+    if (!oauth) throw new Error("LiteLLM provider did not expose OAuth login");
+
+    const authInfos: Array<{ url: string; instructions?: string }> = [];
+    const credential = await oauth.login({
+      onAuth: (info) => authInfos.push(info),
+      onPrompt: async ({ message, placeholder }) => {
+        if (placeholder) return baseUrl;
+        if (message.includes("Select login method")) return "2";
+        if (message.includes("SSO token")) return `Bearer ${options.masterKey}`;
+        if (message.includes("Generate a LiteLLM virtual key")) return "y";
+        return "";
+      },
+      signal: new AbortController().signal,
+    });
+
+    if (!authInfos.some((info) => info.url === `${baseUrl}/sso/key/generate`)) {
+      throw new Error("SSO login did not request /sso/key/generate");
+    }
+    if (!credential.access || credential.access === options.masterKey) {
+      throw new Error("SSO login did not return a generated virtual key");
+    }
+
+    await smokeChat(baseUrl, credential.access, options.modelId, options.timeoutMs);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  }
+}
+
 function firstSmokeModel(env: NodeJS.ProcessEnv): string | undefined {
   const cliModel = env.LITELLM_CLI_SMOKE_MODEL?.trim();
   if (cliModel) return cliModel;
@@ -200,6 +281,14 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
 
     await expectAdminOnlyKeyGenerate(baseUrl, virtualKey, options.modelId, timeoutMs);
     checks.push("enterprise-admin-route");
+
+    await runSsoLoginSmoke({
+      baseUrl,
+      masterKey: options.masterKey,
+      modelId: options.modelId,
+      timeoutMs,
+    });
+    checks.push("sso-login", "sso-virtual-key-chat");
   }
 
   return {
