@@ -115,39 +115,6 @@ If your LiteLLM proxy exposes `/v1/skills`, enabled skills are fetched before ea
 - `litellm_skill_create`
 - `litellm_skill_delete`
 
-## Mocked LiteLLM smoke workflow
-
-The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
-
-This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The workflow also runs a non-interactive Pi CLI smoke with `--list-models` and `-p` so extension loading, model discovery, and a real completion path are covered without opening the TUI.
-
-## Development
-
-This package requires Node.js `>=22.19.0`. CI currently uses Node `24.16.0`.
-
-```bash
-npm ci
-npm run check
-npm run clean && npm run build
-```
-
-`npm run check` runs Biome, type checking, and the Vitest suite. Runtime changes must be built before local Pi smoke checks because the extension entrypoint is `./dist/index.js`.
-
-Before changing package contents or dependency policy, also run:
-
-```bash
-npm run supply-chain:guard
-npm pack --dry-run
-```
-
-The published npm package should contain only `dist`, `README.md`, and `LICENSE`.
-
-## Release
-
-Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, runs the checks, builds `dist`, verifies the package tarball, publishes to npm with provenance, and creates a GitHub release.
-
-Before tagging a release, keep `package.json` and `package-lock.json` versions in sync and verify the dry-run package contents.
-
 ## Slash commands
 
 - `/litellm-refresh` — force re-fetch the model list, ignoring cache

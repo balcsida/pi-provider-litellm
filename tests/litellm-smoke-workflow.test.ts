@@ -13,6 +13,10 @@ function readReadme(): string {
   return readFileSync(resolve(repoRoot, "README.md"), "utf8");
 }
 
+function readAgentNotes(): string {
+  return readFileSync(resolve(repoRoot, "AGENTS.md"), "utf8");
+}
+
 describe("LiteLLM smoke workflow", () => {
   it("routes smoke completions through VidaiMock instead of real LLM APIs", () => {
     const workflow = readWorkflow();
@@ -52,17 +56,19 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toMatch(/sha256sum -c "\$\{asset%\.tar\.gz\}\.sha256"/);
   });
 
-  it("documents the mocked smoke workflow without provider secrets", () => {
+  it("documents the mocked smoke workflow for agents without provider secrets", () => {
+    const agents = readAgentNotes();
     const readme = readReadme();
 
-    expect(readme).toContain("## Mocked LiteLLM smoke workflow");
-    expect(readme).toContain("VidaiMock");
-    expect(readme).toContain("does not call real LLM APIs");
-    expect(readme).toContain("No provider API keys or GitHub Models permission are required");
-    expect(readme).toContain("OpenAI-compatible and Anthropic routes");
-    expect(readme).toContain("non-interactive Pi CLI smoke");
-    expect(readme).not.toContain("Kimi-shaped routes");
+    expect(agents).toContain("## Smoke And CI");
+    expect(agents).toContain("VidaiMock");
+    expect(agents).toContain("without real LLM API calls");
+    expect(agents).toContain("do not add real provider secrets or GitHub Models permission");
+    expect(agents).toContain("OpenAI-compatible and Anthropic routes");
+    expect(agents).toContain("non-interactive Pi CLI smoke checks");
+    expect(agents).not.toContain("Kimi-shaped routes");
 
+    expect(readme).not.toContain("## Mocked LiteLLM smoke workflow");
     expect(readme).not.toContain("## Real LiteLLM smoke workflow");
     expect(readme).not.toContain("OPENAI_API_KEY");
     expect(readme).not.toContain("ANTHROPIC_API_KEY");

@@ -43,6 +43,9 @@
 
 - CI runs `npm ci`, `npm run check`, `npm run clean`, `npm run build`, and `npm pack --dry-run`.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
+- The smoke workflow covers discovery and `/v1/chat/completions` through LiteLLM without real LLM API calls.
+- Keep smoke coverage on OpenAI-compatible and Anthropic routes; do not add real provider secrets or GitHub Models permission.
+- The workflow also runs non-interactive Pi CLI smoke checks with `--list-models` and `-p`; do not require TUI automation for it.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke.ts` and `scripts/smoke-runner.ts` exercise discovery and `/v1/chat/completions` through the proxy.
 - The non-interactive Pi CLI smoke uses `./dist/index.js`, so runtime changes need a fresh build before running it.
@@ -50,10 +53,16 @@
 ## Release And Packaging
 
 - The release workflow is tag-driven for `v*.*.*`; it publishes with `npm publish --access public --provenance` and creates a GitHub release.
+- The release workflow installs from the lockfile, runs checks, builds `dist`, verifies the tarball, publishes to npm, and creates the GitHub release.
 - Local release prep should keep `package.json` and `package-lock.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
 - Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag.
 - The npm package should stay limited to `dist`, `README.md`, and `LICENSE`.
 - `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files; update tests before changing that policy.
+
+## README Scope
+
+- Keep README focused on install, configuration, use, and troubleshooting for extension users.
+- Put agent/contributor-only workflow details in AGENTS.md unless the user asks for public contributor docs.
 
 ## Package Metadata
 
