@@ -195,7 +195,7 @@ async function fetchJson<T>(
   const { signal, cancel } = withTimeout(timeoutMs, options.signal);
   try {
     const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      headers: { ...options.headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal,
     });
     if (!response.ok) return { ok: false, status: response.status };

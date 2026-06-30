@@ -25,9 +25,11 @@ import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } fro
 import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
+const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
+const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -48,13 +50,55 @@ type ModelOverride = Partial<
 };
 
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
+type ProviderRefreshResult = RefreshResult & { providerName: string };
+
+type RawProviderSettings = {
+  name?: unknown;
+  displayName?: unknown;
+  baseUrl?: unknown;
+  apiKey?: unknown;
+  headers?: unknown;
+  enabled?: unknown;
+};
+
+type ProviderDefinition = {
+  name: string;
+  displayName: string;
+  baseUrl?: string;
+  apiKeyConfig?: string;
+  headers?: unknown;
+  useDefaultEnv: boolean;
+  useGcloudTokenAuth: boolean;
+  useSavedAuth: boolean;
+  enableOAuth: boolean;
+};
+
+type ProviderState = {
+  definition: ProviderDefinition;
+  creds: ResolvedCredentials;
+  headers?: Record<string, string>;
+  models: ProviderModelConfig[];
+  cacheFetchedAt: number;
+  liveDiscoveryApiKey?: string;
+  refreshInProgress: Promise<ProviderRefreshResult> | null;
+};
 
 function getAuthPath(): string {
   return join(getAgentDir(), "auth.json");
 }
 
-function getCachePath(): string {
-  return join(getAgentDir(), CACHE_FILENAME);
+function sanitizeCacheSegment(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "provider"
+  );
+}
+
+function getCachePath(providerName = PROVIDER_NAME): string {
+  if (providerName === PROVIDER_NAME) return join(getAgentDir(), CACHE_FILENAME);
+  return join(getAgentDir(), `litellm-models-${sanitizeCacheSegment(providerName)}.json`);
 }
 
 // Same tolerance as pi core's models.json loader (stripJsonComments in dist/utils/json.js):
@@ -107,7 +151,10 @@ function sanitizeModelOverride(modelId: string, raw: unknown): ModelOverride | u
   return override as ModelOverride;
 }
 
-async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
+// Overrides are read per registered provider name, matching pi core's own
+// models.json layout (`providers.<name>.modelOverrides`) so aliases get the
+// same override support as the default provider, not a special case of it.
+async function readModelOverrides(providerName: string): Promise<Map<string, ModelOverride>> {
   let raw: string;
   try {
     raw = await readFile(join(getAgentDir(), "models.json"), "utf8");
@@ -119,7 +166,7 @@ async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
       providers?: Record<string, { modelOverrides?: Record<string, unknown> }>;
     };
     const overrides = new Map<string, ModelOverride>();
-    for (const [id, rawOverride] of Object.entries(config.providers?.[PROVIDER_NAME]?.modelOverrides ?? {})) {
+    for (const [id, rawOverride] of Object.entries(config.providers?.[providerName]?.modelOverrides ?? {})) {
       const override = sanitizeModelOverride(id, rawOverride);
       if (override) overrides.set(id, override);
     }
@@ -178,15 +225,28 @@ function applyModelOverrides(
 
 // Re-reads models.json on every call so overrides edited mid-session take effect on the next
 // refresh or login, matching pi core's live reload for built-in providers.
-async function applyOverrides(models: ProviderModelConfig[]): Promise<ProviderModelConfig[]> {
-  return applyModelOverrides(models, await readModelOverrides());
+async function applyOverrides(providerName: string, models: ProviderModelConfig[]): Promise<ProviderModelConfig[]> {
+  return applyModelOverrides(models, await readModelOverrides(providerName));
 }
 
-async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
+async function readAuthEntry(providerName = PROVIDER_NAME): Promise<AuthFileEntry | undefined> {
   try {
     const raw = await readFile(getAuthPath(), "utf8");
     const parsed = JSON.parse(raw) as Record<string, AuthFileEntry>;
-    return parsed?.[PROVIDER_NAME];
+    return parsed?.[providerName];
+  } catch {
+    return undefined;
+  }
+}
+
+async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | undefined> {
+  try {
+    const raw = await readFile(join(getAgentDir(), "settings.json"), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const settings = parsed[SETTINGS_KEY];
+    return settings && typeof settings === "object" && !Array.isArray(settings)
+      ? (settings as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -195,6 +255,10 @@ async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
 function cleanConfig(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed && trimmed !== "undefined" ? trimmed : undefined;
+}
+
+function stringSetting(value: unknown): string | undefined {
+  return typeof value === "string" ? cleanConfig(value) : undefined;
 }
 
 function normalizeCommand(raw: string | undefined): string | undefined {
@@ -228,9 +292,6 @@ function tokenExpiresAt(apiKey: string, opaqueFallback = PERMANENT_TOKEN_EXPIRES
 }
 
 function openInBrowser(url: string): void {
-  // Never invoke a shell here: cmd.exe re-parses metacharacters before `start`
-  // runs, which would make URL contents injectable. Launch is best-effort; the
-  // URL is also shown to the user, so launcher failures must not crash the process.
   const [cmd, args]: [string, string[]] =
     process.platform === "darwin"
       ? ["open", [url]]
@@ -281,24 +342,105 @@ function resolveOAuthApiKey(credentials: OAuthCredentials): string {
     : getLiteLLMApiKey(credentials);
 }
 
-async function resolveCredentials({ executeHelpers = true } = {}): Promise<ResolvedCredentials> {
-  const entry = await readAuthEntry();
-  const envBase = cleanConfig(process.env[ENV_BASE_URL]);
-  const envKey = cleanConfig(process.env[ENV_API_KEY]);
-  const envHelperCommand = getApiKeyHelperCommand();
-  const useGcloudToken = isGcloudTokenAuthEnabled();
+function resolveTemplateConfigValue(config: string): string | undefined {
+  let resolved = "";
+  for (let index = 0; index < config.length; ) {
+    const dollarIndex = config.indexOf("$", index);
+    if (dollarIndex === -1) return resolved + config.slice(index);
+    resolved += config.slice(index, dollarIndex);
+    const nextChar = config[dollarIndex + 1];
+    if (nextChar === "$" || nextChar === "!") {
+      resolved += nextChar;
+      index = dollarIndex + 2;
+      continue;
+    }
+    if (nextChar === "{") {
+      const endIndex = config.indexOf("}", dollarIndex + 2);
+      if (endIndex === -1) {
+        resolved += "$";
+        index = dollarIndex + 1;
+        continue;
+      }
+      const name = config.slice(dollarIndex + 2, endIndex);
+      const envValue = process.env[name];
+      if (envValue === undefined) return undefined;
+      resolved += envValue;
+      index = endIndex + 1;
+      continue;
+    }
+    const match = config.slice(dollarIndex + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (!match) {
+      resolved += "$";
+      index = dollarIndex + 1;
+      continue;
+    }
+    const envValue = process.env[match[0]];
+    if (envValue === undefined) return undefined;
+    resolved += envValue;
+    index = dollarIndex + 1 + match[0].length;
+  }
+  return resolved;
+}
+
+function resolveConfigValue(config: string, { executeCommands }: { executeCommands: boolean }): string | undefined {
+  if (config.startsWith("!")) return executeCommands ? executeApiKeyCommand(config) : undefined;
+  return resolveTemplateConfigValue(config);
+}
+
+function parseHeaderRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const headers: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!key.trim()) continue;
+    const value = typeof raw === "string" ? resolveTemplateConfigValue(raw) : String(raw);
+    if (value) headers[key] = value;
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+function parseCustomHeaders(raw: string | undefined): Record<string, string> | undefined {
+  const trimmed = cleanConfig(raw);
+  if (!trimmed) return undefined;
+  try {
+    return parseHeaderRecord(JSON.parse(trimmed));
+  } catch (error) {
+    process.stderr.write(
+      `LiteLLM: failed to parse custom headers (${error instanceof Error ? error.message : String(error)}).\n`,
+    );
+    return undefined;
+  }
+}
+
+function resolveHeaders(definition: ProviderDefinition): Record<string, string> | undefined {
+  if (typeof definition.headers === "string") return parseCustomHeaders(resolveTemplateConfigValue(definition.headers));
+  return parseHeaderRecord(definition.headers);
+}
+
+async function resolveCredentials(
+  definition: ProviderDefinition,
+  { executeHelpers = true } = {},
+): Promise<ResolvedCredentials> {
+  const entry = definition.useSavedAuth ? await readAuthEntry(definition.name) : undefined;
+  const configuredBase =
+    cleanConfig(definition.baseUrl) ?? (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
+  const configuredKey = definition.apiKeyConfig
+    ? resolveConfigValue(definition.apiKeyConfig, { executeCommands: executeHelpers })
+    : undefined;
+  const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
+  const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
   const authBase = entry?.type === "oauth" ? entry.baseUrl?.trim() : undefined;
   const gcloudCacheKey = useGcloudToken && !entry ? ((await getGcloudTokenCacheKey()) ?? undefined) : undefined;
   const authKey =
     entry?.type === "oauth"
       ? (executeHelpers ? resolveOAuthApiKey(entry) : entry.access).trim()
       : entry?.type === "api_key"
-        ? (await AuthStorage.create(getAuthPath()).getApiKey(PROVIDER_NAME, { includeFallback: false }))?.trim()
+        ? (await AuthStorage.create(getAuthPath()).getApiKey(definition.name, { includeFallback: false }))?.trim()
         : undefined;
   const gcloudKey = executeHelpers && gcloudCacheKey ? (await getGcloudToken())?.trim() : undefined;
   const helperKey =
     !authKey && !gcloudKey && executeHelpers && envHelperCommand ? executeApiKeyCommand(envHelperCommand) : undefined;
-  const apiKey = authKey || gcloudKey || helperKey || envKey;
+  const apiKey = authKey || gcloudKey || helperKey || configuredKey || envKey;
 
   let apiKeyFingerprint: string | undefined;
   let apiKeyConfig: string | undefined;
@@ -318,11 +460,17 @@ async function resolveCredentials({ executeHelpers = true } = {}): Promise<Resol
   } else if (!executeHelpers && envHelperCommand) {
     apiKeyFingerprint = fingerprint(envHelperCommand);
     apiKeyConfig = envHelperCommand;
+  } else if (configuredKey && definition.apiKeyConfig) {
+    apiKeyFingerprint = fingerprint(definition.apiKeyConfig.startsWith("!") ? definition.apiKeyConfig : configuredKey);
+    apiKeyConfig = definition.apiKeyConfig;
+  } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
+    apiKeyFingerprint = fingerprint(definition.apiKeyConfig);
+    apiKeyConfig = definition.apiKeyConfig;
   } else if (envKey) {
     apiKeyFingerprint = fingerprint(envKey);
     apiKeyConfig = `$${ENV_API_KEY}`;
   }
-  const rawBase = authBase || envBase;
+  const rawBase = authBase || configuredBase;
   return {
     baseUrl: rawBase ? normalizeBaseUrl(rawBase) : undefined,
     apiKey: apiKey || undefined,
@@ -347,6 +495,45 @@ function isListModelsMode(): boolean {
   return process.argv.includes("--list-models");
 }
 
+function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as RawProviderSettings;
+  if (record.enabled === false) return undefined;
+  return record;
+}
+
+async function getProviderDefinitions(): Promise<ProviderDefinition[]> {
+  const settings = await readGlobalLiteLLMSettings();
+  const rawProviders = settings?.providers && typeof settings.providers === "object" ? settings.providers : undefined;
+  const providerSettings = rawProviders as Record<string, unknown> | undefined;
+  const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
+
+  const makeDefinition = (
+    name: string,
+    raw: RawProviderSettings | undefined,
+    isDefault: boolean,
+  ): ProviderDefinition => ({
+    name,
+    displayName: stringSetting(raw?.displayName) ?? (isDefault ? "LiteLLM" : name),
+    baseUrl: stringSetting(raw?.baseUrl),
+    apiKeyConfig: stringSetting(raw?.apiKey),
+    headers: raw?.headers ?? (isDefault ? `$${ENV_HEADERS}` : undefined),
+    useDefaultEnv: isDefault,
+    useGcloudTokenAuth: isDefault,
+    useSavedAuth: true,
+    enableOAuth: isDefault,
+  });
+
+  const definitions = [makeDefinition(PROVIDER_NAME, defaultSettings, true)];
+  for (const [name, raw] of Object.entries(providerSettings ?? {})) {
+    if (name === PROVIDER_NAME) continue;
+    const normalized = normalizeProviderSettings(raw);
+    if (!normalized) continue;
+    definitions.push(makeDefinition(name, normalized, false));
+  }
+  return definitions;
+}
+
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
@@ -365,7 +552,11 @@ async function discoverWithFallback(
 
 async function loginLiteLLM(
   callbacks: OAuthLoginCallbacks,
-  onCacheWrite?: (cache: CacheFile) => void | Promise<void>,
+  options: {
+    cachePath: string;
+    headers?: Record<string, string>;
+    onCacheWrite?: (cache: CacheFile) => void | Promise<void>;
+  },
 ): Promise<OAuthCredentials> {
   const rawBaseUrl = (
     await callbacks.onPrompt({
@@ -437,6 +628,7 @@ async function loginLiteLLM(
   const { models, source } = await discoverModels(baseUrl, apiKey, {
     timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
+    headers: options.headers,
   });
 
   const cache: CacheFile = {
@@ -446,8 +638,8 @@ async function loginLiteLLM(
     source,
     models,
   };
-  await writeCache(getCachePath(), cache);
-  await onCacheWrite?.(cache);
+  await writeCache(options.cachePath, cache);
+  await options.onCacheWrite?.(cache);
   callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
 
   return {
@@ -537,8 +729,11 @@ function prepareLiteLLMRequestPayload(
   return next;
 }
 
-function normalizeThinkTags(message: AssistantMessage): AssistantMessage | undefined {
-  if (message.provider !== PROVIDER_NAME || !shouldSuppressReasoningContent(message.model)) return;
+function normalizeThinkTags(
+  message: AssistantMessage,
+  litellmProviderNames: Set<string>,
+): AssistantMessage | undefined {
+  if (!litellmProviderNames.has(message.provider) || !shouldSuppressReasoningContent(message.model)) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -600,116 +795,8 @@ function normalizeThinkTags(message: AssistantMessage): AssistantMessage | undef
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-  let creds = await resolveCredentials({ executeHelpers: false });
-  const cache = await readCache(getCachePath());
-  let fp = creds.apiKeyFingerprint;
-  let cacheFetchedAt = cache?.fetchedAt ?? 0;
-
-  const cacheValid =
-    cache !== null &&
-    creds.baseUrl !== undefined &&
-    fp !== undefined &&
-    cache.baseUrl === creds.baseUrl &&
-    cache.apiKeyFingerprint === fp;
-
-  let models: ProviderModelConfig[] = cacheValid && cache ? cache.models : [];
-  const shouldFetch =
-    creds.baseUrl !== undefined &&
-    fp !== undefined &&
-    !isOffline() &&
-    getDiscoveryTimeoutMs() > 0 &&
-    (!cacheValid || isListModelsMode());
-
-  let credentialWarning: string | undefined;
-  let liveDiscoveryApiKey: string | undefined;
-  if (shouldFetch) {
-    try {
-      creds = await resolveCredentials();
-      fp = creds.apiKeyFingerprint;
-    } catch (error) {
-      if (!cacheValid || !cache) throw error;
-      credentialWarning = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`LiteLLM: discovery failed (${credentialWarning}); using cached models.\n`);
-      models = cache.models;
-    }
-  }
-
-  if (shouldFetch && !credentialWarning && creds.baseUrl && creds.apiKey && fp) {
-    const timeoutMs = getDiscoveryTimeoutMs();
-    const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
-      timeoutMs,
-    });
-    if (warning) {
-      if (cacheValid && cache) {
-        process.stderr.write(`LiteLLM: discovery failed (${warning}); using cached models.\n`);
-        models = cache.models;
-      } else {
-        process.stderr.write(`LiteLLM: discovery failed (${warning}); registering provider with no models.\n`);
-        models = [];
-      }
-    } else {
-      models = result.models;
-      liveDiscoveryApiKey = creds.apiKey;
-      const next: CacheFile = {
-        baseUrl: creds.baseUrl,
-        apiKeyFingerprint: fp,
-        fetchedAt: Date.now(),
-        source: result.source,
-        models: result.models,
-      };
-      await writeCache(getCachePath(), next);
-      cacheFetchedAt = next.fetchedAt;
-      if (isListModelsMode()) {
-        process.stderr.write(`LiteLLM: ${result.models.length} models discovered (source: ${result.source}).\n`);
-      }
-    }
-  }
-
-  // The cache keeps raw discovery output; overrides are applied freshly at each registration.
-  models = await applyOverrides(models);
-
-  let updateCosts: (models: ProviderModelConfig[]) => void = () => undefined;
-
-  const oauth = {
-    name: "LiteLLM",
-    login: (callbacks: OAuthLoginCallbacks) =>
-      loginLiteLLM(callbacks, async (next) => {
-        cacheFetchedAt = next.fetchedAt;
-        const overridden = await applyOverrides(next.models);
-        registerProvider(next.baseUrl, overridden);
-        updateCosts(overridden);
-      }),
-    refreshToken: refreshLiteLLM,
-    getApiKey: getLiteLLMApiKey,
-    modifyModels: modifyLiteLLMModels,
-  };
-
-  function registerProvider(
-    baseUrl: string | undefined,
-    models: ProviderModelConfig[],
-    apiKeyConfig = creds.apiKeyConfig ?? getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`,
-  ): void {
-    pi.registerProvider(PROVIDER_NAME, {
-      baseUrl: baseUrl ? `${baseUrl}/v1` : "https://litellm.example.com/v1",
-      // When LITELLM_API_KEY_HELPER is set we register the helper as a `!command` provider key.
-      // Pi's per-request auth path (ModelRegistry.getApiKeyAndHeaders) resolves provider keys via
-      // resolveConfigValueOrThrow -> resolveConfigValueUncached, i.e. the command is re-executed on
-      // every request (it does NOT use the process-lifetime command cache, which only applies to
-      // resolveConfigValue). So a short-lived/rotating helper token stays fresh. The OAuth hooks
-      // remain registered for `/login litellm` users. See the regression test
-      // "re-runs the helper command on every request" in tests/index.test.ts.
-      apiKey: apiKeyConfig,
-      api: "openai-completions",
-      models,
-      oauth,
-    });
-  }
-
-  registerProvider(creds.baseUrl, models);
-
-  updateCosts = setupLiteLLMCostTracking(pi, models);
-
-  let refreshInProgress: Promise<RefreshResult> | null = null;
+  const definitions = await getProviderDefinitions();
+  const providerNames = new Set(definitions.map((definition) => definition.name));
 
   function discoveryDisabledReason(): string | null {
     if (isOffline()) return `${ENV_OFFLINE}=1`;
@@ -717,20 +804,164 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return null;
   }
 
-  async function resolveRuntimeApiKey(): Promise<string> {
-    const fresh = await resolveCredentials();
-    if (!fresh.apiKey) throw new Error("no credentials. Run /login litellm or set env vars.");
+  async function loadProviderState(definition: ProviderDefinition): Promise<ProviderState> {
+    let creds = await resolveCredentials(definition, { executeHelpers: false });
+    const headers = resolveHeaders(definition);
+    const cache = await readCache(getCachePath(definition.name));
+    let fp = creds.apiKeyFingerprint;
+    let cacheFetchedAt = cache?.fetchedAt ?? 0;
+
+    const cacheValid =
+      cache !== null &&
+      creds.baseUrl !== undefined &&
+      fp !== undefined &&
+      cache.baseUrl === creds.baseUrl &&
+      cache.apiKeyFingerprint === fp;
+
+    let models: ProviderModelConfig[] = cacheValid && cache ? cache.models : [];
+    const shouldFetch =
+      creds.baseUrl !== undefined &&
+      fp !== undefined &&
+      !isOffline() &&
+      getDiscoveryTimeoutMs() > 0 &&
+      (!cacheValid || isListModelsMode());
+
+    let credentialWarning: string | undefined;
+    let liveDiscoveryApiKey: string | undefined;
+    if (shouldFetch) {
+      try {
+        creds = await resolveCredentials(definition);
+        fp = creds.apiKeyFingerprint;
+      } catch (error) {
+        if (!cacheValid || !cache) throw error;
+        credentialWarning = error instanceof Error ? error.message : String(error);
+        process.stderr.write(
+          `LiteLLM (${definition.name}): discovery failed (${credentialWarning}); using cached models.\n`,
+        );
+        models = cache.models;
+      }
+    }
+
+    if (shouldFetch && !credentialWarning && creds.baseUrl && creds.apiKey && fp) {
+      const timeoutMs = getDiscoveryTimeoutMs();
+      const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
+        timeoutMs,
+        headers,
+      });
+      if (warning) {
+        if (cacheValid && cache) {
+          process.stderr.write(`LiteLLM (${definition.name}): discovery failed (${warning}); using cached models.\n`);
+          models = cache.models;
+        } else {
+          process.stderr.write(
+            `LiteLLM (${definition.name}): discovery failed (${warning}); registering provider with no models.\n`,
+          );
+          models = [];
+        }
+      } else {
+        models = result.models;
+        liveDiscoveryApiKey = creds.apiKey;
+        const next: CacheFile = {
+          baseUrl: creds.baseUrl,
+          apiKeyFingerprint: fp,
+          fetchedAt: Date.now(),
+          source: result.source,
+          models: result.models,
+        };
+        await writeCache(getCachePath(definition.name), next);
+        cacheFetchedAt = next.fetchedAt;
+        if (isListModelsMode()) {
+          process.stderr.write(
+            `LiteLLM (${definition.name}): ${result.models.length} models discovered (source: ${result.source}).\n`,
+          );
+        }
+      }
+    }
+
+    // The cache keeps raw discovery output; overrides are applied freshly at each registration.
+    models = await applyOverrides(definition.name, models);
+
+    return { definition, creds, headers, models, cacheFetchedAt, liveDiscoveryApiKey, refreshInProgress: null };
+  }
+
+  const providerStates = await Promise.all(definitions.map(loadProviderState));
+  const defaultState = providerStates.find((state) => state.definition.name === PROVIDER_NAME) ?? providerStates[0];
+
+  let updateCosts: (models: ProviderModelConfig[]) => void = () => undefined;
+  const updateAllCosts = (): void => updateCosts(providerStates.flatMap((state) => state.models));
+
+  function defaultApiKeyConfig(definition: ProviderDefinition): string {
+    return (
+      (definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined) ?? definition.apiKeyConfig ?? `$${ENV_API_KEY}`
+    );
+  }
+
+  function registerProvider(
+    state: ProviderState,
+    models = state.models,
+    apiKeyConfig = state.creds.apiKeyConfig,
+  ): void {
+    const definition = state.definition;
+    pi.registerProvider(definition.name, {
+      name: definition.displayName,
+      baseUrl: state.creds.baseUrl ? `${state.creds.baseUrl}/v1` : "https://litellm.example.com/v1",
+      apiKey: apiKeyConfig ?? defaultApiKeyConfig(definition),
+      api: "openai-completions",
+      headers: state.headers,
+      models,
+      oauth: definition.enableOAuth ? oauth : undefined,
+    });
+  }
+
+  const oauth = {
+    name: "LiteLLM",
+    login: (callbacks: OAuthLoginCallbacks) =>
+      loginLiteLLM(callbacks, {
+        cachePath: getCachePath(PROVIDER_NAME),
+        headers: defaultState.headers,
+        onCacheWrite: (next) => {
+          defaultState.cacheFetchedAt = next.fetchedAt;
+          defaultState.models = next.models;
+          defaultState.creds = {
+            ...defaultState.creds,
+            baseUrl: next.baseUrl,
+            apiKeyFingerprint: next.apiKeyFingerprint,
+          };
+          registerProvider(defaultState, next.models);
+          updateAllCosts();
+        },
+      }),
+    refreshToken: refreshLiteLLM,
+    getApiKey: getLiteLLMApiKey,
+    modifyModels: modifyLiteLLMModels,
+  };
+
+  for (const state of providerStates) registerProvider(state);
+
+  updateCosts = setupLiteLLMCostTracking(
+    pi,
+    providerStates.flatMap((state) => state.models),
+  );
+
+  async function resolveRuntimeApiKey(state = defaultState): Promise<string> {
+    const fresh = await resolveCredentials(state.definition);
+    if (!fresh.apiKey)
+      throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
     return fresh.apiKey;
   }
 
-  function registerSkillTools(baseUrl: string | undefined): void {
-    if (!baseUrl) return;
-    for (const tool of createSkillToolDefinitions(baseUrl, resolveRuntimeApiKey)) {
+  function registerSkillTools(state = defaultState): void {
+    if (!state.creds.baseUrl) return;
+    for (const tool of createSkillToolDefinitions(
+      state.creds.baseUrl,
+      () => resolveRuntimeApiKey(state),
+      state.headers,
+    )) {
       pi.registerTool(tool);
     }
   }
 
-  function seededRuntimeApiKey(seed: string): () => Promise<string> {
+  function seededRuntimeApiKey(state: ProviderState, seed: string): () => Promise<string> {
     let first: string | undefined = seed;
     return async () => {
       if (first) {
@@ -738,55 +969,67 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         first = undefined;
         return value;
       }
-      return resolveRuntimeApiKey();
+      return resolveRuntimeApiKey(state);
     };
   }
 
-  async function registerMcpTools(baseUrl: string | undefined, discoveryApiKey: string | undefined): Promise<void> {
-    if (!baseUrl || !discoveryApiKey || discoveryDisabledReason()) return;
+  async function registerMcpTools(state: ProviderState): Promise<void> {
+    if (!state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
     try {
-      const tools = await createMcpToolDefinitions(baseUrl, seededRuntimeApiKey(discoveryApiKey));
+      const tools = await createMcpToolDefinitions(
+        state.creds.baseUrl,
+        seededRuntimeApiKey(state, state.liveDiscoveryApiKey),
+        state.headers,
+      );
       for (const tool of tools) {
         pi.registerTool(tool);
       }
     } catch (error) {
       process.stderr.write(
-        `LiteLLM: MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
+        `LiteLLM (${state.definition.name}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
       );
     }
   }
 
-  registerSkillTools(creds.baseUrl);
-  await registerMcpTools(creds.baseUrl, liveDiscoveryApiKey);
+  if (defaultState) {
+    registerSkillTools(defaultState);
+    await registerMcpTools(defaultState);
+  }
 
-  async function refreshModelsAndCosts(): Promise<RefreshResult> {
-    const fresh = await resolveCredentials();
+  async function refreshModelsAndCosts(state: ProviderState): Promise<ProviderRefreshResult> {
+    const fresh = await resolveCredentials(state.definition);
     const freshFp = fresh.apiKeyFingerprint;
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
-      throw new Error("no credentials. Run /login litellm or set env vars.");
+      throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
     }
-    const result = await discoverModels(fresh.baseUrl, fresh.apiKey, { timeoutMs: getDiscoveryTimeoutMs() });
+    const result = await discoverModels(fresh.baseUrl, fresh.apiKey, {
+      timeoutMs: getDiscoveryTimeoutMs(),
+      headers: state.headers,
+    });
     const now = Date.now();
-    await writeCache(getCachePath(), {
+    await writeCache(getCachePath(state.definition.name), {
       baseUrl: fresh.baseUrl,
       apiKeyFingerprint: freshFp,
       fetchedAt: now,
       source: result.source,
       models: result.models,
     });
-    const overridden = await applyOverrides(result.models);
-    registerProvider(fresh.baseUrl, overridden, fresh.apiKeyConfig);
-    updateCosts(overridden);
-    cacheFetchedAt = now;
-    await registerMcpTools(fresh.baseUrl, fresh.apiKey);
-    return { models: overridden, source: result.source };
+    const overridden = await applyOverrides(state.definition.name, result.models);
+    state.creds = fresh;
+    state.models = overridden;
+    state.liveDiscoveryApiKey = fresh.apiKey;
+    state.cacheFetchedAt = now;
+    registerProvider(state, overridden, fresh.apiKeyConfig);
+    updateAllCosts();
+    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state);
+    return { providerName: state.definition.name, models: overridden, source: result.source };
   }
 
-  function runRefresh(): Promise<RefreshResult> {
-    refreshInProgress ??= refreshModelsAndCosts().finally(() => {
-      refreshInProgress = null;
+  function runRefresh(state: ProviderState): Promise<ProviderRefreshResult> {
+    state.refreshInProgress ??= refreshModelsAndCosts(state).finally(() => {
+      state.refreshInProgress = null;
     });
-    return refreshInProgress;
+    return state.refreshInProgress;
   }
 
   type LoginContext = Pick<ExtensionContext, "modelRegistry" | "signal" | "ui">;
@@ -808,11 +1051,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         onSelect: async () => undefined,
         signal: ctx.signal,
       },
-      async (next) => {
-        cacheFetchedAt = next.fetchedAt;
-        const overridden = await applyOverrides(next.models);
-        registerProvider(next.baseUrl, overridden);
-        updateCosts(overridden);
+      {
+        cachePath: getCachePath(PROVIDER_NAME),
+        headers: defaultState.headers,
+        onCacheWrite: async (next) => {
+          defaultState.cacheFetchedAt = next.fetchedAt;
+          const overridden = await applyOverrides(PROVIDER_NAME, next.models);
+          defaultState.models = overridden;
+          defaultState.creds = {
+            ...defaultState.creds,
+            baseUrl: next.baseUrl,
+            apiKeyFingerprint: next.apiKeyFingerprint,
+          };
+          registerProvider(defaultState, overridden);
+          updateAllCosts();
+        },
       },
     );
 
@@ -820,8 +1073,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     ctx.modelRegistry.refresh();
     const credentialBaseUrl = (credential as { baseUrl?: string }).baseUrl;
     const credentialAccess = typeof credential.access === "string" ? credential.access : undefined;
-    registerSkillTools(credentialBaseUrl);
-    await registerMcpTools(credentialBaseUrl, credentialAccess);
+    defaultState.creds = { ...defaultState.creds, baseUrl: credentialBaseUrl };
+    defaultState.liveDiscoveryApiKey = credentialAccess;
+    registerSkillTools(defaultState);
+    await registerMcpTools(defaultState);
     ctx.ui.notify(`Logged in to LiteLLM. Credentials saved to ${getAuthPath()}`, "info");
   }
 
@@ -841,15 +1096,33 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   pi.registerCommand("litellm-refresh", {
     description: "Re-discover models from the LiteLLM proxy.",
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
       const disabledReason = discoveryDisabledReason();
       if (disabledReason) {
         ctx.ui.notify(`LiteLLM refresh disabled (${disabledReason})`, "warning");
         return;
       }
+      const requestedProvider = args.trim();
+      const statesToRefresh = requestedProvider
+        ? providerStates.filter((state) => state.definition.name === requestedProvider)
+        : providerStates;
+      if (statesToRefresh.length === 0) {
+        ctx.ui.notify(`LiteLLM refresh failed: unknown provider ${requestedProvider}`, "error");
+        return;
+      }
       try {
-        const result = await runRefresh();
-        ctx.ui.notify(`LiteLLM: ${result.models.length} models refreshed (source: ${result.source})`, "info");
+        const results = await Promise.all(statesToRefresh.map(runRefresh));
+        if (results.length === 1) {
+          const result = results[0];
+          ctx.ui.notify(`LiteLLM: ${result.models.length} models refreshed (source: ${result.source})`, "info");
+          return;
+        }
+        ctx.ui.notify(
+          `LiteLLM: ${results.length} providers refreshed (${results
+            .map((result) => `${result.providerName}: ${result.models.length} models`)
+            .join(", ")})`,
+          "info",
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`LiteLLM refresh failed: ${message}`, "error");
@@ -861,21 +1134,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("session_start", (_event, ctx) => {
     sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
 
-    if (discoveryDisabledReason() || !cacheFetchedAt || Date.now() - cacheFetchedAt <= CACHE_STALE_MS) return;
-    void runRefresh().catch(() => undefined);
+    if (discoveryDisabledReason()) return;
+    for (const state of providerStates) {
+      if (!state.cacheFetchedAt || Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS) continue;
+      void runRefresh(state).catch(() => undefined);
+    }
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    if (ctx.model?.provider !== PROVIDER_NAME) return;
+    if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
     return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model?.id, sessionId);
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (discoveryDisabledReason()) return;
-    const fresh = await resolveCredentials();
+    if (discoveryDisabledReason() || !defaultState) return;
+    const fresh = await resolveCredentials(defaultState.definition);
     if (!fresh.baseUrl || !fresh.apiKey) return;
-    const skills = await listSkills(fresh.baseUrl, fresh.apiKey);
+    const skills = await listSkills(fresh.baseUrl, fresh.apiKey, defaultState.headers);
     const section = createSkillsPromptSection(skills);
     if (!section) return;
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
@@ -883,7 +1159,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   pi.on("message_end", (event) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage);
+    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
     if (!message) return;
     return { message };
   });

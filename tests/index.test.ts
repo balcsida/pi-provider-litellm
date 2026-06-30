@@ -9,6 +9,9 @@ const ENV_KEYS = [
   "LITELLM_BASE_URL",
   "LITELLM_API_KEY",
   "LITELLM_API_KEY_HELPER",
+  "LITELLM_HEADERS",
+  "LITELLM_ANTHROPIC_API_KEY",
+  "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
   "LITELLM_GCLOUD_TOKEN_AUTH",
   "GOOGLE_APPLICATION_CREDENTIALS",
@@ -21,6 +24,7 @@ vi.unmock("@earendil-works/pi-coding-agent");
 type TestProviderConfig = {
   baseUrl?: string;
   apiKey?: string;
+  headers?: Record<string, string>;
   models?: unknown[];
   oauth?: {
     login: (callbacks: {
@@ -578,6 +582,181 @@ describe("extension startup", () => {
     await extension(createPi());
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-key", "Bearer stored-key"]);
+  });
+
+  it("registers multiple configured LiteLLM provider aliases with separate credentials and caches", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+              headers: "$LITELLM_ANTHROPIC_HEADERS",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-litellm-customer-id": "openai-customer" });
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+    process.env.LITELLM_ANTHROPIC_HEADERS = JSON.stringify({ "x-litellm-customer-id": "anthropic-customer" });
+
+    const seenModelInfoRequests: Array<{ url: string; authorization: string; customer: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        const headers = new Headers(init?.headers);
+        seenModelInfoRequests.push({
+          url,
+          authorization: headers.get("authorization") ?? "",
+          customer: headers.get("x-litellm-customer-id") ?? "",
+        });
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: url.includes("anthropic") ? "claude-sonnet" : "gpt-5",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
+    expect(pi.providers[0]?.config).toMatchObject({
+      baseUrl: "https://litellm.example.com/v1",
+      apiKey: "$LITELLM_API_KEY",
+      headers: { "x-litellm-customer-id": "openai-customer" },
+    });
+    expect(pi.providers[1]?.config).toMatchObject({
+      baseUrl: "https://litellm-anthropic.example.com/v1",
+      apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+      headers: { "x-litellm-customer-id": "anthropic-customer" },
+    });
+    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
+    expect((pi.providers[1]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "claude-sonnet",
+    ]);
+    expect(seenModelInfoRequests).toEqual([
+      {
+        url: "https://litellm.example.com/model/info",
+        authorization: "Bearer openai-key",
+        customer: "openai-customer",
+      },
+      {
+        url: "https://litellm-anthropic.example.com/model/info",
+        authorization: "Bearer anthropic-key",
+        customer: "anthropic-customer",
+      },
+    ]);
+    const defaultCache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
+      models: Array<{ id: string }>;
+    };
+    const aliasCache = JSON.parse(await readFile(join(agentDir, "litellm-models-litellm-anthropic.json"), "utf8")) as {
+      models: Array<{ id: string }>;
+    };
+    expect(defaultCache.models.map((model) => model.id)).toEqual(["gpt-5"]);
+    expect(aliasCache.models.map((model) => model.id)).toEqual(["claude-sonnet"]);
+  });
+
+  it("does not let the default helper override an alias-specific API key env", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["default-helper-key"]);
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+
+    const seenModelInfoRequests: Array<{ url: string; authorization: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenModelInfoRequests.push({
+          url,
+          authorization: new Headers(init?.headers).get("authorization") ?? "",
+        });
+        return jsonResponse(200, {
+          data: [{ model_name: url.includes("anthropic") ? "claude-sonnet" : "gpt-5", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(seenModelInfoRequests).toEqual([
+      { url: "https://litellm.example.com/model/info", authorization: "Bearer default-helper-key" },
+      { url: "https://litellm-anthropic.example.com/model/info", authorization: "Bearer anthropic-key" },
+    ]);
+    expect(pi.providers[0]?.config.apiKey).toBe(`!${helperPath}`);
+    expect(pi.providers[1]?.config.apiKey).toBe("$LITELLM_ANTHROPIC_API_KEY");
+  });
+
+  it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
+      { payload: { model: "kimi-k2.6" } },
+      { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
+    );
+
+    expect(result).toMatchObject({
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+      thinking: { type: "disabled" },
+    });
   });
 
   it("does not fetch on refresh when discovery timeout is zero", async () => {
