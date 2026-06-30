@@ -119,7 +119,7 @@ If your LiteLLM proxy exposes `/v1/skills`, enabled skills are fetched before ea
 
 The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes OpenAI-compatible and Anthropic routes whose upstreams are served by VidaiMock, then this extension's smoke runner discovers those models through LiteLLM and sends `/v1/chat/completions` requests through the proxy.
 
-This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The workflow also runs a non-interactive Pi CLI smoke with `--list-models` and `-p` so extension loading, model discovery, and a real completion path are covered without opening the TUI.
+This keeps the LiteLLM integration path under test but does not call real LLM APIs. No provider API keys or GitHub Models permission are required. The workflow also runs auth checks plus optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured for virtual-key and admin-route behavior. It also runs a non-interactive Pi CLI smoke with `--list-models` and `-p` so extension loading, model discovery, and a real completion path are covered without opening the TUI.
 
 ## Development
 

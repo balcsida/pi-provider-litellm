@@ -25,6 +25,8 @@ jobs:
       LITELLM_BASE_URL: http://127.0.0.1:4000
       LITELLM_API_KEY: sk-ci-litellm-smoke
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
+      LITELLM_LICENSE: ${{ secrets.LITELLM_LICENSE }}
+      LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: docker.litellm.ai/berriai/litellm:main-latest
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
@@ -83,6 +85,35 @@ jobs:
           cat .tmp/vidaimock.log >&2 || true
           exit 1
 
+      - name: Start LiteLLM smoke database
+        if: ${{ env.LITELLM_LICENSE != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name litellm-smoke-db \
+            -e POSTGRES_USER=litellm \
+            -e POSTGRES_PASSWORD=litellm \
+            -e POSTGRES_DB=litellm \
+            -p 5432:5432 \
+            postgres:16-alpine
+
+      - name: Wait for LiteLLM smoke database
+        if: ${{ env.LITELLM_LICENSE != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for _ in {1..30}; do
+            if docker exec litellm-smoke-db pg_isready -U litellm -d litellm; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs litellm-smoke-db >&2 || true
+          exit 1
+
       - name: Write LiteLLM smoke config
         shell: bash
         run: |
@@ -104,6 +135,13 @@ jobs:
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
           YAML
+          if [[ -n "${LITELLM_LICENSE:-}" ]]; then
+            cat >> .tmp/litellm_config.yaml <<YAML
+            database_url: ${LITELLM_DATABASE_URL}
+            store_model_in_db: true
+            admin_only_routes: ["/key/generate"]
+          YAML
+          fi
 
       - name: Start LiteLLM proxy
         shell: bash
@@ -115,6 +153,7 @@ jobs:
             -p 4000:4000 \
             -v "$PWD/.tmp/litellm_config.yaml:/app/config.yaml:ro" \
             -e LITELLM_MASTER_KEY \
+            -e LITELLM_LICENSE \
             "$LITELLM_IMAGE" \
             --config /app/config.yaml
 
@@ -138,6 +177,11 @@ jobs:
         env:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
         run: npx tsx scripts/smoke.ts
+
+      - name: Run auth smoke
+        env:
+          LITELLM_SMOKE_TIMEOUT_MS: '60000'
+        run: npx tsx scripts/smoke-auth.ts
 
       - name: Run Pi CLI smoke
         env:
@@ -171,6 +215,10 @@ jobs:
       - name: Stop LiteLLM proxy
         if: always()
         run: docker rm -f litellm-smoke || true
+
+      - name: Stop LiteLLM smoke database
+        if: always()
+        run: docker rm -f litellm-smoke-db || true
 
       - name: Stop VidaiMock
         if: always()
