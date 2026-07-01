@@ -25,7 +25,11 @@ function getSkillsFromBody(body: unknown): LiteLLMSkill[] {
   return [];
 }
 
-export async function listSkills(baseUrl: string, apiKey: string): Promise<LiteLLMSkill[]> {
+export async function listSkills(
+  baseUrl: string,
+  apiKey: string,
+  headers?: Record<string, string>,
+): Promise<LiteLLMSkill[]> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   if (
     skillsCache &&
@@ -38,7 +42,7 @@ export async function listSkills(baseUrl: string, apiKey: string): Promise<LiteL
 
   try {
     const response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) return [];
@@ -54,10 +58,12 @@ export async function createSkill(
   baseUrl: string,
   apiKey: string,
   input: { name: string; description: string; code: string; inputSchema?: Record<string, unknown> },
+  headers?: Record<string, string>,
 ): Promise<unknown> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills`, {
     method: "POST",
     headers: {
+      ...headers,
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
@@ -74,10 +80,15 @@ export async function createSkill(
   return response.json().catch(() => ({}));
 }
 
-export async function deleteSkill(baseUrl: string, apiKey: string, skillId: string): Promise<void> {
+export async function deleteSkill(
+  baseUrl: string,
+  apiKey: string,
+  skillId: string,
+  headers?: Record<string, string>,
+): Promise<void> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills/${encodeURIComponent(skillId)}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: { ...headers, Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok && response.status !== 404) throw new Error(`LiteLLM skill delete failed: HTTP ${response.status}`);
@@ -119,7 +130,11 @@ const DeleteSkillParams = Type.Object({
   skillId: Type.String({ description: "LiteLLM skill id" }),
 });
 
-export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Promise<string>): ToolDefinition[] {
+export function createSkillToolDefinitions(
+  baseUrl: string,
+  getApiKey: () => Promise<string>,
+  headers?: Record<string, string>,
+): ToolDefinition[] {
   return [
     defineTool({
       name: "litellm_skill_list",
@@ -129,7 +144,7 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
       parameters: Type.Object({}),
       async execute() {
         const apiKey = await getApiKey();
-        const skills = await listSkills(baseUrl, apiKey);
+        const skills = await listSkills(baseUrl, apiKey, headers);
         return { content: [{ type: "text", text: formatSkills(skills) }], details: { count: skills.length } };
       },
     }),
@@ -143,7 +158,7 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
         const inputSchema = params.inputSchemaJson
           ? (JSON.parse(params.inputSchemaJson) as Record<string, unknown>)
           : undefined;
-        const result = await createSkill(baseUrl, apiKey, { ...params, inputSchema });
+        const result = await createSkill(baseUrl, apiKey, { ...params, inputSchema }, headers);
         return { content: [{ type: "text", text: "LiteLLM skill created." }], details: { result } };
       },
     }),
@@ -154,7 +169,7 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
       parameters: DeleteSkillParams,
       async execute(_toolCallId, params: Static<typeof DeleteSkillParams>) {
         const apiKey = await getApiKey();
-        await deleteSkill(baseUrl, apiKey, params.skillId);
+        await deleteSkill(baseUrl, apiKey, params.skillId, headers);
         return { content: [{ type: "text", text: `LiteLLM skill deleted: ${params.skillId}` }], details: {} };
       },
     }),

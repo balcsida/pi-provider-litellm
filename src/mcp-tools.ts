@@ -57,11 +57,16 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   };
 }
 
-export async function discoverMcpTools(baseUrl: string, apiKey: string): Promise<LiteLLMMcpTool[]> {
+export async function discoverMcpTools(
+  baseUrl: string,
+  apiKey: string,
+  headers?: Record<string, string>,
+): Promise<LiteLLMMcpTool[]> {
   const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS);
   try {
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/list`, {
       headers: {
+        ...headers,
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
@@ -85,12 +90,14 @@ export async function executeMcpTool(
   serverId: string,
   toolName: string,
   args: Record<string, unknown>,
+  headers?: Record<string, string>,
 ): Promise<string> {
   const { signal, cancel } = withTimeout(CALL_TIMEOUT_MS);
   try {
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/call`, {
       method: "POST",
       headers: {
+        ...headers,
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
@@ -129,9 +136,10 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
 export async function createMcpToolDefinitions(
   baseUrl: string,
   getApiKey: () => Promise<string>,
+  headers?: Record<string, string>,
 ): Promise<ToolDefinition[]> {
   const discoveryApiKey = await getApiKey();
-  const tools = await discoverMcpTools(baseUrl, discoveryApiKey);
+  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, headers);
 
   return tools.map((mcpTool) => {
     const safeServer = sanitizeName(mcpTool.server_name);
@@ -157,6 +165,7 @@ export async function createMcpToolDefinitions(
           mcpTool.server_id ?? mcpTool.server_name,
           mcpTool.name,
           args,
+          headers,
         );
         return {
           content: [{ type: "text", text }],
