@@ -121,6 +121,14 @@ async function readHelperCount(agentDir: string): Promise<number> {
 
 const cachedModels = [{ id: "cached-model", name: "cached-model", provider: "litellm" }];
 
+async function writeModelsConfig(agentDir: string, modelOverrides: Record<string, unknown>): Promise<void> {
+  await writeFile(
+    join(agentDir, "models.json"),
+    JSON.stringify({ providers: { litellm: { modelOverrides } } }),
+    "utf8",
+  );
+}
+
 async function writeModelCache(agentDir: string, helperPath: string): Promise<void> {
   await writeFile(
     join(agentDir, "litellm-models.json"),
@@ -305,6 +313,56 @@ describe("extension startup", () => {
     await extension(pi);
 
     expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
+  });
+
+  it("applies models.json overrides to discovered models", async () => {
+    const agentDir = await makeAgentDir();
+    await writeModelsConfig(agentDir, {
+      "llm-gateway/gpt-5.5": { contextWindow: 272_000, maxTokens: 64_000 },
+    });
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "llm-gateway/gpt-5.5",
+              model_info: { mode: "chat", max_input_tokens: 128_000, max_output_tokens: 16_384 },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.models).toEqual([
+      expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 272_000, maxTokens: 64_000 }),
+    ]);
+  });
+
+  it("applies models.json overrides to cached models", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
+    await writeModelCache(agentDir, helperPath);
+    await writeModelsConfig(agentDir, { "cached-model": { contextWindow: 272_000 } });
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.models).toEqual([
+      expect.objectContaining({ id: "cached-model", contextWindow: 272_000 }),
+    ]);
   });
 
   it("discovers with the resolved stored auth key before LITELLM_API_KEY", async () => {

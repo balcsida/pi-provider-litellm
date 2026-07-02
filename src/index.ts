@@ -38,6 +38,15 @@ const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const EXPIRE_TOKEN_IMMEDIATELY = 0;
 
+type ModelOverride = Partial<
+  Pick<
+    ProviderModelConfig,
+    "name" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "headers" | "compat"
+  >
+> & {
+  cost?: Partial<ProviderModelConfig["cost"]>;
+};
+
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
 
 function getAuthPath(): string {
@@ -46,6 +55,43 @@ function getAuthPath(): string {
 
 function getCachePath(): string {
   return join(getAgentDir(), CACHE_FILENAME);
+}
+
+async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
+  try {
+    const raw = await readFile(join(getAgentDir(), "models.json"), "utf8");
+    const config = JSON.parse(raw) as {
+      providers?: Record<string, { modelOverrides?: Record<string, ModelOverride> }>;
+    };
+    return new Map(Object.entries(config.providers?.[PROVIDER_NAME]?.modelOverrides ?? {}));
+  } catch {
+    return new Map();
+  }
+}
+
+function applyModelOverride(model: ProviderModelConfig, override: ModelOverride): ProviderModelConfig {
+  const next = { ...model };
+  if (override.name !== undefined) next.name = override.name;
+  if (override.reasoning !== undefined) next.reasoning = override.reasoning;
+  if (override.thinkingLevelMap !== undefined) next.thinkingLevelMap = override.thinkingLevelMap;
+  if (override.input !== undefined) next.input = override.input;
+  if (override.contextWindow !== undefined) next.contextWindow = override.contextWindow;
+  if (override.maxTokens !== undefined) next.maxTokens = override.maxTokens;
+  if (override.headers !== undefined) next.headers = override.headers;
+  if (override.compat !== undefined) next.compat = { ...model.compat, ...override.compat };
+  if (override.cost !== undefined) next.cost = { ...model.cost, ...override.cost };
+  return next;
+}
+
+function applyModelOverrides(
+  models: ProviderModelConfig[],
+  overrides: Map<string, ModelOverride>,
+): ProviderModelConfig[] {
+  if (overrides.size === 0) return models;
+  return models.map((model) => {
+    const override = overrides.get(model.id);
+    return override ? applyModelOverride(model, override) : model;
+  });
 }
 
 async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
@@ -467,6 +513,7 @@ function normalizeThinkTags(message: AssistantMessage): AssistantMessage | undef
 
 export default async function (pi: ExtensionAPI): Promise<void> {
   let creds = await resolveCredentials({ executeHelpers: false });
+  const modelOverrides = await readModelOverrides();
   const cache = await readCache(getCachePath());
   let fp = creds.apiKeyFingerprint;
   let cacheFetchedAt = cache?.fetchedAt ?? 0;
@@ -539,7 +586,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       loginLiteLLM(callbacks, (next) => {
         cacheFetchedAt = next.fetchedAt;
         registerProvider(next.baseUrl, next.models);
-        updateCosts(next.models);
+        updateCosts(applyModelOverrides(next.models, modelOverrides));
       }),
     refreshToken: refreshLiteLLM,
     getApiKey: getLiteLLMApiKey,
@@ -551,6 +598,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     models: ProviderModelConfig[],
     apiKeyConfig = creds.apiKeyConfig ?? getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`,
   ): void {
+    const registeredModels = applyModelOverrides(models, modelOverrides);
     pi.registerProvider(PROVIDER_NAME, {
       baseUrl: baseUrl ? `${baseUrl}/v1` : "https://litellm.example.com/v1",
       // When LITELLM_API_KEY_HELPER is set we register the helper as a `!command` provider key.
@@ -562,14 +610,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       // "re-runs the helper command on every request" in tests/index.test.ts.
       apiKey: apiKeyConfig,
       api: "openai-completions",
-      models,
+      models: registeredModels,
       oauth,
     });
   }
 
   registerProvider(creds.baseUrl, models);
 
-  updateCosts = setupLiteLLMCostTracking(pi, models);
+  updateCosts = setupLiteLLMCostTracking(pi, applyModelOverrides(models, modelOverrides));
 
   let refreshInProgress: Promise<RefreshResult> | null = null;
 
@@ -637,7 +685,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       models: result.models,
     });
     registerProvider(fresh.baseUrl, result.models, fresh.apiKeyConfig);
-    updateCosts(result.models);
+    updateCosts(applyModelOverrides(result.models, modelOverrides));
     cacheFetchedAt = now;
     await registerMcpTools(fresh.baseUrl, fresh.apiKey);
     return { models: result.models, source: result.source };
@@ -672,7 +720,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       (next) => {
         cacheFetchedAt = next.fetchedAt;
         registerProvider(next.baseUrl, next.models);
-        updateCosts(next.models);
+        updateCosts(applyModelOverrides(next.models, modelOverrides));
       },
     );
 
