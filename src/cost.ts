@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
+const PROVIDER_NAME = "litellm";
+
 export interface ModelCostInfo {
   inputCostPerToken: number;
   outputCostPerToken: number;
@@ -30,7 +32,9 @@ export function setupLiteLLMCostTracking(
 
   updateCosts(models);
 
-  pi.on("after_provider_response", (event) => {
+  pi.on("after_provider_response", (event, ctx) => {
+    // Global Pi hook: responses from other providers must not feed LiteLLM cost state.
+    if (ctx.model?.provider !== PROVIDER_NAME) return;
     const costHeader = event.headers?.["x-litellm-response-cost"] ?? event.headers?.["X-Litellm-Response-Cost"];
     if (costHeader) {
       const cost = Number.parseFloat(String(costHeader));
@@ -43,7 +47,7 @@ export function setupLiteLLMCostTracking(
   });
 
   pi.on("message_end", async (event) => {
-    if (event.message.role !== "assistant") return;
+    if (event.message.role !== "assistant" || event.message.provider !== PROVIDER_NAME) return;
 
     const usage = event.message.usage;
     if (!usage) return;

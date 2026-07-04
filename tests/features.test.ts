@@ -608,12 +608,16 @@ describe("feature parity", () => {
     }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
-    responseHandler?.({ headers: { "x-litellm-response-cost": "0.42" } });
+    responseHandler?.(
+      { headers: { "x-litellm-response-cost": "0.42" } },
+      { model: { provider: "litellm", id: "anthropic/claude-3-5-sonnet" } },
+    );
 
     const endHandler = pi.handlers.get("message_end")?.[0];
     const result = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "anthropic/claude-3-5-sonnet",
         usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
       },
@@ -628,6 +632,99 @@ describe("feature parity", () => {
         },
       },
     });
+  });
+
+  it("does not apply LiteLLM model costs to other providers' messages", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "anthropic/claude-3-5-sonnet",
+              model_info: {
+                mode: "chat",
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // Same model id discovered through LiteLLM, but the message came from
+    // a direct provider — LiteLLM pricing must not overwrite its cost.
+    const endHandler = pi.handlers.get("message_end")?.[0];
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "anthropic",
+        model: "anthropic/claude-3-5-sonnet",
+        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+      },
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it("ignores LiteLLM cost headers captured from non-LiteLLM responses", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "anthropic/claude-3-5-sonnet",
+              model_info: {
+                mode: "chat",
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000003,
+                cache_creation_input_token_cost: 0.00000375,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const responseHandler = pi.handlers.get("after_provider_response")?.[0];
+    responseHandler?.(
+      { headers: { "x-litellm-response-cost": "0.42" } },
+      { model: { provider: "openai-codex", id: "gpt-5.5" } },
+    );
+
+    const endHandler = pi.handlers.get("message_end")?.[0];
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "litellm",
+        model: "anthropic/claude-3-5-sonnet",
+        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+      },
+    });
+
+    // Falls back to per-token pricing instead of the foreign header cost.
+    expect(result.message.usage.cost.total).toBeCloseTo(0.00107175, 10);
   });
 
   it("updates costs after litellm-refresh", async () => {
@@ -674,6 +771,7 @@ describe("feature parity", () => {
     const initialResult = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },
@@ -697,6 +795,7 @@ describe("feature parity", () => {
     const refreshedResult = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },
@@ -831,6 +930,7 @@ describe("feature parity", () => {
       const result = await endHandler?.({
         message: {
           role: "assistant",
+          provider: "litellm",
           model: "test-model",
           usage: { input: 1000, output: 1000 },
         },
@@ -892,6 +992,7 @@ describe("feature parity", () => {
     const result = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },

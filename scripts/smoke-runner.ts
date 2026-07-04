@@ -20,7 +20,19 @@ export type SmokeOptions = {
   apiKey: string;
   modelIds: string[];
   timeoutMs?: number;
+  expectedSource?: DiscoverySource;
 };
+
+const DISCOVERY_SOURCES: DiscoverySource[] = ["model_info", "models_list", "health"];
+
+export function parseExpectedSource(raw: string | undefined): DiscoverySource | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  if (!(DISCOVERY_SOURCES as string[]).includes(trimmed)) {
+    throw new Error(`LITELLM_SMOKE_EXPECT_SOURCE must be one of ${DISCOVERY_SOURCES.join(", ")}; got ${trimmed}`);
+  }
+  return trimmed as DiscoverySource;
+}
 
 type ChatCompletionResponse = {
   choices?: Array<{
@@ -102,6 +114,9 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
   }
 
   const discovery = await discoverModels(baseUrl, options.apiKey, { timeoutMs });
+  if (options.expectedSource && discovery.source !== options.expectedSource) {
+    throw new Error(`Discovery source mismatch: expected ${options.expectedSource}, got ${discovery.source}`);
+  }
   const discovered = new Set(discovery.models.map((model) => model.id));
   const missing = options.modelIds.filter((modelId) => !discovered.has(modelId));
   if (missing.length > 0) {
@@ -135,5 +150,6 @@ export async function runSmokeFromEnv(env: NodeJS.ProcessEnv = process.env): Pro
     apiKey,
     modelIds: parseSmokeModels(env.LITELLM_SMOKE_MODELS),
     timeoutMs: Number.isNaN(timeoutMs) || timeoutMs <= 0 ? DEFAULT_TIMEOUT_MS : timeoutMs,
+    expectedSource: parseExpectedSource(env.LITELLM_SMOKE_EXPECT_SOURCE),
   });
 }
