@@ -35,6 +35,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
+    expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
+    expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC"');
+    expect(workflow).toContain('grep -F "Anthropic mock response"');
 
     expect(workflow).not.toContain("models: read");
     expect(workflow).not.toContain("GH_MODELS_SMOKE_MODEL");

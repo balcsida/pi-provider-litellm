@@ -29,6 +29,7 @@ jobs:
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
+      LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
       VIDAIMOCK_VERSION: v0.2.7
 
@@ -160,6 +161,17 @@ jobs:
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
           grep -F "mock response" /tmp/pi-litellm-response.txt
+
+          # Anthropic-backed route: covers the cacheControlFormat "anthropic"
+          # compat path through LiteLLM's Anthropic translation.
+          ./node_modules/.bin/pi \
+            -e ./dist/index.js \
+            --provider litellm \
+            --model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC" \
+            --no-tools \
+            --no-session \
+            -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
+          grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
 
       - name: Dump LiteLLM logs
         if: failure()
