@@ -1480,4 +1480,30 @@ describe("multi-provider hardening", () => {
     expect(pi.providers[1]?.config.models).toEqual([]);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("litellm-anthropic"));
   });
+
+  it("does not register the default env key for an alias missing its apiKey", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": { baseUrl: "https://litellm-anthropic.example.com" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+    expect(pi.providers[1]?.name).toBe("litellm-anthropic");
+    expect(pi.providers[1]?.config.apiKey).toBeUndefined();
+  });
 });

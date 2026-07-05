@@ -899,10 +899,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let updateCosts: (models: ProviderModelConfig[]) => void = () => undefined;
   const updateAllCosts = (): void => updateCosts(providerStates.flatMap((state) => state.models));
 
-  function defaultApiKeyConfig(definition: ProviderDefinition): string {
-    return (
-      (definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined) ?? definition.apiKeyConfig ?? `$${ENV_API_KEY}`
-    );
+  function defaultApiKeyConfig(definition: ProviderDefinition): string | undefined {
+    if (definition.useDefaultEnv) {
+      return getApiKeyHelperCommand() ?? definition.apiKeyConfig ?? `$${ENV_API_KEY}`;
+    }
+    // An alias must never inherit the default provider's env key; leaving the
+    // key unset makes requests fail loudly instead of leaking credentials.
+    return definition.apiKeyConfig;
   }
 
   function registerProvider(
