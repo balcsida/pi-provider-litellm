@@ -1706,4 +1706,29 @@ describe("multi-provider hardening", () => {
 
     expect(seenRequests).toContainEqual({ url: "https://litellm.example.com/key/generate", customer: "team-a" });
   });
+
+  it("skips an alias whose cache file would collide with another provider", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "team-claude": { baseUrl: "https://a.example.com", apiKey: "$LITELLM_ANTHROPIC_API_KEY" },
+            "Team Claude": { baseUrl: "https://b.example.com", apiKey: "$LITELLM_ANTHROPIC_API_KEY" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "team-claude"]);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Team Claude"));
+  });
 });

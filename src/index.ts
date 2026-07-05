@@ -559,10 +559,22 @@ async function getProviderDefinitions(): Promise<ProviderDefinition[]> {
   });
 
   const definitions = [makeDefinition(PROVIDER_NAME, defaultSettings, true)];
+  const usedCacheSegments = new Map<string, string>();
   for (const [name, raw] of Object.entries(providerSettings ?? {})) {
     if (name === PROVIDER_NAME) continue;
     const normalized = normalizeProviderSettings(raw);
     if (!normalized) continue;
+    // Distinct alias names can sanitize to the same cache file; registering
+    // both would let their model caches silently clobber each other.
+    const segment = sanitizeCacheSegment(name);
+    const existing = usedCacheSegments.get(segment);
+    if (existing) {
+      process.stderr.write(
+        `LiteLLM: provider alias "${name}" would share a cache file with "${existing}"; skipping it. Rename the alias.\n`,
+      );
+      continue;
+    }
+    usedCacheSegments.set(segment, name);
     definitions.push(makeDefinition(name, normalized, false));
   }
   return definitions;
