@@ -65,6 +65,44 @@ function stripJsonComments(input: string): string {
     .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail: string | undefined) => tail ?? m);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Mirrors pi core's ModelOverrideSchema: core rejects the whole models.json on invalid values,
+// so anything dropped here would also have been flagged for built-in providers.
+const MODEL_OVERRIDE_VALIDATORS: Record<keyof ModelOverride, (value: unknown) => boolean> = {
+  name: (value) => typeof value === "string",
+  reasoning: (value) => typeof value === "boolean",
+  thinkingLevelMap: isPlainObject,
+  input: Array.isArray,
+  contextWindow: (value) => typeof value === "number",
+  maxTokens: (value) => typeof value === "number",
+  headers: isPlainObject,
+  compat: isPlainObject,
+  cost: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "number"),
+};
+
+function sanitizeModelOverride(modelId: string, raw: unknown): ModelOverride | undefined {
+  if (!isPlainObject(raw)) {
+    process.stderr.write(`LiteLLM: ignoring model override for ${modelId} in models.json (not an object).\n`);
+    return undefined;
+  }
+  const override: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    const isValid = MODEL_OVERRIDE_VALIDATORS[key as keyof ModelOverride];
+    if (isValid?.(value)) override[key] = value;
+    else dropped.push(key);
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(
+      `LiteLLM: ignoring invalid model override field(s) for ${modelId} in models.json: ${dropped.join(", ")}.\n`,
+    );
+  }
+  return override as ModelOverride;
+}
+
 async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
   let raw: string;
   try {
@@ -74,9 +112,14 @@ async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
   }
   try {
     const config = JSON.parse(stripJsonComments(raw)) as {
-      providers?: Record<string, { modelOverrides?: Record<string, ModelOverride> }>;
+      providers?: Record<string, { modelOverrides?: Record<string, unknown> }>;
     };
-    return new Map(Object.entries(config.providers?.[PROVIDER_NAME]?.modelOverrides ?? {}));
+    const overrides = new Map<string, ModelOverride>();
+    for (const [id, rawOverride] of Object.entries(config.providers?.[PROVIDER_NAME]?.modelOverrides ?? {})) {
+      const override = sanitizeModelOverride(id, rawOverride);
+      if (override) overrides.set(id, override);
+    }
+    return overrides;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`LiteLLM: ignoring model overrides (failed to parse models.json: ${message}).\n`);

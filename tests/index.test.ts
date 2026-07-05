@@ -467,6 +467,28 @@ describe("extension startup", () => {
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("models.json"));
   });
 
+  it("warns and drops override fields with invalid types", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
+    await writeModelCache(agentDir, helperPath, [
+      { id: "cached-model", name: "cached-model", provider: "litellm", contextWindow: 128_000 },
+    ]);
+    await writeModelsConfig(agentDir, { "cached-model": { contextWindow: "272000", maxTokens: 64_000 } });
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.models).toEqual([
+      expect.objectContaining({ id: "cached-model", contextWindow: 128_000, maxTokens: 64_000 }),
+    ]);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("contextWindow"));
+  });
+
   it("discovers with the resolved stored auth key before LITELLM_API_KEY", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(
