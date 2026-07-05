@@ -489,6 +489,37 @@ describe("extension startup", () => {
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("contextWindow"));
   });
 
+  it("drops override fields whose values violate the core schema", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
+    await writeModelCache(agentDir, helperPath, [
+      { id: "cached-model", name: "cached-model", provider: "litellm", contextWindow: 128_000 },
+    ]);
+    await writeModelsConfig(agentDir, {
+      "cached-model": {
+        headers: { "X-Team": "core", "X-Retries": 3 },
+        thinkingLevelMap: { low: 42 },
+        input: ["text", "audio"],
+        maxTokens: 64_000,
+      },
+    });
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const model = pi.providers[0]?.config.models?.[0] as Record<string, unknown>;
+    expect(model).toEqual(expect.objectContaining({ id: "cached-model", maxTokens: 64_000 }));
+    expect(model.headers).toBeUndefined();
+    expect(model.thinkingLevelMap).toBeUndefined();
+    expect(model.input).toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("headers, thinkingLevelMap, input"));
+  });
+
   it("applies models.json overrides written after startup on refresh", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";

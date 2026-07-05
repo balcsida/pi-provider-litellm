@@ -69,16 +69,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
 // Mirrors pi core's ModelOverrideSchema: core rejects the whole models.json on invalid values,
-// so anything dropped here would also have been flagged for built-in providers.
+// so anything dropped here would also have been flagged for built-in providers. Headers matter
+// most: pi resolves each header value as a config string, so non-strings break requests.
 const MODEL_OVERRIDE_VALIDATORS: Record<keyof ModelOverride, (value: unknown) => boolean> = {
   name: (value) => typeof value === "string",
   reasoning: (value) => typeof value === "boolean",
-  thinkingLevelMap: isPlainObject,
-  input: Array.isArray,
+  thinkingLevelMap: (value) =>
+    isPlainObject(value) && THINKING_LEVELS.every((level) => value[level] == null || typeof value[level] === "string"),
+  input: (value) => Array.isArray(value) && value.every((entry) => entry === "text" || entry === "image"),
   contextWindow: (value) => typeof value === "number",
   maxTokens: (value) => typeof value === "number",
-  headers: isPlainObject,
+  headers: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "string"),
   compat: isPlainObject,
   cost: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "number"),
 };
