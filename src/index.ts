@@ -1154,23 +1154,40 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify(`LiteLLM refresh failed: unknown provider ${requestedProvider}`, "error");
         return;
       }
-      try {
-        const results = await Promise.all(statesToRefresh.map(runRefresh));
-        if (results.length === 1) {
-          const result = results[0];
+      const settled = await Promise.allSettled(statesToRefresh.map(runRefresh));
+      const succeeded = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+      const failed = settled
+        .map((result, index) => ({ result, name: statesToRefresh[index].definition.name }))
+        .filter(({ result }) => result.status === "rejected")
+        .map(({ result, name }) => {
+          const reason = (result as PromiseRejectedResult).reason;
+          return { name, message: reason instanceof Error ? reason.message : String(reason) };
+        });
+      if (failed.length === 0) {
+        if (succeeded.length === 1) {
+          const result = succeeded[0];
           ctx.ui.notify(`LiteLLM: ${result.models.length} models refreshed (source: ${result.source})`, "info");
           return;
         }
         ctx.ui.notify(
-          `LiteLLM: ${results.length} providers refreshed (${results
+          `LiteLLM: ${succeeded.length} providers refreshed (${succeeded
             .map((result) => `${result.providerName}: ${result.models.length} models`)
             .join(", ")})`,
           "info",
         );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`LiteLLM refresh failed: ${message}`, "error");
+        return;
       }
+      const failures = failed.map(({ name, message }) => (settled.length === 1 ? message : `${name}: ${message}`));
+      if (succeeded.length === 0) {
+        ctx.ui.notify(`LiteLLM refresh failed: ${failures.join("; ")}`, "error");
+        return;
+      }
+      ctx.ui.notify(
+        `LiteLLM: refreshed ${succeeded
+          .map((result) => `${result.providerName}: ${result.models.length} models`)
+          .join(", ")}; failed ${failures.join("; ")}`,
+        "warning",
+      );
     },
   });
 

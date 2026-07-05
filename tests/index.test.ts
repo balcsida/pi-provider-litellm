@@ -1633,4 +1633,46 @@ describe("multi-provider hardening", () => {
       expect.stringContaining("LiteLLM (litellm-anthropic): configured apiKey did not resolve"),
     );
   });
+
+  it("reports both successes and failures when /litellm-refresh spans providers", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$UNSET_ALIAS_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    delete process.env.UNSET_ALIAS_KEY;
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://litellm.example.com/model/info") {
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const notify = vi.fn();
+    await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [message, type] = notify.mock.calls[0] ?? [];
+    expect(type).toBe("warning");
+    expect(message).toContain("litellm: 1 models");
+    expect(message).toContain("litellm-anthropic");
+  });
 });
