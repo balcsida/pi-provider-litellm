@@ -57,9 +57,11 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   };
 }
 
-export async function discoverMcpTools(baseUrl: string, apiKey: string): Promise<LiteLLMMcpTool[]> {
+export async function discoverMcpTools(baseUrl: string, apiKey: string, onProgress?: (message: string) => void): Promise<LiteLLMMcpTool[]> {
+  onProgress?.("Discovering MCP tools from server...");
   const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS);
   try {
+    onProgress?.("Querying MCP tools/list endpoint...");
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/list`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -67,12 +69,19 @@ export async function discoverMcpTools(baseUrl: string, apiKey: string): Promise
       },
       signal,
     });
-    if (!response.ok) return [];
+    if (!response.ok) {
+      onProgress?.(`MCP tools discovery failed with status ${response.status}`);
+      return [];
+    }
     const body = (await response.json()) as unknown;
     const bodyRecord = asRecord(body);
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : [];
-    return rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
+    onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
+    const normalized = rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
+    onProgress?.(`Successfully discovered ${normalized.length} MCP tools`);
+    return normalized;
   } catch {
+    onProgress?.("MCP tools discovery encountered an error");
     return [];
   } finally {
     cancel();
@@ -129,9 +138,10 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
 export async function createMcpToolDefinitions(
   baseUrl: string,
   getApiKey: () => Promise<string>,
+  onProgress?: (message: string) => void,
 ): Promise<ToolDefinition[]> {
   const discoveryApiKey = await getApiKey();
-  const tools = await discoverMcpTools(baseUrl, discoveryApiKey);
+  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, onProgress);
 
   return tools.map((mcpTool) => {
     const safeServer = sanitizeName(mcpTool.server_name);

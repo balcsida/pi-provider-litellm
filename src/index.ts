@@ -32,6 +32,10 @@ const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const EXPIRE_TOKEN_IMMEDIATELY = 0;
 
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
+/** Stored UI notify callback from the first session_start, so refresh runs
+ * can use the TUI instead of writing to stderr (which would break the
+ * graphical console). */
+let uiNotify: ((message: string, type?: "info" | "warning" | "error") => void) | null = null;
 
 function getAuthPath(): string {
   return join(getAgentDir(), "auth.json");
@@ -209,7 +213,7 @@ function isListModelsMode(): boolean {
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions,
+  options: DiscoveryOptions & { onProgress?: (message: string) => void },
 ): Promise<{ result: DiscoveryResult; warning?: string }> {
   try {
     return { result: await discoverModels(baseUrl, apiKey, options) };
@@ -296,6 +300,7 @@ async function loginLiteLLM(
   const { models, source } = await discoverModels(baseUrl, apiKey, {
     timeoutMs: getDiscoveryTimeoutMs(),
     signal: callbacks.signal,
+    onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
   });
 
   const cache: CacheFile = {
@@ -462,6 +467,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const timeoutMs = getDiscoveryTimeoutMs();
     const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
       timeoutMs,
+      onProgress: (message) => process.stderr.write(`LiteLLM: ${message}\n`),
     });
     if (warning) {
       if (cacheValid && cache) {
@@ -565,7 +571,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   async function registerMcpTools(baseUrl: string | undefined, discoveryApiKey: string | undefined): Promise<void> {
     if (!baseUrl || !discoveryApiKey || discoveryDisabledReason()) return;
     try {
-      const tools = await createMcpToolDefinitions(baseUrl, seededRuntimeApiKey(discoveryApiKey));
+      const tools = await createMcpToolDefinitions(baseUrl, seededRuntimeApiKey(discoveryApiKey), (message) =>
+        process.stderr.write(`LiteLLM MCP: ${message}\n`)
+      );
       for (const tool of tools) {
         pi.registerTool(tool);
       }
@@ -585,7 +593,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
       throw new Error("no credentials. Run /login litellm or set env vars.");
     }
-    const result = await discoverModels(fresh.baseUrl, fresh.apiKey, { timeoutMs: getDiscoveryTimeoutMs() });
+    const progressFn = uiNotify
+      ? (message: string) => uiNotify(`LiteLLM: ${message}`, "info")
+      : (message: string) => process.stderr.write(`LiteLLM: ${message}\n`);
+    const result = await discoverModels(fresh.baseUrl, fresh.apiKey, {
+      timeoutMs: getDiscoveryTimeoutMs(),
+      onProgress: progressFn,
+    });
     const now = Date.now();
     await writeCache(getCachePath(), {
       baseUrl: fresh.baseUrl,
