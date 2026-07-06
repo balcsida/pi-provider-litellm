@@ -359,6 +359,138 @@ describe("feature parity", () => {
     });
   });
 
+  it("drops reasoning fields for llm-gateway/gpt-5.5 tool requests", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "llm-gateway/gpt-5.5",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      {
+        payload: {
+          input: [
+            { type: "reasoning", id: "rs_1", encrypted_content: "opaque" },
+            { type: "message", role: "user", content: "hi" },
+          ],
+          tools: [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }],
+          reasoning: { effort: "high", summary: "auto" },
+          reasoning_effort: "high",
+          include: ["reasoning.encrypted_content", "other"],
+          include_reasoning: true,
+          reasoning_content: true,
+          merge_reasoning_content_in_choices: false,
+          thinking: { type: "enabled" },
+        },
+      },
+      { model: { provider: "litellm", id: "llm-gateway/gpt-5.5" } },
+    );
+    expect(updated).toEqual({
+      input: [{ type: "message", role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }],
+      include: ["other"],
+    });
+  });
+
+  it("leaves gpt-5.5 tool requests without reasoning fields unchanged", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "llm-gateway/gpt-5.5",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const updated = beforeRequest?.(
+      {
+        payload: {
+          input: [{ type: "message", role: "user", content: "hi" }],
+          tools: [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }],
+          include: ["other"],
+        },
+      },
+      { model: { provider: "litellm", id: "llm-gateway/gpt-5.5" } },
+    );
+    expect(updated).toBeUndefined();
+  });
+
+  it("drops reasoning fields for gpt-5.5 route aliases", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "gpt-5.5-20260504143601",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    for (const id of ["gpt-5.5", "openai/gpt-5.5", "gpt-5.5-20260504143601"]) {
+      const updated = beforeRequest?.(
+        {
+          payload: {
+            messages: [],
+            tools: [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }],
+            reasoning: { effort: "high" },
+          },
+        },
+        { model: { provider: "litellm", id } },
+      );
+      expect(updated, id).toEqual({
+        messages: [],
+        tools: [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }],
+      });
+    }
+  });
+
   it("normalizes Kimi think tags into Pi thinking blocks", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
@@ -476,12 +608,16 @@ describe("feature parity", () => {
     }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
-    responseHandler?.({ headers: { "x-litellm-response-cost": "0.42" } });
+    responseHandler?.(
+      { headers: { "x-litellm-response-cost": "0.42" } },
+      { model: { provider: "litellm", id: "anthropic/claude-3-5-sonnet" } },
+    );
 
     const endHandler = pi.handlers.get("message_end")?.[0];
     const result = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "anthropic/claude-3-5-sonnet",
         usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
       },
@@ -496,6 +632,99 @@ describe("feature parity", () => {
         },
       },
     });
+  });
+
+  it("does not apply LiteLLM model costs to other providers' messages", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "anthropic/claude-3-5-sonnet",
+              model_info: {
+                mode: "chat",
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // Same model id discovered through LiteLLM, but the message came from
+    // a direct provider — LiteLLM pricing must not overwrite its cost.
+    const endHandler = pi.handlers.get("message_end")?.[0];
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "anthropic",
+        model: "anthropic/claude-3-5-sonnet",
+        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+      },
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it("ignores LiteLLM cost headers captured from non-LiteLLM responses", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "anthropic/claude-3-5-sonnet",
+              model_info: {
+                mode: "chat",
+                input_cost_per_token: 0.000003,
+                output_cost_per_token: 0.000015,
+                cache_read_input_token_cost: 0.0000003,
+                cache_creation_input_token_cost: 0.00000375,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const responseHandler = pi.handlers.get("after_provider_response")?.[0];
+    responseHandler?.(
+      { headers: { "x-litellm-response-cost": "0.42" } },
+      { model: { provider: "openai-codex", id: "gpt-5.5" } },
+    );
+
+    const endHandler = pi.handlers.get("message_end")?.[0];
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "litellm",
+        model: "anthropic/claude-3-5-sonnet",
+        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+      },
+    });
+
+    // Falls back to per-token pricing instead of the foreign header cost.
+    expect(result.message.usage.cost.total).toBeCloseTo(0.00107175, 10);
   });
 
   it("updates costs after litellm-refresh", async () => {
@@ -542,6 +771,7 @@ describe("feature parity", () => {
     const initialResult = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },
@@ -565,6 +795,7 @@ describe("feature parity", () => {
     const refreshedResult = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },
@@ -699,6 +930,7 @@ describe("feature parity", () => {
       const result = await endHandler?.({
         message: {
           role: "assistant",
+          provider: "litellm",
           model: "test-model",
           usage: { input: 1000, output: 1000 },
         },
@@ -760,6 +992,7 @@ describe("feature parity", () => {
     const result = await endHandler?.({
       message: {
         role: "assistant",
+        provider: "litellm",
         model: "test-model",
         usage: { input: 1000, output: 1000 },
       },

@@ -21,6 +21,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Wait for VidaiMock");
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
     expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
+    expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
     expect(workflow).toContain("model_name: anthropic/vidaimock-claude");
@@ -34,6 +35,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
+    expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
+    expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC"');
+    expect(workflow).toContain('grep -F "Anthropic mock response"');
 
     expect(workflow).not.toContain("models: read");
     expect(workflow).not.toContain("GH_MODELS_SMOKE_MODEL");

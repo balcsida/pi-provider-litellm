@@ -180,6 +180,31 @@ describe("runSmoke", () => {
     ).rejects.toThrow(/Timed out after 25ms/);
   });
 
+  it("fails before completion calls when discovery uses an unexpected source", async () => {
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      runSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKey: "sk-smoke",
+        modelIds: ["github-models-openai"],
+        timeoutMs: 1000,
+        expectedSource: "models_list",
+      }),
+    ).rejects.toThrow(/Discovery source mismatch: expected models_list, got model_info/);
+    expect(requestedUrls).toEqual(["http://127.0.0.1:4000/model/info"]);
+  });
+
   it("truncates oversized provider error bodies in failures", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -263,6 +288,45 @@ describe("runSmokeFromEnv", () => {
       url: "http://127.0.0.1:4000/model/info",
       headers: { Authorization: "Bearer sk-env" },
     });
+  });
+
+  it("accepts a matching LITELLM_SMOKE_EXPECT_SOURCE", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await runSmokeFromEnv({
+      LITELLM_BASE_URL: "http://127.0.0.1:4000",
+      LITELLM_API_KEY: "sk-env",
+      LITELLM_SMOKE_MODELS: "github-models-openai",
+      LITELLM_SMOKE_TIMEOUT_MS: "1000",
+      LITELLM_SMOKE_EXPECT_SOURCE: "model_info",
+    });
+
+    expect(result.source).toBe("model_info");
+  });
+
+  it("rejects an invalid LITELLM_SMOKE_EXPECT_SOURCE without any network calls", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected fetch"));
+
+    await expect(
+      runSmokeFromEnv({
+        LITELLM_BASE_URL: "http://127.0.0.1:4000",
+        LITELLM_API_KEY: "sk-env",
+        LITELLM_SMOKE_MODELS: "github-models-openai",
+        LITELLM_SMOKE_EXPECT_SOURCE: "bogus",
+      }),
+    ).rejects.toThrow(/LITELLM_SMOKE_EXPECT_SOURCE must be one of model_info, models_list, health/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("requires LiteLLM base URL and API key settings", async () => {

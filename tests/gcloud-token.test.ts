@@ -109,8 +109,8 @@ describe("getGcloudToken", () => {
 
   it("returns null and warns when no ADC file exists", async () => {
     delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    delete process.env.HOME;
     delete process.env.APPDATA;
+    process.env.HOME = await mkdtemp(join(tmpdir(), "pi-litellm-no-adc-"));
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(getGcloudToken()).resolves.toBeNull();

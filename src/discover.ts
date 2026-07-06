@@ -51,9 +51,17 @@ export function normalizeBaseUrl(input: string): string {
 const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
 const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
+// Deployments expose the gpt-5.5 route under varying names (`llm-gateway/gpt-5.5`,
+// bare `gpt-5.5`, dated ids like `gpt-5.5-20260504143601`); match them all so the
+// tool+reasoning workaround survives route renames.
+const GPT55_MODEL_PATTERN = /(?:^|\/)gpt-5\.5(?:$|[-.])/i;
 
 export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
+}
+
+export function isGpt55Model(modelId: string): boolean {
+  return GPT55_MODEL_PATTERN.test(modelId);
 }
 
 export function shouldSuppressReasoningContent(modelId: string): boolean {

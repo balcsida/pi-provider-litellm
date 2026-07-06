@@ -6,7 +6,13 @@ import type { ExtensionAPI, ExtensionContext, ProviderModelConfig } from "@earen
 import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent, withTimeout } from "./discover.js";
+import {
+  discoverModels,
+  isGpt55Model,
+  normalizeBaseUrl,
+  shouldSuppressReasoningContent,
+  withTimeout,
+} from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -31,6 +37,15 @@ const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const EXPIRE_TOKEN_IMMEDIATELY = 0;
 
+type ModelOverride = Partial<
+  Pick<
+    ProviderModelConfig,
+    "name" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "headers" | "compat"
+  >
+> & {
+  cost?: Partial<ProviderModelConfig["cost"]>;
+};
+
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
 /** Stored UI notify callback from the first session_start, so refresh runs
  * can use the TUI instead of writing to stderr (which would break the
@@ -43,6 +58,131 @@ function getAuthPath(): string {
 
 function getCachePath(): string {
   return join(getAgentDir(), CACHE_FILENAME);
+}
+
+// Same tolerance as pi core's models.json loader (stripJsonComments in dist/utils/json.js):
+// strip `//` line comments and trailing commas, leaving string literals untouched.
+function stripJsonComments(input: string): string {
+  return input
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
+    .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail: string | undefined) => tail ?? m);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+// Mirrors pi core's ModelOverrideSchema: core rejects the whole models.json on invalid values,
+// so anything dropped here would also have been flagged for built-in providers. Headers matter
+// most: pi resolves each header value as a config string, so non-strings break requests.
+const MODEL_OVERRIDE_VALIDATORS: Record<keyof ModelOverride, (value: unknown) => boolean> = {
+  name: (value) => typeof value === "string",
+  reasoning: (value) => typeof value === "boolean",
+  thinkingLevelMap: (value) =>
+    isPlainObject(value) && THINKING_LEVELS.every((level) => value[level] == null || typeof value[level] === "string"),
+  input: (value) => Array.isArray(value) && value.every((entry) => entry === "text" || entry === "image"),
+  contextWindow: (value) => typeof value === "number",
+  maxTokens: (value) => typeof value === "number",
+  headers: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "string"),
+  compat: isPlainObject,
+  cost: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "number"),
+};
+
+function sanitizeModelOverride(modelId: string, raw: unknown): ModelOverride | undefined {
+  if (!isPlainObject(raw)) {
+    process.stderr.write(`LiteLLM: ignoring model override for ${modelId} in models.json (not an object).\n`);
+    return undefined;
+  }
+  const override: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    const isValid = MODEL_OVERRIDE_VALIDATORS[key as keyof ModelOverride];
+    if (isValid?.(value)) override[key] = value;
+    else dropped.push(key);
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(
+      `LiteLLM: ignoring invalid model override field(s) for ${modelId} in models.json: ${dropped.join(", ")}.\n`,
+    );
+  }
+  return override as ModelOverride;
+}
+
+async function readModelOverrides(): Promise<Map<string, ModelOverride>> {
+  let raw: string;
+  try {
+    raw = await readFile(join(getAgentDir(), "models.json"), "utf8");
+  } catch {
+    return new Map();
+  }
+  try {
+    const config = JSON.parse(stripJsonComments(raw)) as {
+      providers?: Record<string, { modelOverrides?: Record<string, unknown> }>;
+    };
+    const overrides = new Map<string, ModelOverride>();
+    for (const [id, rawOverride] of Object.entries(config.providers?.[PROVIDER_NAME]?.modelOverrides ?? {})) {
+      const override = sanitizeModelOverride(id, rawOverride);
+      if (override) overrides.set(id, override);
+    }
+    return overrides;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`LiteLLM: ignoring model overrides (failed to parse models.json: ${message}).\n`);
+    return new Map();
+  }
+}
+
+// Merge semantics must match pi core's applyModelOverride/mergeCompat (dist/core/model-registry.js)
+// so the same models.json entry behaves identically for litellm and built-in providers.
+function mergeCompat(
+  base: ProviderModelConfig["compat"],
+  override: ProviderModelConfig["compat"],
+): ProviderModelConfig["compat"] {
+  if (!override) return base;
+  const merged = { ...base, ...override } as Record<string, unknown>;
+  for (const key of ["openRouterRouting", "vercelGatewayRouting", "chatTemplateKwargs"]) {
+    const baseValue = (base as Record<string, unknown> | undefined)?.[key];
+    const overrideValue = (override as Record<string, unknown>)[key];
+    if (baseValue || overrideValue) {
+      merged[key] = { ...(baseValue as object | undefined), ...(overrideValue as object | undefined) };
+    }
+  }
+  return merged as ProviderModelConfig["compat"];
+}
+
+function applyModelOverride(model: ProviderModelConfig, override: ModelOverride): ProviderModelConfig {
+  const next = { ...model };
+  if (override.name !== undefined) next.name = override.name;
+  if (override.reasoning !== undefined) next.reasoning = override.reasoning;
+  if (override.thinkingLevelMap !== undefined) {
+    next.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
+  }
+  if (override.input !== undefined) next.input = override.input;
+  if (override.contextWindow !== undefined) next.contextWindow = override.contextWindow;
+  if (override.maxTokens !== undefined) next.maxTokens = override.maxTokens;
+  if (override.headers !== undefined) next.headers = override.headers;
+  if (override.compat !== undefined) next.compat = mergeCompat(model.compat, override.compat);
+  if (override.cost !== undefined) next.cost = { ...model.cost, ...override.cost };
+  return next;
+}
+
+function applyModelOverrides(
+  models: ProviderModelConfig[],
+  overrides: Map<string, ModelOverride>,
+): ProviderModelConfig[] {
+  if (overrides.size === 0) return models;
+  return models.map((model) => {
+    const override = overrides.get(model.id);
+    return override ? applyModelOverride(model, override) : model;
+  });
+}
+
+// Re-reads models.json on every call so overrides edited mid-session take effect on the next
+// refresh or login, matching pi core's live reload for built-in providers.
+async function applyOverrides(models: ProviderModelConfig[]): Promise<ProviderModelConfig[]> {
+  return applyModelOverrides(models, await readModelOverrides());
 }
 
 async function readAuthEntry(): Promise<AuthFileEntry | undefined> {
@@ -228,7 +368,7 @@ async function discoverWithFallback(
 
 async function loginLiteLLM(
   callbacks: OAuthLoginCallbacks,
-  onCacheWrite?: (cache: CacheFile) => void,
+  onCacheWrite?: (cache: CacheFile) => void | Promise<void>,
 ): Promise<OAuthCredentials> {
   const rawBaseUrl = (
     await callbacks.onPrompt({
@@ -311,7 +451,7 @@ async function loginLiteLLM(
     models,
   };
   await writeCache(getCachePath(), cache);
-  onCacheWrite?.(cache);
+  await onCacheWrite?.(cache);
   callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
 
   return {
@@ -339,6 +479,19 @@ function modifyLiteLLMModels(models: Model<Api>[], cred: OAuthCredentials): Mode
   return models.map((m) => (m.provider === PROVIDER_NAME ? { ...m, baseUrl: `${baseUrl}/v1` } : m));
 }
 
+function isReasoningItem(item: unknown): boolean {
+  return typeof item === "object" && item !== null && (item as { type?: unknown }).type === "reasoning";
+}
+
+// Reasoning fields LiteLLM forwards to chat-completions providers. The Moonshot
+// path defaults them off; the gpt-5.5 tool path strips them entirely.
+const REASONING_SUPPRESSION_DEFAULTS: Record<string, unknown> = {
+  include_reasoning: false,
+  reasoning_content: false,
+  merge_reasoning_content_in_choices: true,
+  thinking: { type: "disabled" },
+};
+
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   modelId: string | undefined,
@@ -352,10 +505,32 @@ function prepareLiteLLMRequestPayload(
   };
 
   if (modelId && shouldSuppressReasoningContent(modelId)) {
-    update("include_reasoning", false);
-    update("reasoning_content", false);
-    update("merge_reasoning_content_in_choices", true);
-    update("thinking", { type: "disabled" });
+    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) update(key, value);
+  }
+
+  // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
+  // Drop reasoning until the gateway honors /v1/responses for this route.
+  if (modelId && isGpt55Model(modelId) && Array.isArray(payload.tools) && payload.tools.length > 0) {
+    const reasoningKeys = ["reasoning", "reasoning_effort", ...Object.keys(REASONING_SUPPRESSION_DEFAULTS)];
+    for (const key of reasoningKeys) {
+      if (payload[key] === undefined) continue;
+      next ??= { ...payload };
+      delete next[key];
+    }
+    const include = (next ?? payload).include;
+    if (Array.isArray(include) && include.includes("reasoning.encrypted_content")) {
+      next ??= { ...payload };
+      const filteredInclude = include.filter((value) => value !== "reasoning.encrypted_content");
+      if (filteredInclude.length === 0) delete next.include;
+      else next.include = filteredInclude;
+    }
+    // Prior turns may have replayed reasoning items (with encrypted_content)
+    // into the input; they are rejected once reasoning is stripped.
+    const input = (next ?? payload).input;
+    if (Array.isArray(input) && input.some(isReasoningItem)) {
+      next ??= { ...payload };
+      next.input = input.filter((item) => !isReasoningItem(item));
+    }
   }
 
   if (sessionId) {
@@ -495,15 +670,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
+  // The cache keeps raw discovery output; overrides are applied freshly at each registration.
+  models = await applyOverrides(models);
+
   let updateCosts: (models: ProviderModelConfig[]) => void = () => undefined;
 
   const oauth = {
     name: "LiteLLM",
     login: (callbacks: OAuthLoginCallbacks) =>
-      loginLiteLLM(callbacks, (next) => {
+      loginLiteLLM(callbacks, async (next) => {
         cacheFetchedAt = next.fetchedAt;
-        registerProvider(next.baseUrl, next.models);
-        updateCosts(next.models);
+        const overridden = await applyOverrides(next.models);
+        registerProvider(next.baseUrl, overridden);
+        updateCosts(overridden);
       }),
     refreshToken: refreshLiteLLM,
     getApiKey: getLiteLLMApiKey,
@@ -608,11 +787,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       source: result.source,
       models: result.models,
     });
-    registerProvider(fresh.baseUrl, result.models, fresh.apiKeyConfig);
-    updateCosts(result.models);
+    const overridden = await applyOverrides(result.models);
+    registerProvider(fresh.baseUrl, overridden, fresh.apiKeyConfig);
+    updateCosts(overridden);
     cacheFetchedAt = now;
     await registerMcpTools(fresh.baseUrl, fresh.apiKey);
-    return { models: result.models, source: result.source };
+    return { models: overridden, source: result.source };
   }
 
   function runRefresh(): Promise<RefreshResult> {
@@ -641,10 +821,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         onSelect: async () => undefined,
         signal: ctx.signal,
       },
-      (next) => {
+      async (next) => {
         cacheFetchedAt = next.fetchedAt;
-        registerProvider(next.baseUrl, next.models);
-        updateCosts(next.models);
+        const overridden = await applyOverrides(next.models);
+        registerProvider(next.baseUrl, overridden);
+        updateCosts(overridden);
       },
     );
 
