@@ -22,6 +22,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
     expect(workflow).toContain("LITELLM_LICENSE: $" + "{{ secrets.LITELLM_LICENSE }}");
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
+    expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
+    expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
     expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");

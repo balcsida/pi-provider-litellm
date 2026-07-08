@@ -27,7 +27,7 @@ jobs:
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
       LITELLM_LICENSE: ${{ secrets.LITELLM_LICENSE }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
-      LITELLM_IMAGE: docker.litellm.ai/berriai/litellm:main-latest
+      LITELLM_IMAGE: ${{ secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
