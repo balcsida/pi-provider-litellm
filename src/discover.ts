@@ -43,6 +43,16 @@ export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
 }
 
+const RESPONSES_MODE_PATTERN = /^responses?$/i;
+
+function isResponsesMode(mode: string | undefined): boolean {
+  return mode !== undefined && RESPONSES_MODE_PATTERN.test(mode);
+}
+
+function isChatStyleMode(mode: string | undefined): boolean {
+  return mode === undefined || mode === "chat" || isResponsesMode(mode);
+}
+
 // Matches both the conventional `anthropic/...` prefix and aliases that
 // LiteLLM deployments commonly assign to Anthropic-backed routes (e.g.
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
@@ -257,7 +267,8 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
   const id = entry.model_name;
   if (!id) return undefined;
   const info = entry.model_info ?? {};
-  if (info.mode && info.mode !== "chat") return undefined;
+  if (!isChatStyleMode(info.mode)) return undefined;
+  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
   return {
     id,
@@ -268,6 +279,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
+    ...(responsesMode ? { api: "openai-responses" as const } : {}),
   };
 }
 
@@ -277,8 +289,9 @@ function mapFromHealthModelInfo(
 ): ProviderModelConfig | undefined {
   const model = mapFromModelInfo(entry);
   if (model || !fallbackId) return model;
-  if (entry.model_info?.mode && entry.model_info.mode !== "chat") return undefined;
+  if (!isChatStyleMode(entry.model_info?.mode)) return undefined;
   const info = entry.model_info ?? {};
+  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(fallbackId);
   return {
     id: fallbackId,
@@ -289,6 +302,7 @@ function mapFromHealthModelInfo(
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(fallbackId),
+    ...(responsesMode ? { api: "openai-responses" as const } : {}),
   };
 }
 
