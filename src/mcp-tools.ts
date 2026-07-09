@@ -103,9 +103,10 @@ export async function executeMcpTool(
   serverId: string,
   toolName: string,
   args: Record<string, unknown>,
+  headers?: Record<string, string>,
 ): Promise<string> {
   for (let attempt = 0; attempt <= MCP_RETRY_ATTEMPTS; attempt++) {
-    const result = await executeMcpToolOnce(baseUrl, apiKey, serverId, toolName, args);
+    const result = await executeMcpToolOnce(baseUrl, apiKey, serverId, toolName, args, headers);
     if (attempt < MCP_RETRY_ATTEMPTS && isRetryableMcpResult(result)) {
       await sleep(MCP_RETRY_DELAY_MS);
       continue;

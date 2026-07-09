@@ -94,14 +94,14 @@ describe("executeMcpTool", () => {
       .mockResolvedValue(jsonResponse(200, { result: { content: [{ type: "text", text: "found" }] } }));
 
     await expect(
-      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }),
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }, { "X-Team": "agent" }),
     ).resolves.toBe(JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/mcp-rest/tools/call",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({ Authorization: "Bearer sk-test" }),
+        headers: expect.objectContaining({ Authorization: "Bearer sk-test", "X-Team": "agent" }),
         body: JSON.stringify({ server_id: "brave", name: "search", arguments: { query: "pi" } }),
       }),
     );
