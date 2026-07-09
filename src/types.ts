@@ -84,6 +84,14 @@ export interface LiteLLMSkill {
   name: string;
   description?: string;
   enabled?: boolean;
+  source?: Record<string, unknown>;
+  version?: string;
+  keywords?: string[];
+  domain?: string;
+  namespace?: string;
+  category?: string;
+  author?: string;
+  homepage?: string;
   input_schema?: Record<string, unknown>;
   code?: string;
 }

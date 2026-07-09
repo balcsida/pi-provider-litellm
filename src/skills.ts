@@ -18,7 +18,8 @@ let skillsCache:
 function getSkillsFromBody(body: unknown): LiteLLMSkill[] {
   if (Array.isArray(body)) return body as LiteLLMSkill[];
   if (body && typeof body === "object") {
-    const record = body as { data?: unknown; skills?: unknown };
+    const record = body as { plugins?: unknown; data?: unknown; skills?: unknown };
+    if (Array.isArray(record.plugins)) return record.plugins as LiteLLMSkill[];
     if (Array.isArray(record.data)) return record.data as LiteLLMSkill[];
     if (Array.isArray(record.skills)) return record.skills as LiteLLMSkill[];
   }
@@ -41,10 +42,16 @@ export async function listSkills(
   }
 
   try {
-    const response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
+    let response = await fetch(`${normalizedBaseUrl}/claude-code/marketplace.json`, {
       headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
+    if (!response.ok) {
+      response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
+        headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
     if (!response.ok) return [];
     const skills = getSkillsFromBody(await response.json());
     skillsCache = { baseUrl: normalizedBaseUrl, apiKey, fetchedAt: Date.now(), skills };
@@ -57,10 +64,17 @@ export async function listSkills(
 export async function createSkill(
   baseUrl: string,
   apiKey: string,
-  input: { name: string; description: string; code: string; inputSchema?: Record<string, unknown> },
+  input: {
+    name: string;
+    description?: string;
+    source?: Record<string, unknown>;
+    code?: string;
+    inputSchema?: Record<string, unknown>;
+  },
   headers?: Record<string, string>,
 ): Promise<unknown> {
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills`, {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  let response = await fetch(`${normalizedBaseUrl}/claude-code/plugins`, {
     method: "POST",
     headers: {
       ...headers,
@@ -70,11 +84,29 @@ export async function createSkill(
     body: JSON.stringify({
       name: input.name,
       description: input.description,
+      source: input.source,
       code: input.code,
       input_schema: input.inputSchema ?? { type: "object", properties: {} },
     }),
     signal: AbortSignal.timeout(10_000),
   });
+  if (response.status === 404) {
+    response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: input.name,
+        description: input.description,
+        code: input.code,
+        input_schema: input.inputSchema ?? { type: "object", properties: {} },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
   if (!response.ok) throw new Error(`LiteLLM skill create failed: HTTP ${response.status}`);
   skillsCache = undefined;
   return response.json().catch(() => ({}));
@@ -86,11 +118,19 @@ export async function deleteSkill(
   skillId: string,
   headers?: Record<string, string>,
 ): Promise<void> {
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills/${encodeURIComponent(skillId)}`, {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  let response = await fetch(`${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(skillId)}`, {
     method: "DELETE",
-    headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+    headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     signal: AbortSignal.timeout(10_000),
   });
+  if (response.status === 404) {
+    response = await fetch(`${normalizedBaseUrl}/v1/skills/${encodeURIComponent(skillId)}`, {
+      method: "DELETE",
+      headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
   if (!response.ok && response.status !== 404) throw new Error(`LiteLLM skill delete failed: HTTP ${response.status}`);
   skillsCache = undefined;
 }

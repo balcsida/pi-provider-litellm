@@ -157,11 +157,11 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after successful live model discovery, `/login litellm`, or `/litellm-refresh`; it does not force network or helper-token access when a fresh model cache is used.
+Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after successful live model discovery, `/login litellm`, or `/litellm-refresh`; it does not force network or helper-token access when a fresh model cache is used. MCP tools run in Pi's parallel tool mode and retry transient failures once.
 
-## LiteLLM Skills Gateway
+## LiteLLM Skill Hub
 
-If your LiteLLM proxy exposes `/v1/skills`, enabled skills are fetched before each agent turn and appended to the system prompt as a `litellm_skills` section. The extension also registers Pi tools for basic Skills Gateway management:
+If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills are fetched before each agent turn and appended to the system prompt as a `litellm_skills` section. The extension falls back to the legacy `/v1/skills` Skills Gateway path when Skill Hub is unavailable. It also registers Pi tools for basic skill management:
 
 - `litellm_skill_list`
 - `litellm_skill_create`
@@ -224,7 +224,7 @@ If the cache is older than 24 hours, the extension refreshes it in the backgroun
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
 | MCP tools not showing | Verify the proxy exposes `/mcp-rest/tools/list` and run `/litellm-refresh` after fixing the proxy |
-| Skills not affecting prompts | Verify the proxy exposes `/v1/skills` and returns enabled skills |
+| Skills not affecting prompts | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills |
 
 ## License
 
