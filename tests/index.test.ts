@@ -295,7 +295,7 @@ describe("extension startup", () => {
     let extension = await loadExtension(agentDir);
     let pi = createPi();
     await extension(pi);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["first-model"]);
+    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["first-model"]);
 
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "second-adc", "second-refresh");
     extension = await loadExtension(agentDir);
@@ -303,9 +303,7 @@ describe("extension startup", () => {
     await extension(pi);
 
     expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
-      "second-model",
-    ]);
+    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["second-model"]);
   });
 
   it('treats literal "undefined" env values as unset', async () => {
@@ -646,8 +644,8 @@ describe("extension startup", () => {
       apiKey: "$LITELLM_ANTHROPIC_API_KEY",
       headers: { "x-litellm-customer-id": "anthropic-customer" },
     });
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
-    expect((pi.providers[1]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
+    expect((pi.providers[1].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "claude-sonnet",
     ]);
     // Providers load in parallel, so cross-provider request order is not deterministic.
@@ -1483,7 +1481,7 @@ describe("multi-provider hardening", () => {
     await extension(pi);
 
     expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
+    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
     expect(pi.providers[1]?.config.models).toEqual([]);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("litellm-anthropic"));
   });
@@ -1799,6 +1797,6 @@ describe("multi-provider hardening", () => {
     await extension(pi);
 
     expect(seenRequests).toEqual([{ customer: "team-b" }]);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["fresh-model"]);
+    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["fresh-model"]);
   });
 });
