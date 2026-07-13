@@ -93,11 +93,8 @@ describe("skill helpers", () => {
     );
   });
 
-  it("falls back to creating skills through the LiteLLM Skills Gateway", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse(404, {}))
-      .mockResolvedValueOnce(jsonResponse(200, { id: "skill-1" }));
+  it("creates legacy skills through the LiteLLM Skills Gateway", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { id: "skill-1" }));
 
     await expect(
       createSkill("https://litellm.example.com", "sk-test", {
@@ -107,7 +104,8 @@ describe("skill helpers", () => {
       }),
     ).resolves.toEqual({ id: "skill-1" });
 
-    expect(fetchMock).toHaveBeenLastCalledWith(
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/v1/skills",
       expect.objectContaining({ method: "POST" }),
     );

@@ -86,7 +86,7 @@ export async function createSkill(
         code: input.code,
         input_schema: input.inputSchema ?? { type: "object", properties: {} },
       };
-  let response = await fetch(`${normalizedBaseUrl}/claude-code/plugins`, {
+  let response = await fetch(`${normalizedBaseUrl}${input.source ? "/claude-code/plugins" : "/v1/skills"}`, {
     method: "POST",
     headers: {
       ...headers,
@@ -96,7 +96,7 @@ export async function createSkill(
     body: JSON.stringify(skillHubPayload),
     signal: AbortSignal.timeout(10_000),
   });
-  if (response.status === 404) {
+  if (input.source && response.status === 404) {
     response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
       method: "POST",
       headers: {
