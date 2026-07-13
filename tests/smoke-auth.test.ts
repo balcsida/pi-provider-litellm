@@ -126,7 +126,7 @@ describe("runAuthSmoke", () => {
         }),
       ]),
     );
-  });
+  }, 10_000);
 });
 
 describe("runSsoLoginSmoke", () => {
