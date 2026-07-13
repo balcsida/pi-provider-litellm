@@ -86,6 +86,14 @@ function createPi(): TestPi {
   };
 }
 
+async function startSession(pi: TestPi): Promise<void> {
+  const providerCount = pi.providers.length;
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+  }
+  await vi.waitFor(() => expect(pi.providers.length).toBeGreaterThan(providerCount));
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
@@ -152,8 +160,9 @@ describe("feature parity", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
-    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
   });
 
   it("injects enabled LiteLLM skills into the system prompt", async () => {
@@ -754,6 +763,7 @@ describe("feature parity", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
     responseHandler?.(
@@ -808,11 +818,7 @@ describe("feature parity", () => {
     const pi = createPi();
     await extension(pi);
 
-    // Fire session_start handlers (no cache file exists → staleness check skipped)
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-    }
+    await startSession(pi);
 
     // Get initial cost from model-based calculation
     const endHandler = pi.handlers.get("message_end")?.[0];

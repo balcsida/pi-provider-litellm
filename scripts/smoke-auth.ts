@@ -54,10 +54,11 @@ type SmokeProviderConfig = {
 
 type SmokePi = {
   providers: Array<{ name: string; config: SmokeProviderConfig }>;
+  handlers: Map<string, Array<(event: unknown, ctx: unknown) => Promise<unknown> | unknown>>;
   registerProvider: (name: string, config: SmokeProviderConfig) => void;
   registerCommand: () => void;
   registerTool: () => void;
-  on: () => void;
+  on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown> | unknown) => void;
 };
 
 function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
@@ -196,13 +197,24 @@ async function expectAdminOnlyKeyGenerate(
 function createSmokePi(): SmokePi {
   return {
     providers: [],
+    handlers: new Map(),
     registerProvider(name, config) {
       this.providers.push({ name, config });
     },
     registerCommand: () => undefined,
     registerTool: () => undefined,
-    on: () => undefined,
+    on(event, handler) {
+      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
+    },
   };
+}
+
+async function waitForProviderCount(pi: SmokePi, count: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (pi.providers.length < count) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${count} provider registrations`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 export async function runSsoLoginSmoke(
@@ -212,11 +224,20 @@ export async function runSsoLoginSmoke(
 ): Promise<void> {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousBaseUrl = process.env.LITELLM_BASE_URL;
+  const previousApiKey = process.env.LITELLM_API_KEY;
   process.env.PI_CODING_AGENT_DIR ??= await mkdtemp(join(tmpdir(), "pi-litellm-sso-smoke-"));
+  process.env.LITELLM_BASE_URL = baseUrl;
+  process.env.LITELLM_API_KEY = options.masterKey;
   try {
     const extension = (await import("../src/index.js")).default as unknown as (pi: SmokePi) => Promise<void>;
     const pi = createSmokePi();
     await extension(pi);
+    const providerCount = pi.providers.length;
+    for (const handler of pi.handlers.get("session_start") ?? []) {
+      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+    }
+    await waitForProviderCount(pi, providerCount + 1, options.timeoutMs);
 
     const oauth = pi.providers.find((provider) => provider.name === "litellm")?.config.oauth;
     if (!oauth) throw new Error("LiteLLM provider did not expose OAuth login");
@@ -245,6 +266,10 @@ export async function runSsoLoginSmoke(
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousBaseUrl === undefined) delete process.env.LITELLM_BASE_URL;
+    else process.env.LITELLM_BASE_URL = previousBaseUrl;
+    if (previousApiKey === undefined) delete process.env.LITELLM_API_KEY;
+    else process.env.LITELLM_API_KEY = previousApiKey;
   }
 }
 
