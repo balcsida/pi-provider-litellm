@@ -37,11 +37,18 @@ describe("listSkills", () => {
 
   it("includes legacy skills when the LiteLLM Skill Hub marketplace is available", async () => {
     vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse(200, { plugins: [{ name: "hub" }] }))
-      .mockResolvedValueOnce(jsonResponse(200, { data: [{ id: "skill-1", name: "legacy" }] }));
+      .mockResolvedValueOnce(jsonResponse(200, { plugins: [{ name: "hub", description: "Hub guidance" }] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          data: [
+            { id: "duplicate", name: "hub", description: "Legacy guidance" },
+            { id: "skill-1", name: "legacy" },
+          ],
+        }),
+      );
 
     await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual([
-      { name: "hub" },
+      { name: "hub", description: "Hub guidance" },
       { id: "skill-1", name: "legacy" },
     ]);
   });
