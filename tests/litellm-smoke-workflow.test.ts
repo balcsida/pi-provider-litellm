@@ -42,6 +42,9 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("npx tsx scripts/smoke-auth.ts");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
     expect(workflow).toContain("Run Pi CLI smoke");
+    expect(workflow).toContain("Run interactive Pi terminal smoke");
+    expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");
+    expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
     expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
@@ -76,6 +79,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("OpenAI-compatible and Anthropic routes");
     expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
+    expect(readme).toContain("interactive Pi TUI smoke");
     expect(readme).not.toContain("Kimi-shaped routes");
 
     expect(readme).not.toContain("## Real LiteLLM smoke workflow");
