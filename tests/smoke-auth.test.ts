@@ -189,7 +189,7 @@ describe("runSsoLoginSmoke", () => {
     );
   });
 
-  it("uses a valid model cache without waiting for a background refresh", async () => {
+  it("uses a valid empty model cache without waiting for a background refresh", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-smoke-auth-"));
     await writeFile(
       join(agentDir, "litellm-models.json"),
@@ -198,7 +198,7 @@ describe("runSsoLoginSmoke", () => {
         apiKeyFingerprint: fingerprint("sk-master"),
         fetchedAt: Date.now(),
         source: "model_info",
-        models: [{ id: "vidaimock-openai", name: "vidaimock-openai", provider: "litellm" }],
+        models: [],
       }),
       "utf8",
     );

@@ -42,7 +42,6 @@ type SmokeOAuthCredential = {
 };
 
 type SmokeProviderConfig = {
-  models?: unknown[];
   oauth?: {
     login: (callbacks: {
       onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
@@ -55,11 +54,10 @@ type SmokeProviderConfig = {
 
 type SmokePi = {
   providers: Array<{ name: string; config: SmokeProviderConfig }>;
-  handlers: Map<string, Array<(event: unknown, ctx: unknown) => Promise<unknown> | unknown>>;
   registerProvider: (name: string, config: SmokeProviderConfig) => void;
   registerCommand: () => void;
   registerTool: () => void;
-  on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown> | unknown) => void;
+  on: () => void;
 };
 
 function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
@@ -198,24 +196,13 @@ async function expectAdminOnlyKeyGenerate(
 function createSmokePi(): SmokePi {
   return {
     providers: [],
-    handlers: new Map(),
     registerProvider(name, config) {
       this.providers.push({ name, config });
     },
     registerCommand: () => undefined,
     registerTool: () => undefined,
-    on(event, handler) {
-      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
-    },
+    on: () => undefined,
   };
-}
-
-async function waitForProviderCount(pi: SmokePi, count: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (pi.providers.length < count) {
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${count} provider registrations`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
 }
 
 export async function runSsoLoginSmoke(
@@ -234,12 +221,6 @@ export async function runSsoLoginSmoke(
     const extension = (await import("../src/index.js")).default as unknown as (pi: SmokePi) => Promise<void>;
     const pi = createSmokePi();
     await extension(pi);
-    const providerCount = pi.providers.length;
-    const needsRefresh = !pi.providers.find((provider) => provider.name === "litellm")?.config.models?.length;
-    for (const handler of pi.handlers.get("session_start") ?? []) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-    }
-    if (needsRefresh) await waitForProviderCount(pi, providerCount + 1, options.timeoutMs);
 
     const oauth = pi.providers.find((provider) => provider.name === "litellm")?.config.oauth;
     if (!oauth) throw new Error("LiteLLM provider did not expose OAuth login");
