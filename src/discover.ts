@@ -45,12 +45,12 @@ export function normalizeBaseUrl(input: string): string {
 
 const RESPONSES_MODE_PATTERN = /^responses?$/i;
 
-function isResponsesMode(mode: string | undefined): boolean {
-  return mode !== undefined && RESPONSES_MODE_PATTERN.test(mode);
+function isResponsesMode(mode: string | null | undefined): boolean {
+  return mode != null && RESPONSES_MODE_PATTERN.test(mode);
 }
 
-function isChatStyleMode(mode: string | undefined): boolean {
-  return mode === undefined || mode === "chat" || isResponsesMode(mode);
+function isChatStyleMode(mode: string | null | undefined): boolean {
+  return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
 // Matches both the conventional `anthropic/...` prefix and aliases that

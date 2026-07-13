@@ -25,7 +25,7 @@ export interface DiscoveryOptions {
 export interface ModelInfoEntry {
   model_name?: string;
   model_info?: {
-    mode?: string;
+    mode?: string | null;
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;
