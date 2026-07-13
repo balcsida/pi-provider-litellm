@@ -118,6 +118,7 @@ export async function createSkill(
     });
   }
   if (!response.ok) throw new Error(`LiteLLM skill create failed: HTTP ${response.status}`);
+  skillsCache = undefined;
   if (usedSkillHub) {
     const enableResponse = await fetch(
       `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(input.name)}/enable`,
@@ -129,7 +130,6 @@ export async function createSkill(
     );
     if (!enableResponse.ok) throw new Error(`LiteLLM skill enable failed: HTTP ${enableResponse.status}`);
   }
-  skillsCache = undefined;
   return response.json().catch(() => ({}));
 }
 
