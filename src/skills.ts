@@ -141,14 +141,11 @@ export async function deleteSkill(
 ): Promise<void> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   let skillHubError: unknown;
-  const skillHubResponse = await fetch(
-    `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(skillId)}`,
-    {
-      method: "DELETE",
-      headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
-    },
-  ).catch((error: unknown) => {
+  const skillHubResponse = await fetch(`${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(skillId)}`, {
+    method: "DELETE",
+    headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  }).catch((error: unknown) => {
     skillHubError = error;
     return undefined;
   });
