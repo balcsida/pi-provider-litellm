@@ -166,12 +166,14 @@ jobs:
           for _ in {1..60}; do
             if curl -fsS --connect-timeout 1 --max-time 3 \
               -H "Authorization: Bearer $LITELLM_API_KEY" \
-              "$LITELLM_BASE_URL/v1/models" >/tmp/litellm-models.json; then
-              cat /tmp/litellm-models.json
+              "$LITELLM_BASE_URL/model/info" >/tmp/litellm-model-info.json &&
+              node -e 'const { readFileSync } = require("node:fs"); const found = new Set((JSON.parse(readFileSync(process.argv[1], "utf8")).data ?? []).map((entry) => entry.model_name)); process.exit(process.argv.slice(2).every((model) => found.has(model)) ? 0 : 1)' /tmp/litellm-model-info.json $LITELLM_SMOKE_MODELS; then
+              cat /tmp/litellm-model-info.json
               exit 0
             fi
             sleep 2
           done
+          cat /tmp/litellm-model-info.json >&2 || true
           docker logs litellm-smoke >&2 || true
           exit 1
 
