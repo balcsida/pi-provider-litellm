@@ -42,6 +42,7 @@ type SmokeOAuthCredential = {
 };
 
 type SmokeProviderConfig = {
+  models?: unknown[];
   oauth?: {
     login: (callbacks: {
       onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
@@ -234,10 +235,11 @@ export async function runSsoLoginSmoke(
     const pi = createSmokePi();
     await extension(pi);
     const providerCount = pi.providers.length;
+    const needsRefresh = !pi.providers.find((provider) => provider.name === "litellm")?.config.models?.length;
     for (const handler of pi.handlers.get("session_start") ?? []) {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
     }
-    await waitForProviderCount(pi, providerCount + 1, options.timeoutMs);
+    if (needsRefresh) await waitForProviderCount(pi, providerCount + 1, options.timeoutMs);
 
     const oauth = pi.providers.find((provider) => provider.name === "litellm")?.config.oauth;
     if (!oauth) throw new Error("LiteLLM provider did not expose OAuth login");
