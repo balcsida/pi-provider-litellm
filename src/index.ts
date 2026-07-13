@@ -78,6 +78,7 @@ type ProviderState = {
   headers?: Record<string, string>;
   models: ProviderModelConfig[];
   cacheFetchedAt: number;
+  refreshOnStart: boolean;
   liveDiscoveryApiKey?: string;
   refreshInProgress: Promise<ProviderRefreshResult> | null;
 };
@@ -893,13 +894,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cache.apiKeyFingerprint === fp &&
       cache.headersFingerprint === headersFp;
 
-    let models: ProviderModelConfig[] = cacheValid && cache ? cache.models : [];
-    const shouldFetch =
-      creds.baseUrl !== undefined &&
-      fp !== undefined &&
-      !isOffline() &&
-      getDiscoveryTimeoutMs() > 0 &&
-      (!cacheValid || isListModelsMode());
+    let models: ProviderModelConfig[] = cache?.models ?? [];
+    const canDiscover = creds.baseUrl !== undefined && fp !== undefined && !isOffline() && getDiscoveryTimeoutMs() > 0;
+    const shouldFetch = canDiscover && isListModelsMode();
+    const refreshOnStart = canDiscover && !cacheValid && !shouldFetch;
 
     let credentialWarning: string | undefined;
     let liveDiscoveryApiKey: string | undefined;
@@ -966,7 +964,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     // The cache keeps raw discovery output; overrides are applied freshly at each registration.
     models = await applyOverrides(definition.name, models);
 
-    return { definition, creds, headers, models, cacheFetchedAt, liveDiscoveryApiKey, refreshInProgress: null };
+    return {
+      definition,
+      creds,
+      headers,
+      models,
+      cacheFetchedAt,
+      refreshOnStart,
+      liveDiscoveryApiKey,
+      refreshInProgress: null,
+    };
   }
 
   const providerStates = await Promise.all(definitions.map(loadProviderState));
@@ -1083,7 +1090,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   registerSkillTools(defaultState);
-  await registerMcpTools(defaultState);
 
   async function refreshModelsAndCosts(state: ProviderState): Promise<ProviderRefreshResult> {
     const fresh = await resolveCredentials(state.definition);
@@ -1109,6 +1115,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     state.models = overridden;
     state.liveDiscoveryApiKey = fresh.apiKey;
     state.cacheFetchedAt = now;
+    state.refreshOnStart = false;
     registerProvider(state, overridden, fresh.apiKeyConfig);
     updateAllCosts();
     if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state);
@@ -1228,7 +1235,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
     if (discoveryDisabledReason()) return;
     for (const state of providerStates) {
-      if (!state.cacheFetchedAt || Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS) continue;
+      const cacheIsStale = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt > CACHE_STALE_MS;
+      if (!state.refreshOnStart && !cacheIsStale) continue;
       void runRefresh(state).catch(() => undefined);
     }
   });
