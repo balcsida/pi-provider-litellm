@@ -74,6 +74,7 @@ export async function createSkill(
   headers?: Record<string, string>,
 ): Promise<unknown> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  let usedSkillHub = input.source !== undefined;
   const skillHubPayload = input.source
     ? {
         name: input.name,
@@ -97,6 +98,7 @@ export async function createSkill(
     signal: AbortSignal.timeout(10_000),
   });
   if (input.source && response.status === 404) {
+    usedSkillHub = false;
     response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
       method: "POST",
       headers: {
@@ -114,6 +116,17 @@ export async function createSkill(
     });
   }
   if (!response.ok) throw new Error(`LiteLLM skill create failed: HTTP ${response.status}`);
+  if (usedSkillHub) {
+    const enableResponse = await fetch(
+      `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(input.name)}/enable`,
+      {
+        method: "POST",
+        headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!enableResponse.ok) throw new Error(`LiteLLM skill enable failed: HTTP ${enableResponse.status}`);
+  }
   skillsCache = undefined;
   return response.json().catch(() => ({}));
 }

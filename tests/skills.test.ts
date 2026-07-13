@@ -88,7 +88,10 @@ describe("listSkills", () => {
 
 describe("skill helpers", () => {
   it("creates skills through the LiteLLM Skill Hub plugins endpoint", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { name: "terraform" }));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { name: "terraform" }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     await expect(
       createSkill("https://litellm.example.com", "sk-test", {
@@ -100,6 +103,10 @@ describe("skill helpers", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/claude-code/plugins",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "https://litellm.example.com/claude-code/plugins/terraform/enable",
       expect.objectContaining({ method: "POST" }),
     );
   });
