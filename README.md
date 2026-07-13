@@ -133,10 +133,10 @@ Provider fields:
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
-| `LITELLM_OFFLINE` | unset | If `1`, skip discovery on this start; use cache only |
-| `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Discovery fetch timeout in ms; `0` to skip discovery |
+| `LITELLM_OFFLINE` | unset | If `1`, disable automatic model discovery and use cached models only |
+| `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 
-`LITELLM_DISCOVERY_TIMEOUT_MS=0` only disables startup and refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
+`LITELLM_DISCOVERY_TIMEOUT_MS=0` disables automatic and explicit refresh model discovery. It does not replace the base URL or API key settings required to send requests when you are not using `/login litellm`.
 
 ### Google ADC token auth
 
@@ -157,7 +157,7 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after successful live model discovery, `/login litellm`, or `/litellm-refresh`; it does not force network or helper-token access when a fresh model cache is used. MCP tools run in Pi's parallel tool mode and retry transient failures once.
+Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after background model discovery, `/login litellm`, or `/litellm-refresh`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
 
 ## LiteLLM Skill Hub
 
@@ -209,7 +209,7 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 
 The default provider model list is cached at `~/.pi/agent/litellm-models.json` with a keyed fingerprint of the base URL + API key. Alias provider caches use `~/.pi/agent/litellm-models-<provider>.json`. Changing the base URL or key invalidates that provider's cache automatically.
 
-If the cache is older than 24 hours, the extension refreshes it in the background on session start (non-blocking). Failures are silent — the cached models remain in use. Run `/litellm-refresh` to force an immediate refresh.
+When the cache is missing, invalid, or older than 24 hours, the extension starts without waiting for discovery and refreshes models in the background on session start. Existing cached models remain available while an invalid or stale cache refreshes. Failures are silent; run `/litellm-refresh` to force an immediate refresh and see its result.
 
 ## Troubleshooting
 
