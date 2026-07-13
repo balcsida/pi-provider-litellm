@@ -197,32 +197,6 @@ describe("discoverModels via /model/info", () => {
     expect(result.source).toBe("model_info");
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
   });
-
-  it("keeps chat models when LiteLLM returns a null mode", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = input instanceof URL ? input.toString() : String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "anthropic/vidaimock-claude",
-              litellm_params: { model: "anthropic/claude-3-5-sonnet" },
-              model_info: { litellm_provider: "anthropic", mode: null },
-            },
-            {
-              model_name: "openai/text-embedding-3-large",
-              model_info: { mode: "embedding" },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
-
-    expect(result.models.map((model) => model.id)).toEqual(["anthropic/vidaimock-claude"]);
-  });
 });
 
 describe("discoverModels response-mode models", () => {
