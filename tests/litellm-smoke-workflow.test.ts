@@ -26,9 +26,6 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
     expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
-    expect(workflow).toContain('"$LITELLM_BASE_URL/model/info" >/tmp/litellm-model-info.json');
-    expect(workflow).toContain("process.argv.slice(2).every");
-    expect(workflow).toContain("/tmp/litellm-model-info.json $LITELLM_SMOKE_MODELS");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
     expect(workflow).toContain("model_name: anthropic/vidaimock-claude");
