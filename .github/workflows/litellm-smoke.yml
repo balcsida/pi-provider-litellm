@@ -219,6 +219,12 @@ jobs:
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
 
+      - name: Run interactive Pi terminal smoke
+        env:
+          LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
+          LITELLM_TERMINAL_SMOKE: '1'
+        run: npm test -- tests/terminal-smoke.test.ts
+
       - name: Dump LiteLLM logs
         if: failure()
         run: docker logs litellm-smoke || true
