@@ -1239,6 +1239,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {
+    if (ctx.ui?.notify) uiNotify = (message, type) => ctx.ui.notify(message, type);
     sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
 
     if (discoveryDisabledReason()) return;

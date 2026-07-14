@@ -268,6 +268,46 @@ describe("extension startup", () => {
     });
   });
 
+  it("delivers session refresh progress through the TUI", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "new-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("old-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const notify = vi.fn();
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    for (const handler of pi.handlers.get("session_start") ?? []) {
+      await handler(
+        { reason: "start" },
+        { sessionManager: { getSessionFile: () => undefined }, ui: { notify } },
+      );
+    }
+
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledWith("LiteLLM: Querying /model/info endpoint...", "info"),
+    );
+  });
+
   it("registers the API key as an explicit environment reference", async () => {
     const agentDir = await makeAgentDir();
     const extension = await loadExtension(agentDir);
