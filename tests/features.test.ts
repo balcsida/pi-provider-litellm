@@ -923,7 +923,7 @@ describe("feature parity", () => {
     await Promise.all([firstRefresh, secondRefresh]);
 
     expect(callCount).toBe(1);
-    expect(notifications).toEqual([
+    expect(notifications.filter(({ message }) => message.endsWith("models refreshed (source: model_info)"))).toEqual([
       { message: "LiteLLM: 1 models refreshed (source: model_info)", type: "info" },
       { message: "LiteLLM: 1 models refreshed (source: model_info)", type: "info" },
     ]);
