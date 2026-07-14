@@ -604,7 +604,7 @@ async function getProviderDefinitions(): Promise<ProviderDefinition[]> {
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions,
+  options: DiscoveryOptions & { onProgress?: (message: string) => void },
 ): Promise<{ result: DiscoveryResult; warning?: string }> {
   try {
     return { result: await discoverModels(baseUrl, apiKey, options) };
