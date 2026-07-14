@@ -117,6 +117,18 @@ describe("shouldSuppressReasoningContent", () => {
 });
 
 describe("discoverModels via /model/info", () => {
+  it("keeps models with a null mode", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "local/model", model_info: { mode: null } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map((model) => model.id)).toEqual(["local/model"]);
+  });
+
   it("parses a /model/info success response with cost mapping", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
