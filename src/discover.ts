@@ -354,19 +354,22 @@ async function discoverFromHealth(
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
   options.onProgress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
+  let completed = 0;
   const models = await Promise.all(
-    endpoints.map(async (endpoint, index) => {
-      if (!endpoint.model_id) return mapFromHealthEndpoint(endpoint);
-      const infoResult = await fetchJson<ModelInfoResponse>(
-        `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id)}`,
-        apiKey,
-        options,
-      );
-      if (!infoResult.ok) return mapFromHealthEndpoint(endpoint);
-      const entry = infoResult.data.data?.[0];
-      const model = entry ? mapFromHealthModelInfo(entry, endpoint.model) : mapFromHealthEndpoint(endpoint);
-      if (model && (index + 1) % 10 === 0) {
-        options.onProgress?.(`Fetched ${index + 1}/${endpoints.length} models...`);
+    endpoints.map(async (endpoint) => {
+      let model = mapFromHealthEndpoint(endpoint);
+      if (endpoint.model_id) {
+        const infoResult = await fetchJson<ModelInfoResponse>(
+          `${base}/model/info?litellm_model_id=${encodeURIComponent(endpoint.model_id)}`,
+          apiKey,
+          options,
+        );
+        const entry = infoResult.ok ? infoResult.data.data?.[0] : undefined;
+        if (entry) model = mapFromHealthModelInfo(entry, endpoint.model);
+      }
+      completed++;
+      if (completed % 10 === 0) {
+        options.onProgress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
       return model;
     }),
