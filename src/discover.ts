@@ -368,7 +368,7 @@ async function discoverFromHealth(
         if (entry) model = mapFromHealthModelInfo(entry, endpoint.model);
       }
       completed++;
-      if (completed % 10 === 0) {
+      if (completed % 10 === 0 || completed === endpoints.length) {
         options.onProgress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
       return model;
