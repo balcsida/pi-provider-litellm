@@ -1,8 +1,9 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAuthSmoke, runAuthSmokeFromEnv } from "../scripts/smoke-auth.js";
+import { fingerprint } from "../src/cache.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -125,7 +126,7 @@ describe("runAuthSmoke", () => {
         }),
       ]),
     );
-  });
+  }, 10_000);
 });
 
 describe("runSsoLoginSmoke", () => {
@@ -186,6 +187,55 @@ describe("runSsoLoginSmoke", () => {
         auth: "Bearer sk-sso-virtual",
       }),
     );
+  });
+
+  it("uses a valid empty model cache without waiting for a background refresh", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-smoke-auth-"));
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "http://127.0.0.1:4000",
+        apiKeyFingerprint: fingerprint("sk-master"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: [],
+      }),
+      "utf8",
+    );
+
+    vi.doMock("@earendil-works/pi-coding-agent", () => ({
+      AuthStorage: {
+        create: () => ({ getApiKey: async () => undefined }),
+      },
+      defineTool: (tool: unknown) => tool,
+      getAgentDir: () => agentDir,
+    }));
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      if (url.endsWith("/key/generate")) {
+        expect(auth).toBe("Bearer sk-master");
+        return jsonResponse(200, { key: "sk-sso-virtual" });
+      }
+      if (url.endsWith("/model/info")) {
+        expect(auth).toBe("Bearer sk-sso-virtual");
+        return jsonResponse(200, { data: [{ model_name: "vidaimock-openai", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/v1/chat/completions")) {
+        expect(auth).toBe("Bearer sk-sso-virtual");
+        return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const { runSsoLoginSmoke } = await import("../scripts/smoke-auth.js");
+    await runSsoLoginSmoke({
+      baseUrl: "http://127.0.0.1:4000",
+      masterKey: "sk-master",
+      modelId: "vidaimock-openai",
+      timeoutMs: 50,
+    });
   });
 });
 

@@ -28,7 +28,10 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
-    expect(workflow).toContain("model_name: anthropic/vidaimock-claude");
+    expect(workflow).toContain(`- model_name: anthropic/vidaimock-claude
+              model_info:
+                mode: chat
+              litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");

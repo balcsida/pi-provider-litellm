@@ -130,6 +130,8 @@ jobs:
                 api_base: http://host.docker.internal:8100/v1
                 api_key: sk-vidaimock
             - model_name: anthropic/vidaimock-claude
+              model_info:
+                mode: chat
               litellm_params:
                 model: anthropic/claude-3-5-sonnet
                 api_base: http://host.docker.internal:8100
