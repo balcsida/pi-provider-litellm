@@ -94,17 +94,59 @@ describe("executeMcpTool", () => {
       .mockResolvedValue(jsonResponse(200, { result: { content: [{ type: "text", text: "found" }] } }));
 
     await expect(
-      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }),
+      executeMcpTool(
+        "https://litellm.example.com",
+        "sk-test",
+        "brave",
+        "search",
+        { query: "pi" },
+        { "X-Team": "agent" },
+      ),
     ).resolves.toBe(JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/mcp-rest/tools/call",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({ Authorization: "Bearer sk-test" }),
+        headers: expect.objectContaining({ Authorization: "Bearer sk-test", "X-Team": "agent" }),
         body: JSON.stringify({ server_id: "brave", name: "search", arguments: { query: "pi" } }),
       }),
     );
+  });
+
+  it("retries retryable HTTP failures once", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(503, { error: "busy" }))
+      .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
+
+    await expect(
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }),
+    ).resolves.toBe(JSON.stringify("ok", null, 2));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry non-retryable HTTP failures", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(401, { error: "nope" }));
+
+    await expect(
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }),
+    ).resolves.toBe("Error calling search on brave: HTTP 401");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry response parse failures after a successful HTTP response", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("not json", { status: 200, headers: { "content-type": "application/json" } }));
+
+    await expect(
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", { query: "pi" }),
+    ).resolves.toMatch(/^Error calling search on brave:/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -134,6 +176,7 @@ describe("createMcpToolDefinitions", () => {
     const definitions = await createMcpToolDefinitions("https://litellm.example.com", async () => "sk-test");
 
     expect(definitions.map((tool) => tool.name)).toEqual(["mcp_brave_api_web_search"]);
+    expect(definitions[0]?.executionMode).toBe("parallel");
     expect(definitions[0]?.description).toBe("Search the web (via Brave API MCP server)");
     const parameters = definitions[0]?.parameters as { required?: string[]; properties?: Record<string, unknown> };
     expect(parameters.required).toEqual(["query"]);

@@ -6,6 +6,14 @@ import type { LiteLLMMcpTool } from "./types.js";
 
 const LIST_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
+const MCP_RETRY_DELAY_MS = 350;
+const MCP_RETRY_ATTEMPTS = 1;
+const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+interface McpExecutionResult {
+  text: string;
+  retryable: boolean;
+}
 
 interface RawLiteLLMMcpTool {
   name?: unknown;
@@ -33,6 +41,24 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatMcpToolError(toolName: string, serverId: string, error: unknown): string {
+  return `Error calling ${toolName} on ${serverId}: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+function isRetryableTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  if (error.message.startsWith("Timed out after ")) return true;
+  if (error.name !== "TypeError") return false;
+  return /fetch failed|failed to fetch|network|terminated|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket/i.test(
+    error.message,
+  );
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -57,13 +83,19 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   };
 }
 
-export async function discoverMcpTools(baseUrl: string, apiKey: string, onProgress?: (message: string) => void): Promise<LiteLLMMcpTool[]> {
+export async function discoverMcpTools(
+  baseUrl: string,
+  apiKey: string,
+  headers?: Record<string, string>,
+  onProgress?: (message: string) => void,
+): Promise<LiteLLMMcpTool[]> {
   onProgress?.("Discovering MCP tools from server...");
   const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS);
   try {
     onProgress?.("Querying MCP tools/list endpoint...");
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/list`, {
       headers: {
+        ...headers,
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
@@ -77,9 +109,9 @@ export async function discoverMcpTools(baseUrl: string, apiKey: string, onProgre
     const bodyRecord = asRecord(body);
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : [];
     onProgress?.(`Found ${rawTools.length} raw MCP tools, normalizing...`);
-    const normalized = rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
-    onProgress?.(`Successfully discovered ${normalized.length} MCP tools`);
-    return normalized;
+    const tools = rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
+    onProgress?.(`Successfully discovered ${tools.length} MCP tools`);
+    return tools;
   } catch {
     onProgress?.("MCP tools discovery encountered an error");
     return [];
@@ -94,23 +126,67 @@ export async function executeMcpTool(
   serverId: string,
   toolName: string,
   args: Record<string, unknown>,
+  headers?: Record<string, string>,
 ): Promise<string> {
+  for (let attempt = 0; attempt <= MCP_RETRY_ATTEMPTS; attempt++) {
+    const result = await executeMcpToolOnce(baseUrl, apiKey, serverId, toolName, args, headers);
+    if (attempt < MCP_RETRY_ATTEMPTS && result.retryable) {
+      await sleep(MCP_RETRY_DELAY_MS);
+      continue;
+    }
+    return result.text;
+  }
+  return `Error calling ${toolName} on ${serverId}: retry attempts exhausted`;
+}
+
+async function executeMcpToolOnce(
+  baseUrl: string,
+  apiKey: string,
+  serverId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  headers?: Record<string, string>,
+): Promise<McpExecutionResult> {
   const { signal, cancel } = withTimeout(CALL_TIMEOUT_MS);
   try {
-    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/call`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ server_id: serverId, name: toolName, arguments: args }),
-      signal,
-    });
-    if (!response.ok) return `Error calling ${toolName} on ${serverId}: HTTP ${response.status}`;
-    const body = (await response.json()) as Record<string, unknown>;
-    return JSON.stringify("result" in body ? body.result : body, null, 2);
+    let response: Response;
+    try {
+      response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/call`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ server_id: serverId, name: toolName, arguments: args }),
+        signal,
+      });
+    } catch (error) {
+      return {
+        text: formatMcpToolError(toolName, serverId, error),
+        retryable: isRetryableTransportError(error),
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        text: `Error calling ${toolName} on ${serverId}: HTTP ${response.status}`,
+        retryable: RETRYABLE_HTTP_STATUS.has(response.status),
+      };
+    }
+
+    try {
+      const body = (await response.json()) as unknown;
+      const bodyRecord = asRecord(body);
+      return {
+        text: JSON.stringify(bodyRecord && "result" in bodyRecord ? bodyRecord.result : body, null, 2),
+        retryable: false,
+      };
+    } catch (error) {
+      return { text: formatMcpToolError(toolName, serverId, error), retryable: false };
+    }
   } catch (error) {
-    return `Error calling ${toolName} on ${serverId}: ${error instanceof Error ? error.message : String(error)}`;
+    return { text: formatMcpToolError(toolName, serverId, error), retryable: false };
   } finally {
     cancel();
   }
@@ -138,10 +214,11 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
 export async function createMcpToolDefinitions(
   baseUrl: string,
   getApiKey: () => Promise<string>,
+  headers?: Record<string, string>,
   onProgress?: (message: string) => void,
 ): Promise<ToolDefinition[]> {
   const discoveryApiKey = await getApiKey();
-  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, onProgress);
+  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, headers, onProgress);
 
   return tools.map((mcpTool) => {
     const safeServer = sanitizeName(mcpTool.server_name);
@@ -153,6 +230,7 @@ export async function createMcpToolDefinitions(
       label: `${mcpTool.server_name}: ${mcpTool.name}`,
       description: `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       promptSnippet: `${mcpTool.description} via ${mcpTool.server_name} MCP server`,
+      executionMode: "parallel",
       parameters,
       async execute(_toolCallId, params: Static<typeof parameters>) {
         const apiKey = await getApiKey();
@@ -167,6 +245,7 @@ export async function createMcpToolDefinitions(
           mcpTool.server_id ?? mcpTool.server_name,
           mcpTool.name,
           args,
+          headers,
         );
         return {
           content: [{ type: "text", text }],

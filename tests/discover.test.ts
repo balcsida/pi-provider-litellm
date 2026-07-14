@@ -199,6 +199,73 @@ describe("discoverModels via /model/info", () => {
   });
 });
 
+describe("discoverModels response-mode models", () => {
+  it("keeps /model/info response-mode models with a Responses API override", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/gpt-5.3-codex-openai",
+              model_info: {
+                mode: "responses",
+                max_input_tokens: 272000,
+                max_output_tokens: 128000,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("model_info");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.3-codex-openai",
+      api: "openai-responses",
+      contextWindow: 272000,
+      maxTokens: 128000,
+    });
+  });
+
+  it("keeps /health response-mode model_info fallbacks with a Responses API override", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(404, {});
+      if (url.endsWith("/v1/models")) return jsonResponse(404, {});
+      if (url.endsWith("/health")) {
+        return jsonResponse(200, {
+          healthy_endpoints: [{ model: "openai/gpt-5.3-codex-openai", model_id: "uuid-1" }],
+        });
+      }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-1")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "openai/gpt-5.3-codex-openai",
+              model_info: { mode: "response" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-5.3-codex-openai",
+      api: "openai-responses",
+    });
+  });
+});
+
 describe("discoverModels fallback to /v1/models", () => {
   for (const status of [401, 403, 404]) {
     it(`falls back when /model/info returns ${status}`, async () => {

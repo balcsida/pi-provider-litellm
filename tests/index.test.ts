@@ -9,10 +9,14 @@ const ENV_KEYS = [
   "LITELLM_BASE_URL",
   "LITELLM_API_KEY",
   "LITELLM_API_KEY_HELPER",
+  "LITELLM_HEADERS",
+  "LITELLM_ANTHROPIC_API_KEY",
+  "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
   "LITELLM_GCLOUD_TOKEN_AUTH",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "STORED_LITELLM_KEY",
+  "CUSTOM_LITELLM_KEY",
 ];
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -21,6 +25,7 @@ vi.unmock("@earendil-works/pi-coding-agent");
 type TestProviderConfig = {
   baseUrl?: string;
   apiKey?: string;
+  headers?: Record<string, string>;
   models?: unknown[];
   oauth?: {
     login: (callbacks: {
@@ -203,6 +208,14 @@ type TestPi = {
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
+async function startSession(pi: TestPi, refreshes = pi.providers.length): Promise<void> {
+  const providerCount = pi.providers.length;
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+  }
+  await vi.waitFor(() => expect(pi.providers).toHaveLength(providerCount + refreshes));
+}
+
 afterEach(() => {
   for (const key of ENV_KEYS) {
     const original = ORIGINAL_ENV.get(key);
@@ -214,6 +227,47 @@ afterEach(() => {
 });
 
 describe("extension startup", () => {
+  it("uses mismatched cached models until session-start refresh", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "new-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("old-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+
+    for (const handler of pi.handlers.get("session_start") ?? []) {
+      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+    }
+    await vi.waitFor(() => {
+      expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("fresh-model");
+    });
+  });
+
   it("registers the API key as an explicit environment reference", async () => {
     const agentDir = await makeAgentDir();
     const extension = await loadExtension(agentDir);
@@ -247,6 +301,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to read ADC file"));
     expect(seenAuthHeaders).toEqual(["Bearer env-key"]);
@@ -290,15 +345,19 @@ describe("extension startup", () => {
     let extension = await loadExtension(agentDir);
     let pi = createPi();
     await extension(pi);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["first-model"]);
+    await startSession(pi);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "first-model",
+    ]);
 
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "second-adc", "second-refresh");
     extension = await loadExtension(agentDir);
     pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
-    expect((pi.providers[0]?.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "second-model",
     ]);
   });
@@ -341,8 +400,9 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
-    expect(pi.providers[0]?.config.models).toEqual([
+    expect(pi.providers.at(-1)?.config.models).toEqual([
       expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 272_000, maxTokens: 64_000 }),
     ]);
   });
@@ -543,7 +603,8 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
-    expect(pi.providers[0]?.config.models).toEqual([
+    await startSession(pi);
+    expect(pi.providers.at(-1)?.config.models).toEqual([
       expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 128_000 }),
     ]);
 
@@ -575,9 +636,202 @@ describe("extension startup", () => {
     });
 
     const extension = await loadExtension(agentDir);
-    await extension(createPi());
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-key", "Bearer stored-key"]);
+  });
+
+  it("registers multiple configured LiteLLM provider aliases with separate credentials and caches", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+              headers: "$LITELLM_ANTHROPIC_HEADERS",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-litellm-customer-id": "openai-customer" });
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+    process.env.LITELLM_ANTHROPIC_HEADERS = JSON.stringify({ "x-litellm-customer-id": "anthropic-customer" });
+
+    const seenModelInfoRequests: Array<{ url: string; authorization: string; customer: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        const headers = new Headers(init?.headers);
+        seenModelInfoRequests.push({
+          url,
+          authorization: headers.get("authorization") ?? "",
+          customer: headers.get("x-litellm-customer-id") ?? "",
+        });
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: url.includes("anthropic") ? "claude-sonnet" : "gpt-5",
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
+    expect(pi.providers[0]?.config).toMatchObject({
+      baseUrl: "https://litellm.example.com/v1",
+      apiKey: "$LITELLM_API_KEY",
+      headers: { "x-litellm-customer-id": "openai-customer" },
+    });
+    expect(pi.providers[1]?.config).toMatchObject({
+      baseUrl: "https://litellm-anthropic.example.com/v1",
+      apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+      headers: { "x-litellm-customer-id": "anthropic-customer" },
+    });
+    expect(
+      (
+        pi.providers.filter((provider) => provider.name === "litellm").at(-1)!.config.models as Array<{ id: string }>
+      ).map((model) => model.id),
+    ).toEqual(["gpt-5"]);
+    expect(
+      (
+        pi.providers.filter((provider) => provider.name === "litellm-anthropic").at(-1)!.config.models as Array<{
+          id: string;
+        }>
+      ).map((model) => model.id),
+    ).toEqual(["claude-sonnet"]);
+    // Providers load in parallel, so cross-provider request order is not deterministic.
+    expect(seenModelInfoRequests).toHaveLength(2);
+    expect(seenModelInfoRequests).toContainEqual({
+      url: "https://litellm.example.com/model/info",
+      authorization: "Bearer openai-key",
+      customer: "openai-customer",
+    });
+    expect(seenModelInfoRequests).toContainEqual({
+      url: "https://litellm-anthropic.example.com/model/info",
+      authorization: "Bearer anthropic-key",
+      customer: "anthropic-customer",
+    });
+    const defaultCache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
+      models: Array<{ id: string }>;
+    };
+    const aliasCache = JSON.parse(await readFile(join(agentDir, "litellm-models-litellm-anthropic.json"), "utf8")) as {
+      models: Array<{ id: string }>;
+    };
+    expect(defaultCache.models.map((model) => model.id)).toEqual(["gpt-5"]);
+    expect(aliasCache.models.map((model) => model.id)).toEqual(["claude-sonnet"]);
+  });
+
+  it("does not let the default helper override an alias-specific API key env", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["default-helper-key"]);
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+
+    const seenModelInfoRequests: Array<{ url: string; authorization: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenModelInfoRequests.push({
+          url,
+          authorization: new Headers(init?.headers).get("authorization") ?? "",
+        });
+        return jsonResponse(200, {
+          data: [{ model_name: url.includes("anthropic") ? "claude-sonnet" : "gpt-5", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    // Providers load in parallel, so cross-provider request order is not deterministic.
+    expect(seenModelInfoRequests).toHaveLength(2);
+    expect(seenModelInfoRequests).toContainEqual({
+      url: "https://litellm.example.com/model/info",
+      authorization: "Bearer default-helper-key",
+    });
+    expect(seenModelInfoRequests).toContainEqual({
+      url: "https://litellm-anthropic.example.com/model/info",
+      authorization: "Bearer anthropic-key",
+    });
+    expect(pi.providers[0]?.config.apiKey).toBe(`!${helperPath}`);
+    expect(pi.providers[1]?.config.apiKey).toBe("$LITELLM_ANTHROPIC_API_KEY");
+  });
+
+  it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const result = await pi.handlers.get("before_provider_request")?.[0]?.(
+      { payload: { model: "kimi-k2.6" } },
+      { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
+    );
+
+    expect(result).toMatchObject({
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+      thinking: { type: "disabled" },
+    });
   });
 
   it("does not fetch on refresh when discovery timeout is zero", async () => {
@@ -830,6 +1084,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     // Startup model and MCP discovery use the same fresh helper token (one helper invocation).
     expect(seenAuthHeaders).toEqual([`Bearer ${first}`, `Bearer ${first}`]);
@@ -978,7 +1233,9 @@ describe("extension startup", () => {
     });
 
     const extension = await loadExtension(agentDir);
-    await extension(createPi());
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
 
     expect(seenAuthHeaders).toEqual([`Bearer ${fresh}`, `Bearer ${fresh}`]);
   });
@@ -1258,5 +1515,365 @@ describe("extension startup", () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toThrow("SSO token is required");
+  });
+});
+
+describe("multi-provider hardening", () => {
+  it("registers remaining providers when one alias's credential helper fails", async () => {
+    const agentDir = await makeAgentDir();
+    const failingHelper = join(agentDir, "broken-alias-helper.sh");
+    await writeFile(failingHelper, "#!/usr/bin/env bash\nexit 42\n", { mode: 0o700 });
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: `!${failingHelper}`,
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://litellm.example.com/model/info") {
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi, 1);
+
+    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
+    expect(pi.providers[1]?.config.models).toEqual([]);
+  });
+
+  it("does not register the default env key for an alias missing its apiKey", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": { baseUrl: "https://litellm-anthropic.example.com" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+    expect(pi.providers[1]?.name).toBe("litellm-anthropic");
+    expect(pi.providers[1]?.config.apiKey).toBeUndefined();
+  });
+
+  it("escapes resolved header values so Pi core does not re-resolve them per request", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-secret": "v$$X", "x-bang": "!not-a-command" });
+    const seenSecretHeaders: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenSecretHeaders.push(new Headers(init?.headers).get("x-secret"));
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    expect(seenSecretHeaders).toEqual(["v$X"]);
+    expect(pi.providers[0]?.config.headers).toEqual({ "x-secret": "v$$X", "x-bang": "$!not-a-command" });
+  });
+
+  it("prefers a configured default-provider apiKey over the env helper command", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["default-helper-key"]);
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: { providers: { litellm: { apiKey: "$CUSTOM_LITELLM_KEY" } } },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    process.env.CUSTOM_LITELLM_KEY = "custom-key";
+    const seenAuthHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenAuthHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    expect(seenAuthHeaders).toEqual(["Bearer custom-key"]);
+    expect(pi.providers[0]?.config.apiKey).toBe("$CUSTOM_LITELLM_KEY");
+    expect(await readHelperCount(agentDir)).toBe(0);
+  });
+
+  it("does not execute an alias key command when a stored auth entry wins", async () => {
+    const agentDir = await makeAgentDir();
+    const countingHelper = await writeHelper(agentDir, ["alias-command-key"]);
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ "litellm-anthropic": { type: "api_key", key: "stored-alias-key" } }),
+      "utf8",
+    );
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: `!${countingHelper}`,
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const seenAuthHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenAuthHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+        return jsonResponse(200, { data: [{ model_name: "claude-sonnet", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi, 1);
+
+    expect(seenAuthHeaders).toEqual(["Bearer stored-alias-key"]);
+    expect(await readHelperCount(agentDir)).toBe(0);
+  });
+
+  it("warns when a configured apiKey resolves to nothing", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "sk-abc$UNSET_LITELLM_VAR",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    delete process.env.UNSET_LITELLM_VAR;
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const extension = await loadExtension(agentDir);
+    await extension(createPi());
+
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining("LiteLLM (litellm-anthropic): configured apiKey did not resolve"),
+    );
+  });
+
+  it("reports both successes and failures when /litellm-refresh spans providers", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$UNSET_ALIAS_KEY",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "openai-key";
+    delete process.env.UNSET_ALIAS_KEY;
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://litellm.example.com/model/info") {
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const notify = vi.fn();
+    await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [message, type] = notify.mock.calls[0] ?? [];
+    expect(type).toBe("warning");
+    expect(message).toContain("litellm: 1 models");
+    expect(message).toContain("litellm-anthropic");
+  });
+
+  it("sends custom headers when generating a login virtual key", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-litellm-customer-id": "team-a" });
+    const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
+    const seenRequests: Array<{ url: string; customer: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      seenRequests.push({ url, customer: new Headers(init?.headers).get("x-litellm-customer-id") });
+      if (url.endsWith("/key/generate")) return jsonResponse(200, { key: "sk-virtual-abc" });
+      if (url.endsWith("/model/info"))
+        return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await pi.providers[0]?.config.oauth?.login({
+      onPrompt: async (options) => {
+        if (options.placeholder) return "https://litellm.example.com";
+        if (options.message.includes("Select login method")) return "2";
+        if (options.message.includes("SSO token")) return jwt;
+        return "y";
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(seenRequests).toContainEqual({ url: "https://litellm.example.com/key/generate", customer: "team-a" });
+  });
+
+  it("skips an alias whose cache file would collide with another provider", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "team-claude": { baseUrl: "https://a.example.com", apiKey: "$LITELLM_ANTHROPIC_API_KEY" },
+            "Team Claude": { baseUrl: "https://b.example.com", apiKey: "$LITELLM_ANTHROPIC_API_KEY" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "team-claude"]);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Team Claude"));
+  });
+
+  it("drops non-primitive header values instead of stringifying them", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-anthropic": {
+              baseUrl: "https://litellm-anthropic.example.com",
+              apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+              headers: { "x-obj": { team: "a" }, "x-null": null, "x-num": 30, "x-bool": false },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[1]?.config.headers).toEqual({ "x-num": "30", "x-bool": "false" });
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-obj"));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-null"));
+  });
+
+  it("invalidates the cache when configured headers change even if the base URL and key match", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-litellm-customer-id": "team-b" });
+    const seenRequests: Array<{ customer: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        seenRequests.push({ customer: new Headers(init?.headers).get("x-litellm-customer-id") });
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    expect(seenRequests).toEqual([{ customer: "team-b" }]);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "fresh-model",
+    ]);
   });
 });

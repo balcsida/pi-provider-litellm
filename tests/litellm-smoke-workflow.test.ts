@@ -20,16 +20,29 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Start VidaiMock");
     expect(workflow).toContain("Wait for VidaiMock");
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
+    expect(workflow).toContain("LITELLM_LICENSE: $" + "{{ secrets.LITELLM_LICENSE }}");
+    expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
+    expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
+    expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
     expect(workflow).toContain("LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude");
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL: vidaimock-openai");
     expect(workflow).toContain("model_name: vidaimock-openai");
-    expect(workflow).toContain("model_name: anthropic/vidaimock-claude");
+    expect(workflow).toContain(`- model_name: anthropic/vidaimock-claude
+              model_info:
+                mode: chat
+              litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");
+    expect(workflow).toContain("-e LITELLM_LICENSE");
+    expect(workflow).toContain("Start LiteLLM smoke database");
+    expect(workflow).toContain("postgres:16-alpine");
+    expect(workflow).toContain('admin_only_routes: ["/key/generate"]');
+    expect(workflow).toContain("Run auth smoke");
+    expect(workflow).toContain("npx tsx scripts/smoke-auth.ts");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
     expect(workflow).toContain("Run Pi CLI smoke");
     expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
@@ -64,6 +77,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(readme).toContain("does not call real LLM APIs");
     expect(readme).toContain("No provider API keys or GitHub Models permission are required");
     expect(readme).toContain("OpenAI-compatible and Anthropic routes");
+    expect(readme).toContain("optional Postgres-backed auth checks when `LITELLM_LICENSE` is configured");
     expect(readme).toContain("non-interactive Pi CLI smoke");
     expect(readme).not.toContain("Kimi-shaped routes");
 

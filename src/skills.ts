@@ -18,14 +18,19 @@ let skillsCache:
 function getSkillsFromBody(body: unknown): LiteLLMSkill[] {
   if (Array.isArray(body)) return body as LiteLLMSkill[];
   if (body && typeof body === "object") {
-    const record = body as { data?: unknown; skills?: unknown };
+    const record = body as { plugins?: unknown; data?: unknown; skills?: unknown };
+    if (Array.isArray(record.plugins)) return record.plugins as LiteLLMSkill[];
     if (Array.isArray(record.data)) return record.data as LiteLLMSkill[];
     if (Array.isArray(record.skills)) return record.skills as LiteLLMSkill[];
   }
   return [];
 }
 
-export async function listSkills(baseUrl: string, apiKey: string): Promise<LiteLLMSkill[]> {
+export async function listSkills(
+  baseUrl: string,
+  apiKey: string,
+  headers?: Record<string, string>,
+): Promise<LiteLLMSkill[]> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   if (
     skillsCache &&
@@ -36,50 +41,127 @@ export async function listSkills(baseUrl: string, apiKey: string): Promise<LiteL
     return skillsCache.skills;
   }
 
-  try {
-    const response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) return [];
-    const skills = getSkillsFromBody(await response.json());
-    skillsCache = { baseUrl: normalizedBaseUrl, apiKey, fetchedAt: Date.now(), skills };
-    return skills;
-  } catch {
-    return [];
-  }
+  const fetchSkills = async (path: string): Promise<LiteLLMSkill[]> => {
+    try {
+      const response = await fetch(`${normalizedBaseUrl}${path}`, {
+        headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      return response.ok ? getSkillsFromBody(await response.json()) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [skillHub, legacy] = await Promise.all([
+    fetchSkills("/claude-code/marketplace.json"),
+    fetchSkills("/v1/skills"),
+  ]);
+  const skillHubNames = new Set(skillHub.map((skill) => skill.name));
+  const skills = [...skillHub, ...legacy.filter((skill) => !skillHubNames.has(skill.name))];
+  skillsCache = { baseUrl: normalizedBaseUrl, apiKey, fetchedAt: Date.now(), skills };
+  return skills;
 }
 
 export async function createSkill(
   baseUrl: string,
   apiKey: string,
-  input: { name: string; description: string; code: string; inputSchema?: Record<string, unknown> },
+  input: {
+    name: string;
+    description?: string;
+    source?: Record<string, unknown>;
+    code?: string;
+    inputSchema?: Record<string, unknown>;
+  },
+  headers?: Record<string, string>,
 ): Promise<unknown> {
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills`, {
+  if (!input.source && !input.code) throw new Error("code is required when source is omitted");
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  let usedSkillHub = input.source !== undefined;
+  const skillHubPayload = input.source
+    ? {
+        name: input.name,
+        description: input.description,
+        source: input.source,
+      }
+    : {
+        name: input.name,
+        description: input.description,
+        code: input.code,
+        input_schema: input.inputSchema ?? { type: "object", properties: {} },
+      };
+  let response = await fetch(`${normalizedBaseUrl}${input.source ? "/claude-code/plugins" : "/v1/skills"}`, {
     method: "POST",
     headers: {
+      ...headers,
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      name: input.name,
-      description: input.description,
-      code: input.code,
-      input_schema: input.inputSchema ?? { type: "object", properties: {} },
-    }),
+    body: JSON.stringify(skillHubPayload),
     signal: AbortSignal.timeout(10_000),
   });
+  if (input.source && response.status === 404) {
+    usedSkillHub = false;
+    response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: input.name,
+        description: input.description,
+        code: input.code,
+        input_schema: input.inputSchema ?? { type: "object", properties: {} },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
   if (!response.ok) throw new Error(`LiteLLM skill create failed: HTTP ${response.status}`);
   skillsCache = undefined;
+  if (usedSkillHub) {
+    const enableResponse = await fetch(
+      `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(input.name)}/enable`,
+      {
+        method: "POST",
+        headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!enableResponse.ok) throw new Error(`LiteLLM skill enable failed: HTTP ${enableResponse.status}`);
+  }
   return response.json().catch(() => ({}));
 }
 
-export async function deleteSkill(baseUrl: string, apiKey: string, skillId: string): Promise<void> {
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/skills/${encodeURIComponent(skillId)}`, {
+export async function deleteSkill(
+  baseUrl: string,
+  apiKey: string,
+  skillId: string,
+  headers?: Record<string, string>,
+): Promise<void> {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  let skillHubError: unknown;
+  const skillHubResponse = await fetch(`${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(skillId)}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     signal: AbortSignal.timeout(10_000),
+  }).catch((error: unknown) => {
+    skillHubError = error;
+    return undefined;
   });
+  let response = skillHubResponse;
+  if (!response || response.status === 404 || response.status >= 500) {
+    response = await fetch(`${normalizedBaseUrl}/v1/skills/${encodeURIComponent(skillId)}`, {
+      method: "DELETE",
+      headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
+  if (response.status === 404 && skillHubResponse?.status !== 404) {
+    if (skillHubError instanceof Error) throw skillHubError;
+    throw new Error(`LiteLLM skill delete failed: HTTP ${skillHubResponse?.status}`);
+  }
   if (!response.ok && response.status !== 404) throw new Error(`LiteLLM skill delete failed: HTTP ${response.status}`);
   skillsCache = undefined;
 }
@@ -110,8 +192,9 @@ function formatSkills(skills: LiteLLMSkill[]): string {
 
 const CreateSkillParams = Type.Object({
   name: Type.String({ description: "Skill name" }),
-  description: Type.String({ description: "Skill description" }),
-  code: Type.String({ description: "Skill implementation or prompt code" }),
+  description: Type.Optional(Type.String({ description: "Skill description" })),
+  sourceJson: Type.Optional(Type.String({ description: "Optional Skill Hub source metadata JSON object" })),
+  code: Type.Optional(Type.String({ description: "Legacy Skills Gateway implementation or prompt code" })),
   inputSchemaJson: Type.Optional(Type.String({ description: "Optional JSON Schema string for skill inputs" })),
 });
 
@@ -119,7 +202,19 @@ const DeleteSkillParams = Type.Object({
   skillId: Type.String({ description: "LiteLLM skill id" }),
 });
 
-export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Promise<string>): ToolDefinition[] {
+function parseJsonObject(value: string, fieldName: string): Record<string, unknown> {
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${fieldName} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+export function createSkillToolDefinitions(
+  baseUrl: string,
+  getApiKey: () => Promise<string>,
+  headers?: Record<string, string>,
+): ToolDefinition[] {
   return [
     defineTool({
       name: "litellm_skill_list",
@@ -129,7 +224,7 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
       parameters: Type.Object({}),
       async execute() {
         const apiKey = await getApiKey();
-        const skills = await listSkills(baseUrl, apiKey);
+        const skills = await listSkills(baseUrl, apiKey, headers);
         return { content: [{ type: "text", text: formatSkills(skills) }], details: { count: skills.length } };
       },
     }),
@@ -140,10 +235,22 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
       parameters: CreateSkillParams,
       async execute(_toolCallId, params: Static<typeof CreateSkillParams>) {
         const apiKey = await getApiKey();
+        const source = params.sourceJson ? parseJsonObject(params.sourceJson, "sourceJson") : undefined;
         const inputSchema = params.inputSchemaJson
-          ? (JSON.parse(params.inputSchemaJson) as Record<string, unknown>)
+          ? parseJsonObject(params.inputSchemaJson, "inputSchemaJson")
           : undefined;
-        const result = await createSkill(baseUrl, apiKey, { ...params, inputSchema });
+        const result = await createSkill(
+          baseUrl,
+          apiKey,
+          {
+            name: params.name,
+            description: params.description,
+            source,
+            code: params.code,
+            inputSchema,
+          },
+          headers,
+        );
         return { content: [{ type: "text", text: "LiteLLM skill created." }], details: { result } };
       },
     }),
@@ -154,7 +261,7 @@ export function createSkillToolDefinitions(baseUrl: string, getApiKey: () => Pro
       parameters: DeleteSkillParams,
       async execute(_toolCallId, params: Static<typeof DeleteSkillParams>) {
         const apiKey = await getApiKey();
-        await deleteSkill(baseUrl, apiKey, params.skillId);
+        await deleteSkill(baseUrl, apiKey, params.skillId, headers);
         return { content: [{ type: "text", text: `LiteLLM skill deleted: ${params.skillId}` }], details: {} };
       },
     }),

@@ -5,6 +5,7 @@ export type DiscoverySource = "model_info" | "models_list" | "health";
 export interface CacheFile {
   baseUrl: string;
   apiKeyFingerprint: string;
+  headersFingerprint?: string;
   fetchedAt: number;
   source: DiscoverySource;
   models: ProviderModelConfig[];
@@ -18,6 +19,7 @@ export interface DiscoveryResult {
 export interface DiscoveryOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
 }
 
 export interface ModelInfoEntry {
@@ -82,6 +84,14 @@ export interface LiteLLMSkill {
   name: string;
   description?: string;
   enabled?: boolean;
+  source?: Record<string, unknown>;
+  version?: string;
+  keywords?: string[];
+  domain?: string;
+  namespace?: string;
+  category?: string;
+  author?: string;
+  homepage?: string;
   input_schema?: Record<string, unknown>;
   code?: string;
 }
