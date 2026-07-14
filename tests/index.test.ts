@@ -297,15 +297,10 @@ describe("extension startup", () => {
     await extension(pi);
 
     for (const handler of pi.handlers.get("session_start") ?? []) {
-      await handler(
-        { reason: "start" },
-        { sessionManager: { getSessionFile: () => undefined }, ui: { notify } },
-      );
+      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined }, ui: { notify } });
     }
 
-    await vi.waitFor(() =>
-      expect(notify).toHaveBeenCalledWith("LiteLLM: Querying /model/info endpoint...", "info"),
-    );
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledWith("LiteLLM: Querying /model/info endpoint...", "info"));
   });
 
   it("registers the API key as an explicit environment reference", async () => {

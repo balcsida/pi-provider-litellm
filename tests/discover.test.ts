@@ -386,9 +386,7 @@ describe("discoverModels fallback to /health", () => {
       if (url.endsWith("/v1/models")) return Promise.resolve(new Response(null, { status: 404 }));
       if (url.endsWith("/health")) return Promise.resolve(jsonResponse(200, { healthy_endpoints: endpoints }));
       if (url.endsWith("uuid-10")) {
-        return Promise.resolve(
-          jsonResponse(200, { data: [{ model_name: "model-10", model_info: { mode: "chat" } }] }),
-        );
+        return Promise.resolve(jsonResponse(200, { data: [{ model_name: "model-10", model_info: { mode: "chat" } }] }));
       }
       return new Promise<Response>((resolve) => pending.push(resolve));
     });
