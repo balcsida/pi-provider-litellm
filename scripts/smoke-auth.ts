@@ -212,7 +212,11 @@ export async function runSsoLoginSmoke(
 ): Promise<void> {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousBaseUrl = process.env.LITELLM_BASE_URL;
+  const previousApiKey = process.env.LITELLM_API_KEY;
   process.env.PI_CODING_AGENT_DIR ??= await mkdtemp(join(tmpdir(), "pi-litellm-sso-smoke-"));
+  process.env.LITELLM_BASE_URL = baseUrl;
+  process.env.LITELLM_API_KEY = options.masterKey;
   try {
     const extension = (await import("../src/index.js")).default as unknown as (pi: SmokePi) => Promise<void>;
     const pi = createSmokePi();
@@ -245,6 +249,10 @@ export async function runSsoLoginSmoke(
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousBaseUrl === undefined) delete process.env.LITELLM_BASE_URL;
+    else process.env.LITELLM_BASE_URL = previousBaseUrl;
+    if (previousApiKey === undefined) delete process.env.LITELLM_API_KEY;
+    else process.env.LITELLM_API_KEY = previousApiKey;
   }
 }
 

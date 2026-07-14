@@ -208,6 +208,14 @@ type TestPi = {
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
+async function startSession(pi: TestPi, refreshes = pi.providers.length): Promise<void> {
+  const providerCount = pi.providers.length;
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+  }
+  await vi.waitFor(() => expect(pi.providers).toHaveLength(providerCount + refreshes));
+}
+
 afterEach(() => {
   for (const key of ENV_KEYS) {
     const original = ORIGINAL_ENV.get(key);
@@ -219,6 +227,47 @@ afterEach(() => {
 });
 
 describe("extension startup", () => {
+  it("uses mismatched cached models until session-start refresh", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "new-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("old-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+
+    for (const handler of pi.handlers.get("session_start") ?? []) {
+      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+    }
+    await vi.waitFor(() => {
+      expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("fresh-model");
+    });
+  });
+
   it("registers the API key as an explicit environment reference", async () => {
     const agentDir = await makeAgentDir();
     const extension = await loadExtension(agentDir);
@@ -252,6 +301,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to read ADC file"));
     expect(seenAuthHeaders).toEqual(["Bearer env-key"]);
@@ -295,15 +345,21 @@ describe("extension startup", () => {
     let extension = await loadExtension(agentDir);
     let pi = createPi();
     await extension(pi);
-    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["first-model"]);
+    await startSession(pi);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "first-model",
+    ]);
 
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "second-adc", "second-refresh");
     extension = await loadExtension(agentDir);
     pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
-    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["second-model"]);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "second-model",
+    ]);
   });
 
   it('treats literal "undefined" env values as unset', async () => {
@@ -344,8 +400,9 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
-    expect(pi.providers[0]?.config.models).toEqual([
+    expect(pi.providers.at(-1)?.config.models).toEqual([
       expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 272_000, maxTokens: 64_000 }),
     ]);
   });
@@ -546,7 +603,8 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
-    expect(pi.providers[0]?.config.models).toEqual([
+    await startSession(pi);
+    expect(pi.providers.at(-1)?.config.models).toEqual([
       expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 128_000 }),
     ]);
 
@@ -578,7 +636,9 @@ describe("extension startup", () => {
     });
 
     const extension = await loadExtension(agentDir);
-    await extension(createPi());
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-key", "Bearer stored-key"]);
   });
@@ -632,8 +692,9 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
-    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
+    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
     expect(pi.providers[0]?.config).toMatchObject({
       baseUrl: "https://litellm.example.com/v1",
       apiKey: "$LITELLM_API_KEY",
@@ -644,10 +705,18 @@ describe("extension startup", () => {
       apiKey: "$LITELLM_ANTHROPIC_API_KEY",
       headers: { "x-litellm-customer-id": "anthropic-customer" },
     });
-    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
-    expect((pi.providers[1].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
-      "claude-sonnet",
-    ]);
+    expect(
+      (
+        pi.providers.filter((provider) => provider.name === "litellm").at(-1)!.config.models as Array<{ id: string }>
+      ).map((model) => model.id),
+    ).toEqual(["gpt-5"]);
+    expect(
+      (
+        pi.providers.filter((provider) => provider.name === "litellm-anthropic").at(-1)!.config.models as Array<{
+          id: string;
+        }>
+      ).map((model) => model.id),
+    ).toEqual(["claude-sonnet"]);
     // Providers load in parallel, so cross-provider request order is not deterministic.
     expect(seenModelInfoRequests).toHaveLength(2);
     expect(seenModelInfoRequests).toContainEqual({
@@ -711,6 +780,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     // Providers load in parallel, so cross-provider request order is not deterministic.
     expect(seenModelInfoRequests).toHaveLength(2);
@@ -1014,6 +1084,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     // Startup model and MCP discovery use the same fresh helper token (one helper invocation).
     expect(seenAuthHeaders).toEqual([`Bearer ${first}`, `Bearer ${first}`]);
@@ -1162,7 +1233,9 @@ describe("extension startup", () => {
     });
 
     const extension = await loadExtension(agentDir);
-    await extension(createPi());
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
 
     expect(seenAuthHeaders).toEqual([`Bearer ${fresh}`, `Bearer ${fresh}`]);
   });
@@ -1446,7 +1519,7 @@ describe("extension startup", () => {
 });
 
 describe("multi-provider hardening", () => {
-  it("registers remaining providers when one alias's credential helper fails at startup", async () => {
+  it("registers remaining providers when one alias's credential helper fails", async () => {
     const agentDir = await makeAgentDir();
     const failingHelper = join(agentDir, "broken-alias-helper.sh");
     await writeFile(failingHelper, "#!/usr/bin/env bash\nexit 42\n", { mode: 0o700 });
@@ -1474,16 +1547,14 @@ describe("multi-provider hardening", () => {
       if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi, 1);
 
-    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
-    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
+    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
     expect(pi.providers[1]?.config.models).toEqual([]);
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("litellm-anthropic"));
   });
 
   it("does not register the default env key for an alias missing its apiKey", async () => {
@@ -1531,6 +1602,7 @@ describe("multi-provider hardening", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(seenSecretHeaders).toEqual(["v$X"]);
     expect(pi.providers[0]?.config.headers).toEqual({ "x-secret": "v$$X", "x-bang": "$!not-a-command" });
@@ -1563,6 +1635,7 @@ describe("multi-provider hardening", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer custom-key"]);
     expect(pi.providers[0]?.config.apiKey).toBe("$CUSTOM_LITELLM_KEY");
@@ -1605,6 +1678,7 @@ describe("multi-provider hardening", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi, 1);
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-alias-key"]);
     expect(await readHelperCount(agentDir)).toBe(0);
@@ -1795,8 +1869,11 @@ describe("multi-provider hardening", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await startSession(pi);
 
     expect(seenRequests).toEqual([{ customer: "team-b" }]);
-    expect((pi.providers[0].config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["fresh-model"]);
+    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "fresh-model",
+    ]);
   });
 });
