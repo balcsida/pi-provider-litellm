@@ -368,6 +368,15 @@ async function discoverFromHealth(
   return models.filter((model): model is ProviderModelConfig => model !== undefined);
 }
 
+function deduplicateModels(models: ProviderModelConfig[]): ProviderModelConfig[] {
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+}
+
 export async function discoverModels(
   baseUrl: string,
   apiKey: string,
@@ -379,7 +388,7 @@ export async function discoverModels(
     const models = (infoResult.data.data ?? [])
       .map(mapFromModelInfo)
       .filter((m): m is ProviderModelConfig => m !== undefined);
-    return { source: "model_info", models };
+    return { source: "model_info", models: deduplicateModels(models) };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
@@ -388,7 +397,7 @@ export async function discoverModels(
   if (!listResult.ok) {
     if ([401, 403, 404].includes(listResult.status)) {
       const models = await discoverFromHealth(base, apiKey, options);
-      if (models.length > 0) return { source: "health", models };
+      if (models.length > 0) return { source: "health", models: deduplicateModels(models) };
     }
     throw new Error(`/v1/models returned ${listResult.status}`);
   }
@@ -396,5 +405,5 @@ export async function discoverModels(
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
     .filter((m): m is ProviderModelConfig => m !== undefined);
-  return { source: "models_list", models };
+  return { source: "models_list", models: deduplicateModels(models) };
 }
