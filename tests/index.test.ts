@@ -1394,6 +1394,8 @@ describe("extension startup", () => {
         onProgress: progress,
         signal: new AbortController().signal,
       });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(progress).not.toHaveBeenCalledWith(expect.stringContaining("virtual key generation failed"));
       await vi.advanceTimersByTimeAsync(10_000);
       const credential = await loginPromise;
       expect(credential).toMatchObject({ access: jwt, refresh: "" });

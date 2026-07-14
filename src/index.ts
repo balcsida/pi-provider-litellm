@@ -33,6 +33,7 @@ const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
 const DEFAULT_TIMEOUT_MS = 5000;
+const LOGIN_TIMEOUT_MS = 10_000;
 const CACHE_FILENAME = "litellm-models.json";
 const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
@@ -312,7 +313,7 @@ async function generateVirtualKey(
   signal?: AbortSignal,
   headers?: Record<string, string>,
 ): Promise<{ key: string; expiresAt?: number }> {
-  const { signal: boundedSignal, cancel } = withTimeout(getDiscoveryTimeoutMs(), signal);
+  const { signal: boundedSignal, cancel } = withTimeout(LOGIN_TIMEOUT_MS, signal);
   try {
     const response = await fetch(`${baseUrl}/key/generate`, {
       method: "POST",
@@ -692,7 +693,7 @@ async function loginLiteLLM(
   }
 
   const { models, source } = await discoverModels(baseUrl, apiKey, {
-    timeoutMs: getDiscoveryTimeoutMs(),
+    timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
     headers: options.headers,
     onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
