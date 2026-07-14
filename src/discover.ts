@@ -368,6 +368,15 @@ async function discoverFromHealth(
   return models.filter((model): model is ProviderModelConfig => model !== undefined);
 }
 
+function deduplicateModels(models: ProviderModelConfig[]): ProviderModelConfig[] {
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+}
+
 export async function discoverModels(
   baseUrl: string,
   apiKey: string,
@@ -376,9 +385,17 @@ export async function discoverModels(
   const base = normalizeBaseUrl(baseUrl);
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
-    const models = (infoResult.data.data ?? [])
-      .map(mapFromModelInfo)
-      .filter((m): m is ProviderModelConfig => m !== undefined);
+    const entries = new Map<string, ModelInfoEntry>();
+    for (const entry of infoResult.data.data ?? []) {
+      if (!entry.model_name) continue;
+      const previous = entries.get(entry.model_name);
+      entries.set(entry.model_name, {
+        ...previous,
+        ...entry,
+        model_info: { ...previous?.model_info, ...entry.model_info },
+      });
+    }
+    const models = [...entries.values()].map(mapFromModelInfo).filter((m): m is ProviderModelConfig => m !== undefined);
     return { source: "model_info", models };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
@@ -388,7 +405,7 @@ export async function discoverModels(
   if (!listResult.ok) {
     if ([401, 403, 404].includes(listResult.status)) {
       const models = await discoverFromHealth(base, apiKey, options);
-      if (models.length > 0) return { source: "health", models };
+      if (models.length > 0) return { source: "health", models: deduplicateModels(models) };
     }
     throw new Error(`/v1/models returned ${listResult.status}`);
   }
@@ -396,5 +413,5 @@ export async function discoverModels(
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
     .filter((m): m is ProviderModelConfig => m !== undefined);
-  return { source: "models_list", models };
+  return { source: "models_list", models: deduplicateModels(models) };
 }
