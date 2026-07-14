@@ -301,6 +301,70 @@ describe("extension startup", () => {
     }
 
     await vi.waitFor(() => expect(notify).toHaveBeenCalledWith("LiteLLM: Querying /model/info endpoint...", "info"));
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledWith("LiteLLM MCP: Discovering MCP tools from server...", "info"),
+    );
+  });
+
+  it("keeps concurrent extension progress bound to the initiating session", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "new-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("old-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const modelInfoResolvers: Array<(response: Response) => void> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return new Promise<Response>((resolve) => modelInfoResolvers.push(resolve));
+      }
+      if (url.endsWith("/v1/models")) return Promise.resolve(jsonResponse(200, { data: [] }));
+      if (url === "https://models.dev/api.json") return Promise.resolve(new Response(null, { status: 503 }));
+      if (url.endsWith("/mcp-rest/tools/list")) return Promise.resolve(jsonResponse(200, { tools: [] }));
+      return Promise.reject(new Error(`unexpected URL: ${url}`));
+    });
+    const extension = await loadExtension(agentDir);
+    const firstPi = createPi();
+    const secondPi = createPi();
+    await extension(firstPi);
+    await extension(secondPi);
+    const firstNotify = vi.fn();
+    const secondNotify = vi.fn();
+
+    for (const handler of firstPi.handlers.get("session_start") ?? []) {
+      await handler(
+        { reason: "start" },
+        { sessionManager: { getSessionFile: () => undefined }, ui: { notify: firstNotify } },
+      );
+    }
+    await vi.waitFor(() => expect(modelInfoResolvers).toHaveLength(1));
+    for (const handler of secondPi.handlers.get("session_start") ?? []) {
+      await handler(
+        { reason: "start" },
+        { sessionManager: { getSessionFile: () => undefined }, ui: { notify: secondNotify } },
+      );
+    }
+    await vi.waitFor(() => expect(modelInfoResolvers).toHaveLength(2));
+    firstNotify.mockClear();
+    secondNotify.mockClear();
+
+    modelInfoResolvers[0](new Response(null, { status: 404 }));
+    await vi.waitFor(() => expect(firstPi.providers).toHaveLength(2));
+    modelInfoResolvers[1](new Response(null, { status: 404 }));
+    await vi.waitFor(() => expect(secondPi.providers).toHaveLength(2));
+
+    const fallbackMessage = "LiteLLM: /model/info unavailable, trying /v1/models...";
+    expect(firstNotify.mock.calls.filter(([message]) => message === fallbackMessage)).toHaveLength(1);
+    expect(secondNotify.mock.calls.filter(([message]) => message === fallbackMessage)).toHaveLength(1);
   });
 
   it("registers the API key as an explicit environment reference", async () => {
@@ -1784,8 +1848,7 @@ describe("multi-provider hardening", () => {
     const notify = vi.fn();
     await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
 
-    expect(notify).toHaveBeenCalledTimes(1);
-    const [message, type] = notify.mock.calls[0] ?? [];
+    const [message, type] = notify.mock.calls.at(-1) ?? [];
     expect(type).toBe("warning");
     expect(message).toContain("litellm: 1 models");
     expect(message).toContain("litellm-anthropic");
