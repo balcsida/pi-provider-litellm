@@ -408,6 +408,36 @@ describe("discoverModels fallback to /v1/models", () => {
 });
 
 describe("discoverModels fallback to /health", () => {
+  it("reports completed health detail requests rather than endpoint indexes", async () => {
+    const endpoints = Array.from({ length: 11 }, (_, index) => ({
+      model: `model-${index + 1}`,
+      model_id: `uuid-${index + 1}`,
+    }));
+    const pending: Array<(response: Response) => void> = [];
+    const progress = vi.fn();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Promise.resolve(new Response(null, { status: 404 }));
+      if (url.endsWith("/v1/models")) return Promise.resolve(new Response(null, { status: 404 }));
+      if (url.endsWith("/health")) return Promise.resolve(jsonResponse(200, { healthy_endpoints: endpoints }));
+      if (url.endsWith("uuid-11")) {
+        return Promise.resolve(jsonResponse(200, { data: [{ model_name: "model-11", model_info: { mode: "chat" } }] }));
+      }
+      return new Promise<Response>((resolve) => pending.push(resolve));
+    });
+
+    const discovery = discoverModels("https://litellm.example.com", "sk-test", { onProgress: progress });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(14));
+    const reportedBeforeCompletion = progress.mock.calls.some(([message]) => message === "Fetched 11/11 models...");
+    for (const [index, resolve] of pending.entries()) {
+      resolve(jsonResponse(200, { data: [{ model_name: `model-${index + 1}`, model_info: { mode: "chat" } }] }));
+    }
+    await discovery;
+
+    expect(reportedBeforeCompletion).toBe(false);
+    expect(progress).toHaveBeenCalledWith("Fetched 11/11 models...");
+  });
+
   it("uses /health and per-endpoint /model/info when OpenAI model listing is unavailable", async () => {
     const urls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

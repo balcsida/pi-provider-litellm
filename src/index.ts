@@ -51,6 +51,7 @@ type ModelOverride = Partial<
 
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
 type ProviderRefreshResult = RefreshResult & { providerName: string };
+type ProgressCallback = (message: string) => void;
 
 type RawProviderSettings = {
   displayName?: unknown;
@@ -603,7 +604,7 @@ async function getProviderDefinitions(): Promise<ProviderDefinition[]> {
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions,
+  options: DiscoveryOptions & { onProgress?: (message: string) => void },
 ): Promise<{ result: DiscoveryResult; warning?: string }> {
   try {
     return { result: await discoverModels(baseUrl, apiKey, options) };
@@ -695,6 +696,7 @@ async function loginLiteLLM(
     timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
     headers: options.headers,
+    onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
   });
 
   const cache: CacheFile = {
@@ -929,6 +931,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
         timeoutMs,
         headers,
+        onProgress: (message) => process.stderr.write(`LiteLLM: ${message}\n`),
       });
       if (warning) {
         if (cacheValid && cache) {
@@ -1071,13 +1074,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     };
   }
 
-  async function registerMcpTools(state: ProviderState): Promise<void> {
+  async function registerMcpTools(state: ProviderState, onProgress?: ProgressCallback): Promise<void> {
     if (!state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
     try {
       const tools = await createMcpToolDefinitions(
         state.creds.baseUrl,
         seededRuntimeApiKey(state, state.liveDiscoveryApiKey),
         state.headers,
+        (message) =>
+          onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`),
       );
       for (const tool of tools) {
         pi.registerTool(tool);
@@ -1091,15 +1096,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   registerSkillTools(defaultState);
 
-  async function refreshModelsAndCosts(state: ProviderState): Promise<ProviderRefreshResult> {
+  async function refreshModelsAndCosts(
+    state: ProviderState,
+    onProgress?: ProgressCallback,
+  ): Promise<ProviderRefreshResult> {
     const fresh = await resolveCredentials(state.definition);
     const freshFp = fresh.apiKeyFingerprint;
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
       throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
     }
+    const progress = onProgress
+      ? (message: string) => onProgress(`LiteLLM: ${message}`)
+      : (message: string) => process.stderr.write(`LiteLLM: ${message}\n`);
     const result = await discoverModels(fresh.baseUrl, fresh.apiKey, {
       timeoutMs: getDiscoveryTimeoutMs(),
       headers: state.headers,
+      onProgress: progress,
     });
     const now = Date.now();
     await writeCache(getCachePath(state.definition.name), {
@@ -1118,12 +1130,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     state.refreshOnStart = false;
     registerProvider(state, overridden, fresh.apiKeyConfig);
     updateAllCosts();
-    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state);
+    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress);
     return { providerName: state.definition.name, models: overridden, source: result.source };
   }
 
-  function runRefresh(state: ProviderState): Promise<ProviderRefreshResult> {
-    state.refreshInProgress ??= refreshModelsAndCosts(state).finally(() => {
+  function runRefresh(state: ProviderState, onProgress?: ProgressCallback): Promise<ProviderRefreshResult> {
+    state.refreshInProgress ??= refreshModelsAndCosts(state, onProgress).finally(() => {
       state.refreshInProgress = null;
     });
     return state.refreshInProgress;
@@ -1158,7 +1170,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     defaultState.creds = { ...defaultState.creds, baseUrl: credentialBaseUrl };
     defaultState.liveDiscoveryApiKey = credentialAccess;
     registerSkillTools(defaultState);
-    await registerMcpTools(defaultState);
+    await registerMcpTools(defaultState, (message) => ctx.ui.notify(message, "info"));
     ctx.ui.notify(`Logged in to LiteLLM. Credentials saved to ${getAuthPath()}`, "info");
   }
 
@@ -1192,7 +1204,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify(`LiteLLM refresh failed: unknown provider ${requestedProvider}`, "error");
         return;
       }
-      const settled = await Promise.allSettled(statesToRefresh.map(runRefresh));
+      const settled = await Promise.allSettled(
+        statesToRefresh.map((state) => runRefresh(state, (message) => ctx.ui.notify(message, "info"))),
+      );
       const succeeded = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
       const failed = settled
         .map((result, index) => ({ result, name: statesToRefresh[index].definition.name }))
@@ -1237,7 +1251,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     for (const state of providerStates) {
       const cacheIsStale = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt > CACHE_STALE_MS;
       if (!state.refreshOnStart && !cacheIsStale) continue;
-      void runRefresh(state).catch(() => undefined);
+      const progress = ctx.ui?.notify ? (message: string) => ctx.ui.notify(message, "info") : undefined;
+      void runRefresh(state, progress).catch(() => undefined);
     }
   });
 
