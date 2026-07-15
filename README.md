@@ -119,6 +119,25 @@ Provider fields:
 
 `/login litellm` and Google ADC token auth remain scoped to the default `litellm` provider. Aliases use their configured `apiKey` or manually stored auth entries matching the alias name.
 
+### Optional LiteLLM features
+
+LiteLLM Skills and MCP integration are enabled by default. Disable either feature globally in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "litellm": {
+    "skills": {
+      "enabled": false
+    },
+    "mcp": {
+      "enabled": false
+    }
+  }
+}
+```
+
+Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` disables LiteLLM MCP discovery and tool registration. Restart Pi after changing these settings so previously registered tools are removed.
+
 ## Use
 
 ```

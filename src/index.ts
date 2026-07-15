@@ -574,8 +574,12 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
   return record;
 }
 
-async function getProviderDefinitions(): Promise<ProviderDefinition[]> {
-  const settings = await readGlobalLiteLLMSettings();
+function isFeatureEnabled(settings: Record<string, unknown> | undefined, feature: "skills" | "mcp"): boolean {
+  const raw = settings?.[feature];
+  return !isPlainObject(raw) || raw.enabled !== false;
+}
+
+function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
   const rawProviders = settings?.providers && typeof settings.providers === "object" ? settings.providers : undefined;
   const providerSettings = rawProviders as Record<string, unknown> | undefined;
   const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
@@ -888,7 +892,10 @@ function normalizeThinkTags(
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-  const definitions = await getProviderDefinitions();
+  const settings = await readGlobalLiteLLMSettings();
+  const definitions = getProviderDefinitions(settings);
+  const skillsEnabled = isFeatureEnabled(settings, "skills");
+  const mcpEnabled = isFeatureEnabled(settings, "mcp");
   const providerNames = new Set(definitions.map((definition) => definition.name));
 
   function discoveryDisabledReason(): string | null {
@@ -1073,7 +1080,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function registerSkillTools(state = defaultState): void {
-    if (!state.creds.baseUrl) return;
+    if (!skillsEnabled || !state.creds.baseUrl) return;
     for (const tool of createSkillToolDefinitions(
       state.creds.baseUrl,
       () => resolveRuntimeApiKey(state),
@@ -1096,7 +1103,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   async function registerMcpTools(state: ProviderState, onProgress?: ProgressCallback): Promise<void> {
-    if (!state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
+    if (!mcpEnabled || !state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
     try {
       const tools = await createMcpToolDefinitions(
         state.creds.baseUrl,
@@ -1251,7 +1258,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (discoveryDisabledReason()) return;
+    if (!skillsEnabled || discoveryDisabledReason()) return;
     const fresh = await resolveCredentials(defaultState.definition);
     if (!fresh.baseUrl || !fresh.apiKey) return;
     const skills = await listSkills(fresh.baseUrl, fresh.apiKey, defaultState.headers);

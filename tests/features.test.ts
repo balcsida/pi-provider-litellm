@@ -185,6 +185,51 @@ describe("feature parity", () => {
     expect(result.systemPrompt).toContain("Terraform conventions");
   });
 
+  it("disables LiteLLM skills through settings", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { skills: { enabled: false } } }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.tools.map((tool) => tool.name)).not.toContain("litellm_skill_list");
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, {})).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("disables LiteLLM MCP discovery through settings", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ litellm: { mcp: { enabled: false } } }), "utf8");
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+
+    expect(requestedUrls).toEqual(["https://litellm.example.com/model/info"]);
+    expect(pi.tools.map((tool) => tool.name)).toContain("litellm_skill_list");
+    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_"))).toBe(false);
+  });
+
   it("registers cost tracking and session grouping handlers", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
