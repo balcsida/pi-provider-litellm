@@ -13,6 +13,10 @@ function readReadme(): string {
   return readFileSync(resolve(repoRoot, "README.md"), "utf8");
 }
 
+function readTerminalSmoke(): string {
+  return readFileSync(resolve(repoRoot, "tests/terminal-smoke.test.ts"), "utf8");
+}
+
 describe("LiteLLM smoke workflow", () => {
   it("routes smoke completions through VidaiMock instead of real LLM APIs", () => {
     const workflow = readWorkflow();
@@ -70,6 +74,10 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toMatch(/permissions:\n {2}contents: read/);
     expect(workflow).toMatch(/VIDAIMOCK_VERSION: v\d+\.\d+\.\d+$/m);
     expect(workflow).toMatch(/sha256sum -c "\$\{asset%\.tar\.gz\}\.sha256"/);
+  });
+
+  it("preserves the workflow environment in the terminal smoke", () => {
+    expect(readTerminalSmoke()).toContain("inheritEnv: true");
   });
 
   it("documents the mocked smoke workflow without provider secrets", () => {

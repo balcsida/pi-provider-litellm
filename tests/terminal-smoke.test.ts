@@ -28,6 +28,7 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
       ],
       cwd: repoRoot,
       env: { PI_CODING_AGENT_DIR: agentDir },
+      inheritEnv: true,
       viewport: { cols: 100, rows: 30 },
     });
     if (!session) throw new Error("Terminal control is not initialized");
