@@ -4,7 +4,7 @@
 
 **Goal:** Repair the interactive terminal smoke and run the secret-free smoke workflow on relevant pull requests.
 
-**Architecture:** Preserve the workflow environment at the Terminal Control process boundary instead of copying individual variables. Add the existing path-filtered workflow to pull requests while withholding the optional LiteLLM license on PR events.
+**Architecture:** Preserve the workflow environment at the Terminal Control process boundary instead of copying individual variables. Prime each fresh terminal agent directory before launching Pi and report startup logs on failure. Add the existing path-filtered workflow to pull requests while withholding the optional LiteLLM license on PR events.
 
 **Tech Stack:** GitHub Actions YAML, TypeScript ESM, Vitest, Terminal Control
 
@@ -97,4 +97,39 @@ Expected: PASS with fresh runtime output.
 ```bash
 git add tests/litellm-smoke-workflow.test.ts .github/workflows/litellm-smoke.yml
 git commit -S -m "ci: run LiteLLM smoke on pull requests"
+```
+
+### Task 3: Prime fresh terminal smoke directories
+
+**Files:**
+- Modify: `tests/litellm-smoke-workflow.test.ts`
+- Modify: `tests/terminal-smoke.test.ts`
+
+**Interfaces:**
+- Consumes: the Pi binary, extension, environment, working directory, and fresh agent directory used by the TUI smoke
+- Produces: a populated LiteLLM model cache before each terminal launch and startup-only diagnostics on failure
+
+- [ ] **Step 1: Write failing regression assertions**
+
+Assert that the terminal smoke primes each fresh agent directory before launch and reports terminal logs when the initial model does not render.
+
+- [ ] **Step 2: Run the focused test to verify it fails**
+
+Run: `npm test -- tests/litellm-smoke-workflow.test.ts`
+
+Expected: FAIL because fresh terminal directories are launched without a model cache or startup diagnostics.
+
+- [ ] **Step 3: Implement the minimal fix**
+
+Run `pi --list-models litellm` with the same binary, extension, working directory, environment, and agent directory immediately before the TUI launch. Wrap only the initial model wait to attach terminal logs on failure.
+
+- [ ] **Step 4: Run verification**
+
+Run the focused workflow test, `npm run check`, a clean build, and `actionlint`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/superpowers/specs/2026-07-15-smoke-tests-on-prs-design.md docs/superpowers/plans/2026-07-15-smoke-tests-on-prs.md tests/litellm-smoke-workflow.test.ts tests/terminal-smoke.test.ts
+git commit -S -m "fix: prime terminal smoke model cache"
 ```
