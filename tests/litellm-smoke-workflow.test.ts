@@ -24,7 +24,6 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Start VidaiMock");
     expect(workflow).toContain("Wait for VidaiMock");
     expect(workflow).toContain("VIDAIMOCK_BASE_URL: http://127.0.0.1:8100");
-    expect(workflow).toContain("LITELLM_LICENSE: $" + "{{ secrets.LITELLM_LICENSE }}");
     expect(workflow).toContain("LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database:main-latest");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm:main-latest");
@@ -66,6 +65,30 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).not.toContain("GEMINI_API_KEY");
     expect(workflow).not.toContain("require_vendors");
     expect(workflow).not.toContain("model_name: kimi-vidaimock");
+  });
+
+  it("runs for path-filtered pull requests", () => {
+    expect(readWorkflow()).toContain(`pull_request:
+    paths:
+      - '.github/workflows/litellm-smoke.yml'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'scripts/smoke*.ts'
+      - 'src/**'
+      - 'tests/**'`);
+  });
+
+  it("does not expose the optional license secret to pull requests", () => {
+    expect(readWorkflow()).toContain(
+      "LITELLM_LICENSE: $" + "{{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}",
+    );
+  });
+
+  it("selects the unlicensed image for pull requests", () => {
+    expect(readWorkflow()).toContain(
+      "LITELLM_IMAGE: $" +
+        "{{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}",
+    );
   });
 
   it("uses minimal permissions and a pinned, checksum-verified VidaiMock build", () => {
