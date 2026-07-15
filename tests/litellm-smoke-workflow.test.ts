@@ -107,6 +107,32 @@ describe("LiteLLM smoke workflow", () => {
     expect(readTerminalSmoke()).toContain("inheritEnv: true");
   });
 
+  it("primes each fresh terminal smoke agent directory", () => {
+    const terminalSmoke = readTerminalSmoke();
+    const primeAndLaunch = `const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+    await execFileAsync(piPath, ["-e", extensionPath, "--list-models", "litellm"], {
+      cwd: repoRoot,
+      env,
+    });
+    await using session = await terminal?.launch({
+      command: [
+        piPath,
+        "-e",
+        extensionPath,
+        "--provider",
+        "litellm",
+        "--model",
+        process.env.LITELLM_CLI_SMOKE_MODEL ?? "vidaimock-openai",
+        "--no-tools",
+        "--no-session",
+      ],
+      cwd: repoRoot,
+      env,
+      inheritEnv: true,`;
+
+    expect(terminalSmoke).toContain(primeAndLaunch);
+  });
+
   it("documents the mocked smoke workflow without provider secrets", () => {
     const readme = readReadme();
 
