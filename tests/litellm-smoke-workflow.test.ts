@@ -91,6 +91,10 @@ describe("LiteLLM smoke workflow", () => {
     );
   });
 
+  it("gates auth smoke on the optional LiteLLM license", () => {
+    expect(readWorkflow()).toMatch(/- name: Run auth smoke\n {8}if: \$\{\{ env\.LITELLM_LICENSE != '' \}\}/);
+  });
+
   it("uses minimal permissions and a pinned, checksum-verified VidaiMock build", () => {
     const workflow = readWorkflow();
 

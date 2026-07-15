@@ -191,6 +191,7 @@ jobs:
         run: npx tsx scripts/smoke.ts
 
       - name: Run auth smoke
+        if: ${{ env.LITELLM_LICENSE != '' }}
         env:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
         run: npx tsx scripts/smoke-auth.ts
