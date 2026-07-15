@@ -43,6 +43,15 @@ async function submit(session: Session, text: string): Promise<void> {
   await session.keyboard.press("Enter");
 }
 
+async function waitForInitialModel(session: Session): Promise<void> {
+  try {
+    await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+  } catch (error) {
+    const logs = await session.logs.text();
+    throw new Error(`Pi exited before showing the smoke model:\n${logs}`, { cause: error });
+  }
+}
+
 describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
   beforeAll(async () => {
     terminal = await TerminalControl.make();
@@ -56,7 +65,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "logs in to LiteLLM",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/login litellm");
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
@@ -76,7 +85,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "refreshes LiteLLM models",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/litellm-refresh");
 
@@ -92,7 +101,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "shows LiteLLM models in the model picker",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/model");
         await session.screen.waitForText("anthropic/vidaimock-claude", { timeoutMs: waitTimeoutMs });
