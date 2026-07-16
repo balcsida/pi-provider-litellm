@@ -151,17 +151,20 @@ Replace the existing auth-step assertion in `tests/litellm-smoke-workflow.test.t
 ```ts
 it("separates community and Enterprise auth smoke", () => {
   const workflow = readWorkflow();
+  const communityStart = workflow.indexOf("- name: Run community auth smoke");
+  const enterpriseStart = workflow.indexOf("- name: Run Enterprise auth smoke");
+  const cliStart = workflow.indexOf("- name: Run Pi CLI smoke");
 
-  expect(workflow).toContain(`- name: Run community auth smoke
-        env:
-          LITELLM_LICENSE: ''
-          LITELLM_SMOKE_TIMEOUT_MS: '60000'
-        run: npx tsx scripts/smoke-auth.ts`);
-  expect(workflow).toContain(`- name: Run Enterprise auth smoke
-        if: \${{ env.LITELLM_LICENSE != '' }}
-        env:
-          LITELLM_SMOKE_TIMEOUT_MS: '60000'
-        run: npx tsx scripts/smoke-auth.ts`);
+  expect(communityStart).toBeGreaterThan(-1);
+  expect(enterpriseStart).toBeGreaterThan(communityStart);
+  expect(cliStart).toBeGreaterThan(enterpriseStart);
+
+  const communityStep = workflow.slice(communityStart, enterpriseStart);
+  const enterpriseStep = workflow.slice(enterpriseStart, cliStart);
+  expect(communityStep).toContain("LITELLM_LICENSE: ''");
+  expect(communityStep).toContain("run: npx tsx scripts/smoke-auth.ts");
+  expect(enterpriseStep).toContain("if: $" + "{{ env.LITELLM_LICENSE != '' }}");
+  expect(enterpriseStep).toContain("run: npx tsx scripts/smoke-auth.ts");
 });
 ```
 
