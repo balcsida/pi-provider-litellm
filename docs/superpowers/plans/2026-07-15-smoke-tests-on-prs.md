@@ -133,3 +133,83 @@ Run the focused workflow test, `npm run check`, a clean build, and `actionlint`.
 git add docs/superpowers/specs/2026-07-15-smoke-tests-on-prs-design.md docs/superpowers/plans/2026-07-15-smoke-tests-on-prs.md tests/litellm-smoke-workflow.test.ts tests/terminal-smoke.test.ts
 git commit -S -m "fix: prime terminal smoke model cache"
 ```
+
+### Task 4: Separate community and Enterprise auth smoke
+
+**Files:**
+- Modify: `tests/litellm-smoke-workflow.test.ts`
+- Modify: `.github/workflows/litellm-smoke.yml`
+
+**Interfaces:**
+- Consumes: the shared LiteLLM proxy, `LITELLM_LICENSE`, and `scripts/smoke-auth.ts`
+- Produces: an always-running community auth step and a separately named licensed Enterprise auth step
+
+- [ ] **Step 1: Write the failing regression assertion**
+
+Replace the existing auth-step assertion in `tests/litellm-smoke-workflow.test.ts` with:
+
+```ts
+it("separates community and Enterprise auth smoke", () => {
+  const workflow = readWorkflow();
+
+  expect(workflow).toContain(`- name: Run community auth smoke
+        env:
+          LITELLM_LICENSE: ''
+          LITELLM_SMOKE_TIMEOUT_MS: '60000'
+        run: npx tsx scripts/smoke-auth.ts`);
+  expect(workflow).toContain(`- name: Run Enterprise auth smoke
+        if: \${{ env.LITELLM_LICENSE != '' }}
+        env:
+          LITELLM_SMOKE_TIMEOUT_MS: '60000'
+        run: npx tsx scripts/smoke-auth.ts`);
+});
+```
+
+Update the broad workflow contract to expect both `Run community auth smoke` and `Run Enterprise auth smoke` instead of `Run auth smoke`.
+
+- [ ] **Step 2: Run the focused test to verify it fails**
+
+Run: `mise exec node@24.16.0 -- npm test -- tests/litellm-smoke-workflow.test.ts`
+
+Expected: FAIL because the workflow still has one licensed-only `Run auth smoke` step.
+
+- [ ] **Step 3: Split the workflow steps**
+
+Replace the licensed-only auth step in `.github/workflows/litellm-smoke.yml` with:
+
+```yaml
+- name: Run community auth smoke
+  env:
+    LITELLM_LICENSE: ''
+    LITELLM_SMOKE_TIMEOUT_MS: '60000'
+  run: npx tsx scripts/smoke-auth.ts
+
+- name: Run Enterprise auth smoke
+  if: ${{ env.LITELLM_LICENSE != '' }}
+  env:
+    LITELLM_SMOKE_TIMEOUT_MS: '60000'
+  run: npx tsx scripts/smoke-auth.ts
+```
+
+- [ ] **Step 4: Run focused verification**
+
+Run: `mise exec node@24.16.0 -- npm test -- tests/litellm-smoke-workflow.test.ts`
+
+Expected: PASS.
+
+Run: `actionlint .github/workflows/litellm-smoke.yml`
+
+Expected: PASS with no output.
+
+- [ ] **Step 5: Run the repository gate**
+
+Run: `mise exec node@24.16.0 -- npm run check`
+
+Expected: PASS with no warnings or test failures.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/litellm-smoke-workflow.test.ts .github/workflows/litellm-smoke.yml
+git commit -S -m "test: separate community and enterprise auth smoke"
+```
