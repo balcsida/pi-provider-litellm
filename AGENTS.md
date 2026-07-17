@@ -41,10 +41,10 @@
 
 ## Smoke And CI
 
-- CI runs `npm ci`, `npm run check`, `npm run clean`, `npm run build`, and `npm pack --dry-run`.
+- CI runs `npm ci` and `npm run prepublishOnly`.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
-- `scripts/smoke.ts` and `scripts/smoke-runner.ts` exercise discovery and `/v1/chat/completions` through the proxy.
+- `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
 - The non-interactive Pi CLI smoke uses `./dist/index.js`, so runtime changes need a fresh build before running it.
 
 ## Release And Packaging
