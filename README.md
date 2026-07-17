@@ -175,7 +175,7 @@ This keeps the LiteLLM integration path under test but does not call real LLM AP
 
 ## Development
 
-This package requires Node.js `>=22.19.0`. CI currently uses Node `24.16.0`.
+This package requires Node.js `>=22.19.0`. CI currently uses Node `26.5.0`.
 
 ```bash
 npm ci
