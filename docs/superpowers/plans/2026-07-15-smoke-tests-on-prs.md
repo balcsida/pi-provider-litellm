@@ -216,3 +216,68 @@ Expected: PASS with no warnings or test failures.
 git add tests/litellm-smoke-workflow.test.ts .github/workflows/litellm-smoke.yml
 git commit -S -m "test: separate community and enterprise auth smoke"
 ```
+
+### Task 5: Keep database-backed auth checks in Enterprise smoke
+
+**Files:**
+- Modify: `tests/smoke-auth.test.ts`
+- Modify: `scripts/smoke-auth.ts`
+
+**Interfaces:**
+- Consumes: `runAuthSmoke(options: AuthSmokeOptions)` and its existing `enterprise` option
+- Produces: community auth coverage without database-backed token lookup; Enterprise coverage retains bad-token rejection
+
+- [ ] **Step 1: Write the failing regression expectation**
+
+In the non-Enterprise `runAuthSmoke` test, rename the test to `checks missing and master-key auth without database-backed checks`, remove `bad-token` from the expected checks, and remove one `/v1/models` request from the expected request list:
+
+```ts
+expect(result).toEqual({
+  enterprise: false,
+  checks: ["missing-token", "master-key-models", "master-key-chat"],
+});
+expect(requests.map((request) => request.url)).toEqual([
+  "http://127.0.0.1:4000/v1/models",
+  "http://127.0.0.1:4000/v1/models",
+  "http://127.0.0.1:4000/v1/chat/completions",
+]);
+```
+
+Keep the Enterprise test's `bad-token` expectation unchanged.
+
+- [ ] **Step 2: Run the focused test to verify it fails**
+
+Run: `mise exec node@24.16.0 -- npm test -- tests/smoke-auth.test.ts --exclude '.worktrees/**'`
+
+Expected: FAIL because non-Enterprise smoke still performs and reports the bad-token check.
+
+- [ ] **Step 3: Move bad-token rejection into the Enterprise branch**
+
+In `runAuthSmoke`, move the existing bad-token request and `checks.push("bad-token")` to the start of the existing `if (options.enterprise)` block, before virtual-key generation:
+
+```ts
+if (options.enterprise) {
+  await expectAuthFailure("bad-token /v1/models", await fetchModels(baseUrl, BAD_SMOKE_KEY, timeoutMs));
+  checks.push("bad-token");
+
+  const virtualKey = await generateVirtualKey(baseUrl, options.masterKey, options.modelId, timeoutMs);
+```
+
+- [ ] **Step 4: Run focused verification**
+
+Run: `mise exec node@24.16.0 -- npm test -- tests/smoke-auth.test.ts --exclude '.worktrees/**'`
+
+Expected: PASS.
+
+- [ ] **Step 5: Run the repository gate in a clean checkout**
+
+Run: `mise exec node@24.16.0 -- npm run check`
+
+Expected: PASS with no warnings or test failures; use a clean detached worktree because ignored `.worktrees/**` directories pollute root Biome discovery.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/smoke-auth.test.ts scripts/smoke-auth.ts
+git commit -S -m "test: keep database auth checks enterprise-only"
+```
