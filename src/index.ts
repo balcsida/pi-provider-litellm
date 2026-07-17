@@ -12,14 +12,8 @@ import type {
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
-import { type ProviderModels, setupLiteLLMCostTracking } from "./cost.js";
-import {
-  discoverModels,
-  isGpt55Model,
-  normalizeBaseUrl,
-  shouldSuppressReasoningContent,
-  withTimeout,
-} from "./discover.js";
+import { setupLiteLLMCostTracking } from "./cost.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
 import {
   getGcloudToken,
   getGcloudTokenCacheKey,
@@ -47,15 +41,6 @@ const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const EXPIRE_TOKEN_IMMEDIATELY = 0;
-
-type ModelOverride = Partial<
-  Pick<
-    ProviderModelConfig,
-    "name" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "headers" | "compat"
-  >
-> & {
-  cost?: Partial<ProviderModelConfig["cost"]>;
-};
 
 type RefreshResult = { models: ProviderModelConfig[]; source: string };
 type ProviderRefreshResult = RefreshResult & { providerName: string };
@@ -129,146 +114,8 @@ function getCachePath(providerName = PROVIDER_NAME): string {
   return join(getAgentDir(), `litellm-models-${sanitizeCacheSegment(providerName)}.json`);
 }
 
-// Same tolerance as pi core's models.json loader (stripJsonComments in dist/utils/json.js):
-// strip `//` line comments and trailing commas, leaving string literals untouched.
-function stripJsonComments(input: string): string {
-  return input
-    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
-    .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail: string | undefined) => tail ?? m);
-}
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const COST_RATE_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
-const COST_TIER_FIELDS = [...COST_RATE_FIELDS, "inputTokensAbove"] as const;
-
-// Mirrors pi core's ModelOverrideSchema: core rejects the whole models.json on invalid values,
-// so anything dropped here would also have been flagged for built-in providers. Headers matter
-// most: pi resolves each header value as a config string, so non-strings break requests.
-const MODEL_OVERRIDE_VALIDATORS: Record<keyof ModelOverride, (value: unknown) => boolean> = {
-  name: (value) => typeof value === "string",
-  reasoning: (value) => typeof value === "boolean",
-  thinkingLevelMap: (value) =>
-    isPlainObject(value) && THINKING_LEVELS.every((level) => value[level] == null || typeof value[level] === "string"),
-  input: (value) => Array.isArray(value) && value.every((entry) => entry === "text" || entry === "image"),
-  contextWindow: (value) => typeof value === "number",
-  maxTokens: (value) => typeof value === "number",
-  headers: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "string"),
-  compat: isPlainObject,
-  cost: (value) =>
-    isPlainObject(value) &&
-    Object.entries(value).every(([key, entry]) =>
-      key === "tiers"
-        ? Array.isArray(entry) &&
-          entry.every(
-            (tier) =>
-              isPlainObject(tier) &&
-              COST_TIER_FIELDS.every((field) => typeof tier[field] === "number") &&
-              Object.keys(tier).every((field) => COST_TIER_FIELDS.includes(field as (typeof COST_TIER_FIELDS)[number])),
-          )
-        : COST_RATE_FIELDS.includes(key as (typeof COST_RATE_FIELDS)[number]) && typeof entry === "number",
-    ),
-};
-
-function sanitizeModelOverride(modelId: string, raw: unknown): ModelOverride | undefined {
-  if (!isPlainObject(raw)) {
-    process.stderr.write(`LiteLLM: ignoring model override for ${modelId} in models.json (not an object).\n`);
-    return undefined;
-  }
-  const override: Record<string, unknown> = {};
-  const dropped: string[] = [];
-  for (const [key, value] of Object.entries(raw)) {
-    const isValid = MODEL_OVERRIDE_VALIDATORS[key as keyof ModelOverride];
-    if (isValid?.(value)) override[key] = value;
-    else dropped.push(key);
-  }
-  if (dropped.length > 0) {
-    process.stderr.write(
-      `LiteLLM: ignoring invalid model override field(s) for ${modelId} in models.json: ${dropped.join(", ")}.\n`,
-    );
-  }
-  return override as ModelOverride;
-}
-
-// Overrides are read per registered provider name, matching pi core's own
-// models.json layout (`providers.<name>.modelOverrides`) so aliases get the
-// same override support as the default provider, not a special case of it.
-async function readModelOverrides(providerName: string): Promise<Map<string, ModelOverride>> {
-  let raw: string;
-  try {
-    raw = await readFile(join(getAgentDir(), "models.json"), "utf8");
-  } catch {
-    return new Map();
-  }
-  try {
-    const config = JSON.parse(stripJsonComments(raw)) as {
-      providers?: Record<string, { modelOverrides?: Record<string, unknown> }>;
-    };
-    const overrides = new Map<string, ModelOverride>();
-    for (const [id, rawOverride] of Object.entries(config.providers?.[providerName]?.modelOverrides ?? {})) {
-      const override = sanitizeModelOverride(id, rawOverride);
-      if (override) overrides.set(id, override);
-    }
-    return overrides;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`LiteLLM: ignoring model overrides (failed to parse models.json: ${message}).\n`);
-    return new Map();
-  }
-}
-
-// Merge semantics must match pi core's applyModelOverride/mergeCompat (dist/core/model-registry.js)
-// so the same models.json entry behaves identically for litellm and built-in providers.
-function mergeCompat(
-  base: ProviderModelConfig["compat"],
-  override: ProviderModelConfig["compat"],
-): ProviderModelConfig["compat"] {
-  if (!override) return base;
-  const merged = { ...base, ...override } as Record<string, unknown>;
-  for (const key of ["openRouterRouting", "vercelGatewayRouting", "chatTemplateKwargs"]) {
-    const baseValue = (base as Record<string, unknown> | undefined)?.[key];
-    const overrideValue = (override as Record<string, unknown>)[key];
-    if (baseValue || overrideValue) {
-      merged[key] = { ...(baseValue as object | undefined), ...(overrideValue as object | undefined) };
-    }
-  }
-  return merged as ProviderModelConfig["compat"];
-}
-
-function applyModelOverride(model: ProviderModelConfig, override: ModelOverride): ProviderModelConfig {
-  const next = { ...model };
-  if (override.name !== undefined) next.name = override.name;
-  if (override.reasoning !== undefined) next.reasoning = override.reasoning;
-  if (override.thinkingLevelMap !== undefined) {
-    next.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
-  }
-  if (override.input !== undefined) next.input = override.input;
-  if (override.contextWindow !== undefined) next.contextWindow = override.contextWindow;
-  if (override.maxTokens !== undefined) next.maxTokens = override.maxTokens;
-  if (override.headers !== undefined) next.headers = override.headers;
-  if (override.compat !== undefined) next.compat = mergeCompat(model.compat, override.compat);
-  if (override.cost !== undefined) next.cost = { ...model.cost, ...override.cost };
-  return next;
-}
-
-function applyModelOverrides(
-  models: ProviderModelConfig[],
-  overrides: Map<string, ModelOverride>,
-): ProviderModelConfig[] {
-  if (overrides.size === 0) return models;
-  return models.map((model) => {
-    const override = overrides.get(model.id);
-    return override ? applyModelOverride(model, override) : model;
-  });
-}
-
-// Re-reads models.json on every call so overrides edited mid-session take effect on the next
-// refresh or login, matching pi core's live reload for built-in providers.
-async function applyOverrides(providerName: string, models: ProviderModelConfig[]): Promise<ProviderModelConfig[]> {
-  return applyModelOverrides(models, await readModelOverrides(providerName));
 }
 
 function readAuthEntry(providerName = PROVIDER_NAME): AuthFileEntry | undefined {
@@ -333,29 +180,27 @@ async function generateVirtualKey(
   signal?: AbortSignal,
   headers?: Record<string, string>,
 ): Promise<{ key: string; expiresAt?: number }> {
-  const { signal: boundedSignal, cancel } = withTimeout(LOGIN_TIMEOUT_MS, signal);
-  try {
-    const response = await fetch(`${baseUrl}/key/generate`, {
-      method: "POST",
-      headers: {
-        ...headers,
-        Authorization: `Bearer ${userToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({}),
-      signal: boundedSignal,
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Virtual key generation failed (${response.status}): ${text}`);
-    }
-    const data = (await response.json()) as { key?: unknown; expires?: unknown };
-    if (typeof data.key !== "string" || !data.key) throw new Error("No key in response from /key/generate");
-    const expiresMs = typeof data.expires === "string" ? Date.parse(data.expires) : Number.NaN;
-    return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
-  } finally {
-    cancel();
+  const boundedSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(LOGIN_TIMEOUT_MS)])
+    : AbortSignal.timeout(LOGIN_TIMEOUT_MS);
+  const response = await fetch(`${baseUrl}/key/generate`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      Authorization: `Bearer ${userToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+    signal: boundedSignal,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Virtual key generation failed (${response.status}): ${text}`);
   }
+  const data = (await response.json()) as { key?: unknown; expires?: unknown };
+  if (typeof data.key !== "string" || !data.key) throw new Error("No key in response from /key/generate");
+  const expiresMs = typeof data.expires === "string" ? Date.parse(data.expires) : Number.NaN;
+  return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
 }
 
 function getLiteLLMApiKey(credentials: OAuthCredentials): string {
@@ -999,9 +844,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       }
     }
 
-    // The cache keeps raw discovery output; overrides are applied freshly at each registration.
-    models = await applyOverrides(definition.name, models);
-
     return {
       definition,
       creds,
@@ -1017,11 +859,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   const providerStates = await Promise.all(definitions.map(loadProviderState));
   const defaultState = providerStates.find((state) => state.definition.name === PROVIDER_NAME) ?? providerStates[0];
-
-  let updateCosts: (providerModels: ProviderModels[]) => void = () => undefined;
-  const providerModelsForCosts = (): ProviderModels[] =>
-    providerStates.map((state) => ({ provider: state.definition.name, models: state.models }));
-  const updateAllCosts = (): void => updateCosts(providerModelsForCosts());
 
   function defaultApiKeyConfig(definition: ProviderDefinition): string | undefined {
     if (definition.useDefaultEnv) {
@@ -1078,15 +915,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           defaultState.liveDiscoveryApiKey = undefined;
         }
         defaultState.cacheFetchedAt = next.fetchedAt;
-        const overridden = await applyOverrides(PROVIDER_NAME, next.models);
-        defaultState.models = overridden;
+        defaultState.models = next.models;
         defaultState.creds = {
           ...defaultState.creds,
           baseUrl: next.baseUrl,
           apiKeyFingerprint: next.apiKeyFingerprint,
         };
-        registerProvider(defaultState, overridden);
-        updateAllCosts();
+        registerProvider(defaultState, next.models);
       },
     };
   }
@@ -1101,7 +936,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   for (const state of providerStates) registerProvider(state);
 
-  updateCosts = setupLiteLLMCostTracking(pi, providerModelsForCosts());
+  setupLiteLLMCostTracking(
+    pi,
+    providerStates.map((state) => state.definition.name),
+  );
 
   async function resolveRuntimeApiKey(state = defaultState): Promise<string> {
     const fresh = await resolveCredentials(state.definition);
@@ -1206,16 +1044,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       source: result.source,
       models: result.models,
     });
-    const overridden = await applyOverrides(state.definition.name, result.models);
     state.creds = fresh;
-    state.models = overridden;
+    state.models = result.models;
     state.liveDiscoveryApiKey = fresh.apiKey;
     state.cacheFetchedAt = now;
     state.refreshOnStart = false;
-    registerProvider(state, overridden, fresh.apiKeyConfig);
-    updateAllCosts();
+    registerProvider(state, result.models, fresh.apiKeyConfig);
     if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress, signal);
-    return { providerName: state.definition.name, models: overridden, source: result.source };
+    return { providerName: state.definition.name, models: result.models, source: result.source };
   }
 
   function runRefresh(

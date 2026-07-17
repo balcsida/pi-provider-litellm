@@ -137,14 +137,6 @@ async function readHelperCount(agentDir: string): Promise<number> {
 
 const cachedModels = [{ id: "cached-model", name: "cached-model", provider: "litellm" }];
 
-async function writeModelsConfig(agentDir: string, modelOverrides: Record<string, unknown>): Promise<void> {
-  await writeFile(
-    join(agentDir, "models.json"),
-    JSON.stringify({ providers: { litellm: { modelOverrides } } }),
-    "utf8",
-  );
-}
-
 async function writeModelCache(agentDir: string, helperPath: string, models: unknown[] = cachedModels): Promise<void> {
   await writeFile(
     join(agentDir, "litellm-models.json"),
@@ -737,275 +729,6 @@ describe("extension startup", () => {
     await extension(pi);
 
     expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
-  });
-
-  it("applies models.json overrides to discovered models", async () => {
-    const agentDir = await makeAgentDir();
-    await writeModelsConfig(agentDir, {
-      "llm-gateway/gpt-5.5": { contextWindow: 272_000, maxTokens: 64_000 },
-    });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "env-key";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "llm-gateway/gpt-5.5",
-              model_info: { mode: "chat", max_input_tokens: 128_000, max_output_tokens: 16_384 },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-    await startSession(pi);
-
-    expect(pi.providers.at(-1)?.config.models).toEqual([
-      expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 272_000, maxTokens: 64_000 }),
-    ]);
-  });
-
-  it("applies models.json overrides to cached models", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath);
-    await writeModelsConfig(agentDir, { "cached-model": { contextWindow: 272_000 } });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([
-      expect.objectContaining({ id: "cached-model", contextWindow: 272_000 }),
-    ]);
-  });
-
-  it("merges partial thinkingLevelMap overrides with existing mappings", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath, [
-      {
-        id: "cached-model",
-        name: "cached-model",
-        provider: "litellm",
-        thinkingLevelMap: { low: "low", high: "high" },
-      },
-    ]);
-    await writeModelsConfig(agentDir, { "cached-model": { thinkingLevelMap: { high: "xhigh" } } });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([
-      expect.objectContaining({ id: "cached-model", thinkingLevelMap: { low: "low", high: "xhigh" } }),
-    ]);
-  });
-
-  it("deep-merges nested compat overrides", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath, [
-      {
-        id: "cached-model",
-        name: "cached-model",
-        provider: "litellm",
-        compat: { supportsStore: false, chatTemplateKwargs: { enable_thinking: true } },
-      },
-    ]);
-    await writeModelsConfig(agentDir, { "cached-model": { compat: { chatTemplateKwargs: { max_thinking: 4 } } } });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([
-      expect.objectContaining({
-        id: "cached-model",
-        compat: { supportsStore: false, chatTemplateKwargs: { enable_thinking: true, max_thinking: 4 } },
-      }),
-    ]);
-  });
-
-  it("applies overrides from models.json with comments and trailing commas", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath);
-    await writeFile(
-      join(agentDir, "models.json"),
-      `{
-  // raise the context window
-  "providers": {
-    "litellm": {
-      "modelOverrides": {
-        "cached-model": { "contextWindow": 272000, },
-      },
-    },
-  },
-}`,
-      "utf8",
-    );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([
-      expect.objectContaining({ id: "cached-model", contextWindow: 272_000 }),
-    ]);
-  });
-
-  it("warns and ignores overrides when models.json is malformed", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath);
-    await writeFile(join(agentDir, "models.json"), "{ not json", "utf8");
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([expect.objectContaining({ id: "cached-model" })]);
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("models.json"));
-  });
-
-  it("warns and drops override fields with invalid types", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath, [
-      { id: "cached-model", name: "cached-model", provider: "litellm", contextWindow: 128_000 },
-    ]);
-    await writeModelsConfig(agentDir, { "cached-model": { contextWindow: "272000", maxTokens: 64_000 } });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    expect(pi.providers[0]?.config.models).toEqual([
-      expect.objectContaining({ id: "cached-model", contextWindow: 128_000, maxTokens: 64_000 }),
-    ]);
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("contextWindow"));
-  });
-
-  it("preserves valid tiered cost overrides", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath, [
-      {
-        id: "cached-model",
-        name: "cached-model",
-        provider: "litellm",
-        contextWindow: 128_000,
-        cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
-      },
-    ]);
-    const tiers = [{ inputTokensAbove: 100_000, input: 2, output: 3, cacheRead: 1, cacheWrite: 0 }];
-    await writeModelsConfig(agentDir, { "cached-model": { cost: { tiers } } });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    const model = pi.providers[0]?.config.models?.[0] as { cost?: { tiers?: unknown } };
-    expect(model.cost?.tiers).toEqual(tiers);
-  });
-
-  it("drops override fields whose values violate the core schema", async () => {
-    const agentDir = await makeAgentDir();
-    const helperPath = await writeHelper(agentDir, [makeJwt(Math.floor(Date.now() / 1000) + 3600)]);
-    await writeModelCache(agentDir, helperPath, [
-      { id: "cached-model", name: "cached-model", provider: "litellm", contextWindow: 128_000 },
-    ]);
-    await writeModelsConfig(agentDir, {
-      "cached-model": {
-        headers: { "X-Team": "core", "X-Retries": 3 },
-        thinkingLevelMap: { low: "low", max: 42 },
-        input: ["text", "audio"],
-        maxTokens: 64_000,
-      },
-    });
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY_HELPER = helperPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    const model = pi.providers[0]?.config.models?.[0] as Record<string, unknown>;
-    expect(model).toEqual(expect.objectContaining({ id: "cached-model", maxTokens: 64_000 }));
-    expect(model.headers).toBeUndefined();
-    expect(model.thinkingLevelMap).toBeUndefined();
-    expect(model.input).toBeUndefined();
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("headers, thinkingLevelMap, input"));
-  });
-
-  it("applies models.json overrides written after startup on refresh", async () => {
-    const agentDir = await makeAgentDir();
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "env-key";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "llm-gateway/gpt-5.5",
-              model_info: { mode: "chat", max_input_tokens: 128_000, max_output_tokens: 16_384 },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-    await startSession(pi);
-    expect(pi.providers.at(-1)?.config.models).toEqual([
-      expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 128_000 }),
-    ]);
-
-    await writeModelsConfig(agentDir, { "llm-gateway/gpt-5.5": { contextWindow: 272_000 } });
-    const notify = vi.fn();
-    await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
-
-    expect(pi.providers.at(-1)?.config.models).toEqual([
-      expect.objectContaining({ id: "llm-gateway/gpt-5.5", contextWindow: 272_000 }),
-    ]);
   });
 
   it("refreshes LiteLLM models through Pi's provider callback", async () => {
@@ -1862,12 +1585,12 @@ describe("extension startup", () => {
     expect(credential?.expires).toBe(keyExpiresAt.getTime() - 5 * 60 * 1000);
   });
 
-  it("enterprise SSO login falls back to JWT when virtual key generation stalls", async () => {
+  it("enterprise SSO login falls back to JWT when virtual key generation is aborted", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
     const progress = vi.fn();
-    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url.endsWith("/key/generate"))
         return new Promise<Response>((_, reject) => {
@@ -1883,27 +1606,25 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    vi.useFakeTimers();
-    try {
-      const loginPromise = pi.providers[0]?.config.oauth?.login({
-        onPrompt: async (options) => {
-          if (options.placeholder) return "https://litellm.example.com";
-          if (options.message.includes("Select login method")) return "2";
-          if (options.message.includes("SSO token")) return jwt;
-          return "y";
-        },
-        onProgress: progress,
-        signal: new AbortController().signal,
-      });
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(progress).not.toHaveBeenCalledWith(expect.stringContaining("virtual key generation failed"));
-      await vi.advanceTimersByTimeAsync(1);
-      const credential = await loginPromise;
-      expect(credential).toMatchObject({ access: jwt, refresh: "" });
-      expect(progress).toHaveBeenCalledWith(expect.stringContaining("virtual key generation failed"));
-    } finally {
-      vi.useRealTimers();
-    }
+    const controller = new AbortController();
+    const loginPromise = pi.providers[0]?.config.oauth?.login({
+      onPrompt: async (options) => {
+        if (options.placeholder) return "https://litellm.example.com";
+        if (options.message.includes("Select login method")) return "2";
+        if (options.message.includes("SSO token")) return jwt;
+        return "y";
+      },
+      onProgress: progress,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() =>
+      expect(fetchSpy.mock.calls.some(([input]) => String(input).endsWith("/key/generate"))).toBe(true),
+    );
+    controller.abort(new Error("test abort"));
+
+    const credential = await loginPromise;
+    expect(credential).toMatchObject({ access: jwt, refresh: "" });
+    expect(progress).toHaveBeenCalledWith(expect.stringContaining("virtual key generation failed"));
   });
 
   it("enterprise SSO login uses JWT directly when user answers no to virtual key generation", async () => {

@@ -807,17 +807,24 @@ describe("feature parity", () => {
     );
 
     const endHandler = pi.handlers.get("message_end")?.[0];
+    const usage = {
+      input: 100,
+      output: 50,
+      cacheRead: 10,
+      cacheWrite: 5,
+      cost: { input: 0.0003, output: 0.00075, cacheRead: 0.000003, cacheWrite: 0.00001875, total: 0.00107175 },
+    };
     const result = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "anthropic/claude-3-5-sonnet",
-        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+        usage,
       },
     });
 
-    // Falls back to per-token pricing instead of the foreign header cost.
-    expect(result.message.usage.cost.total).toBeCloseTo(0.00107175, 10);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.00107175, 10);
   });
 
   it("updates costs after litellm-refresh", async () => {
@@ -857,16 +864,21 @@ describe("feature parity", () => {
 
     // Get initial cost from model-based calculation
     const endHandler = pi.handlers.get("message_end")?.[0];
+    const initialUsage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.003, output: 0.015, cacheRead: 0, cacheWrite: 0, total: 0.018 },
+    };
     const initialResult = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "test-model",
-        usage: { input: 1000, output: 1000 },
+        usage: initialUsage,
       },
     });
-    // input: 0.000003 * 1000 = 0.003, output: 0.000015 * 1000 = 0.015
-    expect(initialResult.message.usage.cost.total).toBeCloseTo(0.018, 6);
+    expect(initialResult).toBeUndefined();
+    expect(initialUsage.cost.total).toBeCloseTo(0.018, 6);
 
     // Run /litellm-refresh to update models and costs
     const refreshCmd = pi.commands.get("litellm-refresh");
@@ -881,16 +893,21 @@ describe("feature parity", () => {
     expect(notifications[0].type).toBe("info");
 
     // Now get cost after refresh (costs doubled)
+    const refreshedUsage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.006, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.036 },
+    };
     const refreshedResult = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "test-model",
-        usage: { input: 1000, output: 1000 },
+        usage: refreshedUsage,
       },
     });
-    // input: 0.000006 * 1000 = 0.006, output: 0.000030 * 1000 = 0.030
-    expect(refreshedResult.message.usage.cost.total).toBeCloseTo(0.036, 6);
+    expect(refreshedResult).toBeUndefined();
+    expect(refreshedUsage.cost.total).toBeCloseTo(0.036, 6);
   });
 
   it("shares concurrent litellm-refresh requests", async () => {
@@ -1014,20 +1031,23 @@ describe("feature parity", () => {
     for (const handler of sessionStartHandlers) {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
     }
+    await vi.waitFor(() => expect(callCount).toBe(1));
     const endHandler = pi.handlers.get("message_end")?.[0];
-    await vi.waitFor(async () => {
-      const result = await endHandler?.({
-        message: {
-          role: "assistant",
-          provider: "litellm",
-          model: "test-model",
-          usage: { input: 1000, output: 1000 },
-        },
-      });
-      // After refresh: input: 0.000006 * 1000 = 0.006, output: 0.000030 * 1000 = 0.030
-      expect(result.message.usage.cost.total).toBeCloseTo(0.036, 6);
+    const usage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.006, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.036 },
+    };
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "litellm",
+        model: "test-model",
+        usage,
+      },
     });
-    expect(callCount).toBe(1);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.036, 6);
   });
 
   it("handles stale refresh failure silently on session_start", async () => {
@@ -1078,15 +1098,20 @@ describe("feature parity", () => {
 
     // Existing cached costs still work after the refresh failure
     const endHandler = pi.handlers.get("message_end")?.[0];
+    const usage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.003, output: 0.015, cacheRead: 0, cacheWrite: 0, total: 0.018 },
+    };
     const result = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "test-model",
-        usage: { input: 1000, output: 1000 },
+        usage,
       },
     });
-    // Original costs: input: 3/1M * 1000 = 0.003, output: 15/1M * 1000 = 0.015
-    expect(result.message.usage.cost.total).toBeCloseTo(0.018, 6);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.018, 6);
   });
 });

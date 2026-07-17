@@ -181,56 +181,33 @@ function findModelsDevModel(
   return catalog?.[provider]?.models?.[modelId];
 }
 
-export function withTimeout(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(signal?.reason);
-  if (signal) {
-    if (signal.aborted) controller.abort(signal.reason);
-    else signal.addEventListener("abort", onAbort, { once: true });
-  }
-  const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
-  return {
-    signal: controller.signal,
-    cancel: () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-    },
-  };
-}
-
 async function fetchJson<T>(
   url: string,
   apiKey: string,
   options: DiscoveryOptions,
 ): Promise<{ ok: true; data: T } | { ok: false; status: number }> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { signal, cancel } = withTimeout(timeoutMs, options.signal);
-  try {
-    const response = await fetch(url, {
-      headers: { ...options.headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-      signal,
-    });
-    if (!response.ok) return { ok: false, status: response.status };
-    const data = (await response.json()) as T;
-    return { ok: true, data };
-  } finally {
-    cancel();
-  }
+  const response = await fetch(url, {
+    headers: { ...options.headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) return { ok: false, status: response.status };
+  const data = (await response.json()) as T;
+  return { ok: true, data };
 }
 
 async function fetchPublicJson<T>(url: string, options: DiscoveryOptions): Promise<T> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { signal, cancel } = withTimeout(timeoutMs, options.signal);
-  try {
-    const response = await fetch(url, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-    return (await response.json()) as T;
-  } finally {
-    cancel();
-  }
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+  return (await response.json()) as T;
 }
 
 async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
@@ -290,23 +267,10 @@ function mapFromHealthModelInfo(
   entry: ModelInfoEntry,
   fallbackId: string | undefined,
 ): ProviderModelConfig | undefined {
-  const model = mapFromModelInfo(entry);
-  if (model || !fallbackId) return model;
-  if (!isChatStyleMode(entry.model_info?.mode)) return undefined;
-  const info = entry.model_info ?? {};
-  const responsesMode = isResponsesMode(info.mode);
-  const catalogModel = findCatalogModel(fallbackId);
-  return {
-    id: fallbackId,
-    name: fallbackId,
-    reasoning: info.supports_reasoning ?? false,
-    input: info.supports_vision ? ["text", "image"] : ["text"],
-    cost: mapModelInfoCost(info, catalogModel?.cost),
-    contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(fallbackId),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
-  };
+  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
+  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
+  if (model) delete model.thinkingLevelMap;
+  return model;
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): ProviderModelConfig | undefined {

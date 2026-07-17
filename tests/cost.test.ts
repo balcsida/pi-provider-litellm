@@ -1,4 +1,3 @@
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { setupLiteLLMCostTracking } from "../src/cost.js";
 
@@ -14,49 +13,27 @@ function createPi() {
   };
 }
 
-function model(id: string, cost: ProviderModelConfig["cost"]): ProviderModelConfig {
-  return {
-    id,
-    name: id,
-    reasoning: false,
-    input: ["text"],
-    contextWindow: 128_000,
-    maxTokens: 4096,
-    cost,
-  };
-}
-
 describe("setupLiteLLMCostTracking", () => {
-  it("keeps alias model costs separate from the default provider for the same model id", async () => {
+  it("preserves Pi's precomputed cost when LiteLLM omits its response-cost header", async () => {
     const pi = createPi();
-    setupLiteLLMCostTracking(pi as any, [
-      { provider: "litellm", models: [model("shared-model", { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 })] },
-      {
-        provider: "litellm-anthropic",
-        models: [model("shared-model", { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 })],
-      },
-    ]);
+    setupLiteLLMCostTracking(pi as any, ["litellm"]);
+    const piCost = { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.002 };
 
-    const endHandler = pi.handlers.get("message_end")?.[0];
-    const defaultResult = await endHandler?.({
-      message: { role: "assistant", provider: "litellm", model: "shared-model", usage: { input: 100, output: 50 } },
-    });
-    const aliasResult = await endHandler?.({
+    const result = await pi.handlers.get("message_end")?.[0]?.({
       message: {
         role: "assistant",
-        provider: "litellm-anthropic",
-        model: "shared-model",
-        usage: { input: 100, output: 50 },
+        provider: "litellm",
+        model: "gpt-5",
+        usage: { input: 100, output: 50, cost: piCost },
       },
     });
 
-    expect(defaultResult.message.usage.cost.total).toBeCloseTo(0.00105, 10);
-    expect(aliasResult.message.usage.cost.total).toBeCloseTo(0.002, 10);
+    expect(result).toBeUndefined();
   });
 
   it("applies LiteLLM response-cost headers to alias provider messages", async () => {
     const pi = createPi();
-    setupLiteLLMCostTracking(pi as any, [{ provider: "litellm-anthropic", models: [] }]);
+    setupLiteLLMCostTracking(pi as any, ["litellm-anthropic"]);
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
     responseHandler?.(
@@ -77,47 +54,9 @@ describe("setupLiteLLMCostTracking", () => {
     expect(result.message.usage.cost.total).toBe(0.42);
   });
 
-  it("applies the highest matching input pricing tier to the whole request", async () => {
-    const pi = createPi();
-    setupLiteLLMCostTracking(pi as any, [
-      {
-        provider: "litellm",
-        models: [
-          model("tiered-model", {
-            input: 1,
-            output: 2,
-            cacheRead: 0.5,
-            cacheWrite: 0,
-            tiers: [
-              { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 5, cacheWrite: 0 },
-              { inputTokensAbove: 1_000, input: 30, output: 60, cacheRead: 15, cacheWrite: 0 },
-            ],
-          }),
-        ],
-      },
-    ]);
-
-    const result = await pi.handlers.get("message_end")?.[0]?.({
-      message: {
-        role: "assistant",
-        provider: "litellm",
-        model: "tiered-model",
-        usage: { input: 100, output: 10, cacheRead: 50, cacheWrite: 0 },
-      },
-    });
-
-    expect(result.message.usage.cost.total).toBeCloseTo(0.00145, 10);
-  });
-
   it("does not let one provider's headerless response clear another provider's pending cost", async () => {
     const pi = createPi();
-    setupLiteLLMCostTracking(pi as any, [
-      { provider: "litellm", models: [model("gpt-5", { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 })] },
-      {
-        provider: "litellm-anthropic",
-        models: [model("claude-sonnet", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })],
-      },
-    ]);
+    setupLiteLLMCostTracking(pi as any, ["litellm", "litellm-anthropic"]);
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
     // Default provider's response carries an accurate cost header.
