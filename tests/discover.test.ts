@@ -210,6 +210,32 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
   });
 
+  it("preserves catalog pricing tiers for /model/info models", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-5.5", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.cost?.tiers).toEqual([
+      { inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 },
+    ]);
+  });
+
+  it("preserves catalog max thinking metadata for /model/info models", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-5.6-luna", model_info: { mode: "chat" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: "none", xhigh: "xhigh", max: "max" });
+  });
+
   it("preserves richer metadata from later duplicate model ids", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);

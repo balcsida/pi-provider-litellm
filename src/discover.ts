@@ -158,6 +158,7 @@ function mapModelInfoCost(
       info.cache_creation_input_token_cost !== undefined
         ? info.cache_creation_input_token_cost * 1_000_000
         : (fallback?.cacheWrite ?? 0),
+    ...(fallback?.tiers ? { tiers: fallback.tiers } : {}),
   };
 }
 
@@ -275,6 +276,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
     id,
     name: id,
     reasoning: info.supports_reasoning ?? false,
+    ...(catalogModel?.thinkingLevelMap ? { thinkingLevelMap: catalogModel.thinkingLevelMap } : {}),
     input: info.supports_vision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
