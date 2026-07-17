@@ -1,7 +1,14 @@
 import { execSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Api, AssistantMessage, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  Credential,
+  Model,
+  OAuthCredentials,
+  OAuthLoginCallbacks,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
@@ -83,6 +90,23 @@ type ProviderState = {
   liveDiscoveryApiKey?: string;
   refreshInProgress: Promise<ProviderRefreshResult> | null;
 };
+
+function credentialsFromRefresh(state: ProviderState, credential: Credential): ResolvedCredentials {
+  const apiKey = credential.type === "oauth" ? credential.access : credential.key;
+  const credentialBaseUrl = credential.type === "oauth" ? credential.baseUrl : undefined;
+  const fingerprintSource =
+    credential.type === "api_key" && state.creds.apiKeyConfig?.startsWith("!")
+      ? state.creds.apiKeyConfig
+      : credential.type === "oauth" && credential.refresh.startsWith("!")
+        ? credential.refresh
+        : apiKey;
+  return {
+    ...state.creds,
+    baseUrl: typeof credentialBaseUrl === "string" ? normalizeBaseUrl(credentialBaseUrl) : state.creds.baseUrl,
+    apiKey,
+    apiKeyFingerprint: fingerprintSource ? fingerprint(fingerprintSource) : undefined,
+  };
+}
 
 function getAuthPath(): string {
   return join(getAgentDir(), "auth.json");
@@ -1002,8 +1026,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       api: "openai-completions",
       headers: escapeHeaderConfig(state.headers),
       models,
-      refreshModels: ({ allowNetwork }) =>
-        allowNetwork ? runRefresh(state).then((result) => result.models) : Promise.resolve(state.models),
+      refreshModels: ({ allowNetwork, credential, signal }) =>
+        allowNetwork && !discoveryDisabledReason()
+          ? runRefresh(state, undefined, credential, signal).then((result) => result.models)
+          : Promise.resolve(state.models),
       oauth: definition.enableOAuth ? oauth : undefined,
     });
   }
@@ -1094,8 +1120,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   async function refreshModelsAndCosts(
     state: ProviderState,
     onProgress?: ProgressCallback,
+    credential?: Credential,
+    signal?: AbortSignal,
   ): Promise<ProviderRefreshResult> {
-    const fresh = await resolveCredentials(state.definition);
+    const fresh = credential ? credentialsFromRefresh(state, credential) : await resolveCredentials(state.definition);
     const freshFp = fresh.apiKeyFingerprint;
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
       throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
@@ -1105,9 +1133,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       : (message: string) => process.stderr.write(`LiteLLM: ${message}\n`);
     const result = await discoverModels(fresh.baseUrl, fresh.apiKey, {
       timeoutMs: getDiscoveryTimeoutMs(),
+      signal,
       headers: state.headers,
       onProgress: progress,
     });
+    signal?.throwIfAborted();
     const now = Date.now();
     await writeCache(getCachePath(state.definition.name), {
       baseUrl: fresh.baseUrl,
@@ -1129,8 +1159,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { providerName: state.definition.name, models: overridden, source: result.source };
   }
 
-  function runRefresh(state: ProviderState, onProgress?: ProgressCallback): Promise<ProviderRefreshResult> {
-    state.refreshInProgress ??= refreshModelsAndCosts(state, onProgress).finally(() => {
+  function runRefresh(
+    state: ProviderState,
+    onProgress?: ProgressCallback,
+    credential?: Credential,
+    signal?: AbortSignal,
+  ): Promise<ProviderRefreshResult> {
+    state.refreshInProgress ??= refreshModelsAndCosts(state, onProgress, credential, signal).finally(() => {
       state.refreshInProgress = null;
     });
     return state.refreshInProgress;

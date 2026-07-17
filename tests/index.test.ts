@@ -11,6 +11,7 @@ const ENV_KEYS = [
   "LITELLM_API_KEY",
   "LITELLM_API_KEY_HELPER",
   "LITELLM_HEADERS",
+  "LITELLM_OFFLINE",
   "LITELLM_ANTHROPIC_API_KEY",
   "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
@@ -28,7 +29,13 @@ type TestProviderConfig = {
   apiKey?: string;
   headers?: Record<string, string>;
   models?: unknown[];
-  refreshModels?: (context: { allowNetwork: boolean }) => Promise<unknown[]>;
+  refreshModels?: (context: {
+    allowNetwork: boolean;
+    signal?: AbortSignal;
+    credential?:
+      | { type: "api_key"; key?: string }
+      | { type: "oauth"; access: string; refresh: string; expires: number; baseUrl?: string };
+  }) => Promise<unknown[]>;
   oauth?: {
     login: (callbacks: {
       onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
@@ -765,6 +772,92 @@ describe("extension startup", () => {
 
     const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
     expect(models).toEqual([expect.objectContaining({ id: "refreshed-model" })]);
+  });
+
+  it.each([
+    ["offline mode", "LITELLM_OFFLINE"],
+    ["a zero discovery timeout", "LITELLM_DISCOVERY_TIMEOUT_MS"],
+  ])("keeps Pi provider refresh cached during %s", async (_name, envKey) => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    process.env[envKey] = envKey === "LITELLM_OFFLINE" ? "1" : "0";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: [{ id: "cached-model", name: "cached-model" }],
+      }),
+      "utf8",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    expect(models).toEqual([expect.objectContaining({ id: "cached-model" })]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses Pi's resolved credential for provider refresh", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["helper-key"]);
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    const seenAuthHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      seenAuthHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "refreshed-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await pi.providers[0]?.config.refreshModels?.({
+      allowNetwork: true,
+      credential: { type: "api_key", key: "resolved-key" },
+    });
+
+    expect(seenAuthHeaders).toEqual(["Bearer resolved-key", "Bearer resolved-key"]);
+    expect(await readHelperCount(agentDir)).toBe(0);
+    const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
+      apiKeyFingerprint: string;
+    };
+    expect(cache.apiKeyFingerprint).toBe(fingerprint(`!${helperPath}`));
+  });
+
+  it("cancels provider refresh with Pi's signal", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          if (init?.signal?.aborted) reject(init.signal.reason);
+          else init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        }),
+    );
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const controller = new AbortController();
+
+    const refresh = pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, signal: controller.signal });
+    controller.abort(new Error("refresh cancelled"));
+
+    await expect(refresh).rejects.toThrow("refresh cancelled");
   });
 
   it("discovers with the resolved stored auth key before LITELLM_API_KEY", async () => {
