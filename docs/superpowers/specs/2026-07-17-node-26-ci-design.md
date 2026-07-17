@@ -8,7 +8,7 @@ Run CI, smoke, and release workflows on an exact Node 26 version while retaining
 
 - Pin every `actions/setup-node` workflow to Node `26.5.0`.
 - Update the README's CI-runtime note without changing `package.json` or lockfile engine requirements.
-- Accept both npm 11's array and npm 12's single-object `npm pack --json` output in the supply-chain guard.
+- Accept both npm 11's array and npm 12's package-name-keyed `npm pack --json` output in the supply-chain guard.
 
 ## Verification
 
