@@ -6,7 +6,7 @@
 - Source is TypeScript ESM under `src/`; tests are Vitest specs under `tests/`.
 - Build output is `dist/`; do not edit generated output by hand.
 - The package entrypoint is `./dist/index.js`, and the Pi extension registration comes from `package.json` `pi.extensions`.
-- Node support starts at `>=22.19.0`; GitHub workflows currently run Node `24.16.0`.
+- Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 
 ## Commands
 
