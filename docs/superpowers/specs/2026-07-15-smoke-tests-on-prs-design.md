@@ -16,7 +16,7 @@ Before each TUI launch, populate the fresh directory's model cache with the same
 
 Add a `pull_request` trigger with the same path filters as the existing `main` push trigger. Keep pull-request runs secret-free by exposing `LITELLM_LICENSE` only for trusted non-PR events; PRs use the existing unlicensed LiteLLM image and skip the Postgres-backed enterprise checks.
 
-Run auth coverage as two explicit steps against the shared proxy. The community auth step always runs, including on pull requests, with `LITELLM_LICENSE` cleared so it covers missing-token, bad-token, master-key model listing, and master-key chat behavior. A separately named Enterprise auth step runs only when `LITELLM_LICENSE` is configured and covers the licensed virtual-key, admin-route, and SSO behavior. Reusing the existing auth runner keeps the split in workflow orchestration and avoids another proxy job or reusable workflow.
+Run auth coverage as two explicit steps against the shared proxy. The community auth step always runs, including on pull requests, with `LITELLM_LICENSE` cleared so it covers missing-token, master-key model listing, and master-key chat behavior. LiteLLM's invalid-token lookup requires a connected database, so the separately named Enterprise auth step owns bad-token rejection together with the licensed virtual-key, admin-route, and SSO behavior. Reusing the existing auth runner keeps the split in workflow orchestration and avoids another proxy job or reusable workflow.
 
 ## Verification
 
