@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSmokeModels, runSmoke, runSmokeFromEnv } from "../scripts/smoke-runner.js";
+import { parseSmokeModels, runSmoke, runSmokeFromEnv, smokeChatCompletion } from "../scripts/smoke-runner.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -25,6 +25,17 @@ describe("parseSmokeModels", () => {
   it("returns an empty list for undefined or separator-only input", () => {
     expect(parseSmokeModels(undefined)).toEqual([]);
     expect(parseSmokeModels(" \n ,, \t ")).toEqual([]);
+  });
+});
+
+describe("smokeChatCompletion", () => {
+  it("is reusable by the auth smoke", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { choices: [{ message: { content: "pong" } }] }));
+
+    await expect(smokeChatCompletion("http://127.0.0.1:4000", "sk-smoke", "vidaimock-openai", 1000)).resolves.toEqual({
+      modelId: "vidaimock-openai",
+      content: "pong",
+    });
   });
 });
 
@@ -177,7 +188,7 @@ describe("runSmoke", () => {
         modelIds: ["github-models-openai"],
         timeoutMs: 25,
       }),
-    ).rejects.toThrow(/Timed out after 25ms/);
+    ).rejects.toMatchObject({ name: "TimeoutError" });
   });
 
   it("fails before completion calls when discovery uses an unexpected source", async () => {
@@ -348,23 +359,23 @@ describe("runSmokeFromEnv", () => {
   });
 
   it("falls back to the default timeout when LITELLM_SMOKE_TIMEOUT_MS is invalid", async () => {
-    vi.useFakeTimers();
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          const signal = init?.signal;
-          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-        }),
-    );
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "github-models-openai", model_info: { mode: "chat" } }],
+        });
+      }
+      return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
+    });
 
-    const smoke = runSmokeFromEnv({
+    await runSmokeFromEnv({
       LITELLM_BASE_URL: "http://127.0.0.1:4000",
       LITELLM_API_KEY: "sk-env",
       LITELLM_SMOKE_MODELS: "github-models-openai",
       LITELLM_SMOKE_TIMEOUT_MS: "not-a-number",
     });
-    const rejection = expect(smoke).rejects.toThrow(/Timed out after 30000ms/);
-    await vi.advanceTimersByTimeAsync(30_000);
-    await rejection;
+    expect(timeoutSpy).toHaveBeenCalledWith(30_000);
   });
 });

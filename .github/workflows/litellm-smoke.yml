@@ -188,7 +188,7 @@ jobs:
       - name: Run provider smoke
         env:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
-        run: npx tsx scripts/smoke.ts
+        run: npx tsx scripts/smoke-runner.ts
 
       - name: Run community auth smoke
         env:

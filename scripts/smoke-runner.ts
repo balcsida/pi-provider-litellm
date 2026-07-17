@@ -49,15 +49,6 @@ export function parseSmokeModels(raw: string | undefined): string[] {
     .filter((model) => model.length > 0);
 }
 
-function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
-  return {
-    signal: controller.signal,
-    cancel: () => clearTimeout(timer),
-  };
-}
-
 async function readErrorBody(response: Response): Promise<string> {
   try {
     const body = await response.text();
@@ -67,43 +58,36 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
-async function smokeChatCompletion(
+export async function smokeChatCompletion(
   baseUrl: string,
   apiKey: string,
   modelId: string,
   timeoutMs: number,
 ): Promise<SmokeCompletion> {
-  const { signal, cancel } = withTimeout(timeoutMs);
-  try {
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: "user", content: SMOKE_PROMPT }],
-        max_tokens: 16,
-        temperature: 0,
-      }),
-      signal,
-    });
-    if (!response.ok) {
-      throw new Error(
-        `/v1/chat/completions for ${modelId} returned ${response.status}${await readErrorBody(response)}`,
-      );
-    }
-    const data = (await response.json()) as ChatCompletionResponse;
-    const content = data.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error(`/v1/chat/completions for ${modelId} returned no assistant text`);
-    }
-    return { modelId, content };
-  } finally {
-    cancel();
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: "user", content: SMOKE_PROMPT }],
+      max_tokens: 16,
+      temperature: 0,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`/v1/chat/completions for ${modelId} returned ${response.status}${await readErrorBody(response)}`);
   }
+  const data = (await response.json()) as ChatCompletionResponse;
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || content.trim().length === 0) {
+    throw new Error(`/v1/chat/completions for ${modelId} returned no assistant text`);
+  }
+  return { modelId, content };
 }
 
 export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
@@ -152,4 +136,19 @@ export async function runSmokeFromEnv(env: NodeJS.ProcessEnv = process.env): Pro
     timeoutMs: Number.isNaN(timeoutMs) || timeoutMs <= 0 ? DEFAULT_TIMEOUT_MS : timeoutMs,
     expectedSource: parseExpectedSource(env.LITELLM_SMOKE_EXPECT_SOURCE),
   });
+}
+
+if (import.meta.main) {
+  runSmokeFromEnv()
+    .then((result) => {
+      console.log(`Source: ${result.source}`);
+      console.log(`Discovered ${result.discoveredCount} models.`);
+      for (const completion of result.completions) {
+        console.log(`Smoke OK: ${completion.modelId} -> ${JSON.stringify(completion.content)}`);
+      }
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    });
 }
