@@ -1,10 +1,10 @@
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprint } from "../src/cache.js";
+import { createLoadedPi, createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
 const ENV_KEYS = [
   "LITELLM_BASE_URL",
@@ -24,54 +24,6 @@ const ENV_KEYS = [
 const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 vi.unmock("@earendil-works/pi-coding-agent");
-
-type TestProviderConfig = {
-  baseUrl?: string;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  models?: unknown[];
-  refreshModels?: (context: {
-    allowNetwork: boolean;
-    force?: boolean;
-    signal?: AbortSignal;
-    credential?:
-      | { type: "api_key"; key?: string }
-      | { type: "oauth"; access: string; refresh: string; expires: number; baseUrl?: string };
-  }) => Promise<unknown[]>;
-  oauth?: {
-    login: (callbacks: {
-      onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
-      onAuth?: (info: { url: string; instructions?: string }) => void;
-      onProgress?: (message: string) => void;
-      signal?: AbortSignal;
-    }) => Promise<{ access: string; refresh: string; expires: number; baseUrl?: string }>;
-    refreshToken: (credential: { access: string; refresh: string; expires: number; baseUrl?: string }) => Promise<{
-      access: string;
-      refresh: string;
-      expires: number;
-      baseUrl?: string;
-    }>;
-    getApiKey: (credential: { access: string; refresh: string; expires: number; baseUrl?: string }) => string;
-  };
-};
-
-type TestCommand = {
-  description: string;
-  handler: (args: string, ctx: TestCommandContext) => Promise<void> | void;
-};
-
-type TestCommandContext = {
-  ui: {
-    input?: (title: string, placeholder?: string) => Promise<string | undefined>;
-    notify: (message: string, type: string) => void;
-  };
-  modelRegistry?: {
-    authStorage: {
-      set: (provider: string, credential: unknown) => void;
-    };
-    refresh?: () => void;
-  };
-};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -151,55 +103,6 @@ async function writeModelCache(agentDir: string, helperPath: string, models: unk
   );
 }
 
-async function loadExtension(agentDir: string): Promise<(pi: TestPi) => Promise<void>> {
-  vi.resetModules();
-  vi.doMock("@earendil-works/pi-coding-agent", () => ({
-    defineTool: (tool: unknown) => tool,
-    getAgentDir: () => agentDir,
-    readStoredCredential: (provider: string, authPath: string) => {
-      try {
-        return (JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>)[provider];
-      } catch {
-        return undefined;
-      }
-    },
-  }));
-  const mod = await import("../src/index.js");
-  return mod.default as unknown as (pi: TestPi) => Promise<void>;
-}
-
-function createPi(): TestPi {
-  return {
-    providers: [],
-    commands: new Map(),
-    handlers: new Map(),
-    tools: [],
-    registerProvider(name: string, config: TestProviderConfig) {
-      this.providers.push({ name, config });
-    },
-    registerCommand(name: string, command: TestCommand) {
-      this.commands.set(name, command);
-    },
-    registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }) {
-      this.tools.push(tool);
-    },
-    on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any) {
-      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
-    },
-  };
-}
-
-type TestPi = {
-  providers: Array<{ name: string; config: TestProviderConfig }>;
-  commands: Map<string, TestCommand>;
-  handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
-  tools: Array<{ name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }>;
-  registerProvider(name: string, config: TestProviderConfig): void;
-  registerCommand(name: string, command: TestCommand): void;
-  registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }): void;
-  on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
-};
-
 async function startSession(pi: TestPi, refreshes = pi.providers.length): Promise<void> {
   const providerCount = pi.providers.length;
   for (const handler of pi.handlers.get("session_start") ?? []) {
@@ -244,10 +147,7 @@ describe("extension startup", () => {
       if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(pi.providers[0]?.config.models).toEqual(cachedModels);
@@ -547,9 +447,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
     const notify = vi.fn();
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     for (const handler of pi.handlers.get("session_start") ?? []) {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined }, ui: { notify } });
@@ -627,10 +525,7 @@ describe("extension startup", () => {
 
   it("registers the API key as an explicit environment reference", async () => {
     const agentDir = await makeAgentDir();
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
   });
@@ -655,9 +550,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to read ADC file"));
@@ -699,18 +592,14 @@ describe("extension startup", () => {
     });
 
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "first-adc", "first-refresh");
-    let extension = await loadExtension(agentDir);
-    let pi = createPi();
-    await extension(pi);
+    let pi = await createLoadedPi(agentDir);
     await startSession(pi);
     expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "first-model",
     ]);
 
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "second-adc", "second-refresh");
-    extension = await loadExtension(agentDir);
-    pi = createPi();
-    await extension(pi);
+    pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
@@ -723,10 +612,7 @@ describe("extension startup", () => {
     process.env.LITELLM_BASE_URL = "undefined";
     process.env.LITELLM_API_KEY = "undefined";
     const agentDir = await makeAgentDir();
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
   });
@@ -757,9 +643,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, force: true });
     expect(models).toEqual([expect.objectContaining({ id: "refreshed-model" })]);
@@ -786,9 +670,7 @@ describe("extension startup", () => {
     );
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
     expect(models).toEqual([expect.objectContaining({ id: "cached-model" })]);
@@ -812,9 +694,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await writeFile(
       join(agentDir, "auth.json"),
       JSON.stringify({ litellm: { type: "api_key", key: "new-key" } }),
@@ -846,9 +726,7 @@ describe("extension startup", () => {
         }),
     );
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     const controller = new AbortController();
 
     const refresh = pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, signal: controller.signal });
@@ -875,9 +753,7 @@ describe("extension startup", () => {
       });
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-key", "Bearer stored-key"]);
@@ -929,9 +805,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
@@ -1017,9 +891,7 @@ describe("extension startup", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     // Providers load in parallel, so cross-provider request order is not deterministic.
@@ -1057,9 +929,7 @@ describe("extension startup", () => {
     process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const result = await pi.handlers.get("before_provider_request")?.[0]?.(
       { payload: { model: "kimi-k2.6" } },
@@ -1086,9 +956,7 @@ describe("extension startup", () => {
     );
     const notify = vi.fn();
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
 
     expect(fetchMock).not.toHaveBeenCalled();
@@ -1113,9 +981,7 @@ describe("extension startup", () => {
       }
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const promptMessages: string[] = [];
     const progress = vi.fn();
@@ -1161,9 +1027,7 @@ describe("extension startup", () => {
       }
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers).toHaveLength(1);
     expect(pi.providers[0]?.config.models).toEqual([]);
@@ -1235,9 +1099,7 @@ describe("extension startup", () => {
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {
     const agentDir = await makeAgentDir();
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.commands.has("login")).toBe(false);
     expect(pi.providers[0]?.config.oauth).toBeDefined();
@@ -1263,9 +1125,7 @@ describe("extension startup", () => {
       }
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     expect(callCount).toBe(0);
 
     const credential = await pi.providers[0]?.config.oauth?.login({
@@ -1305,9 +1165,7 @@ describe("extension startup", () => {
       return jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] });
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     // Startup model and MCP discovery use the same fresh helper token (one helper invocation).
@@ -1345,9 +1203,7 @@ describe("extension startup", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("temporary outage"));
 
     try {
-      const extension = await loadExtension(agentDir);
-      const pi = createPi();
-      await extension(pi);
+      const pi = await createLoadedPi(agentDir);
       expect(fetchMock).toHaveBeenCalledTimes(fetches ? 1 : 0);
       expect(await readHelperCount(agentDir)).toBe(helperRuns);
       expect(pi.providers[0]?.config.models).toEqual(cachedModels);
@@ -1367,9 +1223,7 @@ describe("extension startup", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
 
     try {
-      const extension = await loadExtension(agentDir);
-      const pi = createPi();
-      await extension(pi);
+      const pi = await createLoadedPi(agentDir);
       expect(fetchMock).not.toHaveBeenCalled();
       expect(await readHelperCount(agentDir)).toBe(1);
       expect(pi.providers[0]?.config.models).toEqual(cachedModels);
@@ -1390,9 +1244,7 @@ describe("extension startup", () => {
       jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] }),
     );
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => (options.placeholder ? "https://litellm.example.com" : `!${helperPath}`),
     });
@@ -1415,9 +1267,7 @@ describe("extension startup", () => {
       jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] }),
     );
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => (options.placeholder ? "https://litellm.example.com" : `!${helperPath}`),
     });
@@ -1456,9 +1306,7 @@ describe("extension startup", () => {
       return jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] });
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenAuthHeaders).toEqual([`Bearer ${fresh}`, `Bearer ${fresh}`]);
@@ -1481,9 +1329,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const authInfos: Array<{ url: string; instructions?: string }> = [];
     const credential = await pi.providers[0]?.config.oauth?.login({
@@ -1537,9 +1383,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -1567,9 +1411,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -1602,9 +1444,7 @@ describe("extension startup", () => {
         return Promise.resolve(jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }));
       return Promise.reject(new Error(`unexpected URL: ${url}`));
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const controller = new AbortController();
     const loginPromise = pi.providers[0]?.config.oauth?.login({
@@ -1639,9 +1479,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -1671,9 +1509,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -1702,9 +1538,7 @@ describe("extension startup", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const credential = await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -1725,9 +1559,7 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     await expect(
       pi.providers[0]?.config.oauth?.login({
@@ -1771,9 +1603,7 @@ describe("multi-provider hardening", () => {
       if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi, 1);
 
     expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
@@ -1798,9 +1628,7 @@ describe("multi-provider hardening", () => {
     process.env.LITELLM_API_KEY = "openai-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
     expect(pi.providers[1]?.name).toBe("litellm-anthropic");
@@ -1823,9 +1651,7 @@ describe("multi-provider hardening", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenSecretHeaders).toEqual(["v$X"]);
@@ -1856,9 +1682,7 @@ describe("multi-provider hardening", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer custom-key"]);
@@ -1901,9 +1725,7 @@ describe("multi-provider hardening", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi, 1);
 
     expect(seenAuthHeaders).toEqual(["Bearer stored-alias-key"]);
@@ -1930,8 +1752,7 @@ describe("multi-provider hardening", () => {
     delete process.env.UNSET_LITELLM_VAR;
     const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
-    const extension = await loadExtension(agentDir);
-    await extension(createPi());
+    await createLoadedPi(agentDir);
 
     expect(stderrSpy).toHaveBeenCalledWith(
       expect.stringContaining("LiteLLM (litellm-anthropic): configured apiKey did not resolve"),
@@ -1967,9 +1788,7 @@ describe("multi-provider hardening", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     const notify = vi.fn();
     await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
 
@@ -1993,9 +1812,7 @@ describe("multi-provider hardening", () => {
         return jsonResponse(200, { data: [{ model_name: "gpt-5", model_info: { mode: "chat" } }] });
       throw new Error(`unexpected URL: ${url}`);
     });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     await pi.providers[0]?.config.oauth?.login({
       onPrompt: async (options) => {
@@ -2027,9 +1844,7 @@ describe("multi-provider hardening", () => {
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "team-claude"]);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Team Claude"));
@@ -2055,9 +1870,7 @@ describe("multi-provider hardening", () => {
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers[1]?.config.headers).toEqual({ "x-num": "30", "x-bool": "false" });
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-obj"));
@@ -2091,9 +1904,7 @@ describe("multi-provider hardening", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(seenRequests).toEqual([{ customer: "team-b" }]);
