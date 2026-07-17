@@ -134,11 +134,9 @@ describe("runSsoLoginSmoke", () => {
     const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
 
     vi.doMock("@earendil-works/pi-coding-agent", () => ({
-      AuthStorage: {
-        create: () => ({ getApiKey: async () => undefined }),
-      },
       defineTool: (tool: unknown) => tool,
       getAgentDir: () => agentDir,
+      readStoredCredential: () => undefined,
     }));
 
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -203,11 +201,9 @@ describe("runSsoLoginSmoke", () => {
     );
 
     vi.doMock("@earendil-works/pi-coding-agent", () => ({
-      AuthStorage: {
-        create: () => ({ getApiKey: async () => undefined }),
-      },
       defineTool: (tool: unknown) => tool,
       getAgentDir: () => agentDir,
+      readStoredCredential: () => undefined,
     }));
 
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

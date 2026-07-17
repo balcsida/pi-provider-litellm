@@ -1,5 +1,6 @@
-import type { Api, KnownProvider, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
+import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type {
   DiscoveryOptions,
@@ -94,17 +95,17 @@ export function buildCompat(modelId: string): ProviderModelConfig["compat"] {
   return { supportsStore: false };
 }
 
-function toKnownProvider(provider: string | undefined): KnownProvider | undefined {
+function toKnownProvider(provider: string | undefined): BuiltinProvider | undefined {
   if (!provider) return undefined;
   const normalized = provider.toLowerCase();
-  return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as KnownProvider) : undefined;
+  return KNOWN_PROVIDER_SET.has(normalized) ? (normalized as BuiltinProvider) : undefined;
 }
 
 function findCatalogModel(id: string, ownedBy?: string): Model<Api> | undefined {
   const prefixProvider = toKnownProvider(id.split("/")[0]);
   const lookupIds = catalogLookupIds(id);
   const candidates = [toKnownProvider(ownedBy), prefixProvider, lookupIds.length > 1 ? "anthropic" : undefined].filter(
-    (provider): provider is KnownProvider => provider !== undefined,
+    (provider): provider is BuiltinProvider => provider !== undefined,
   );
 
   for (const provider of candidates) {
@@ -132,7 +133,7 @@ function catalogLookupIds(id: string): string[] {
   return [...lookupIds];
 }
 
-function findCatalogModelInProvider(provider: KnownProvider, lookupIds: string[]): Model<Api> | undefined {
+function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string[]): Model<Api> | undefined {
   for (const lookupId of lookupIds) {
     const exact = getModels(provider).find((model) => model.id === lookupId);
     if (exact) return exact;

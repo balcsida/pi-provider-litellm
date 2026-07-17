@@ -77,6 +77,38 @@ describe("setupLiteLLMCostTracking", () => {
     expect(result.message.usage.cost.total).toBe(0.42);
   });
 
+  it("applies the highest matching input pricing tier to the whole request", async () => {
+    const pi = createPi();
+    setupLiteLLMCostTracking(pi as any, [
+      {
+        provider: "litellm",
+        models: [
+          model("tiered-model", {
+            input: 1,
+            output: 2,
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            tiers: [
+              { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 5, cacheWrite: 0 },
+              { inputTokensAbove: 1_000, input: 30, output: 60, cacheRead: 15, cacheWrite: 0 },
+            ],
+          }),
+        ],
+      },
+    ]);
+
+    const result = await pi.handlers.get("message_end")?.[0]?.({
+      message: {
+        role: "assistant",
+        provider: "litellm",
+        model: "tiered-model",
+        usage: { input: 100, output: 10, cacheRead: 50, cacheWrite: 0 },
+      },
+    });
+
+    expect(result.message.usage.cost.total).toBeCloseTo(0.00145, 10);
+  });
+
   it("does not let one provider's headerless response clear another provider's pending cost", async () => {
     const pi = createPi();
     setupLiteLLMCostTracking(pi as any, [

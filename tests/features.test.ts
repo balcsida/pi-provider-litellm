@@ -1,5 +1,6 @@
 import { scryptSync } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -39,28 +40,17 @@ function jsonResponse(status: number, body: unknown): Response {
 
 async function loadExtension(agentDir: string): Promise<(pi: TestPi) => Promise<void>> {
   vi.resetModules();
-  vi.doMock("@earendil-works/pi-coding-agent", () => {
-    class TestAuthStorage {
-      constructor(private readonly authPath: string) {}
-
-      static create(authPath: string): TestAuthStorage {
-        return new TestAuthStorage(authPath);
-      }
-
-      async getApiKey(provider: string): Promise<string | undefined> {
-        const parsed = JSON.parse(await readFile(this.authPath, "utf8")) as Record<
-          string,
-          { type: "api_key"; key: string } | { type: "oauth"; access: string; expires: number; refresh: string }
-        >;
-        const entry = parsed[provider];
-        if (entry?.type === "api_key") return process.env[entry.key] || entry.key;
-        if (entry?.type === "oauth") return entry.access;
+  vi.doMock("@earendil-works/pi-coding-agent", () => ({
+    defineTool: (tool: unknown) => tool,
+    getAgentDir: () => agentDir,
+    readStoredCredential: (provider: string, authPath: string) => {
+      try {
+        return (JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>)[provider];
+      } catch {
         return undefined;
       }
-    }
-
-    return { AuthStorage: TestAuthStorage, defineTool: (tool: unknown) => tool, getAgentDir: () => agentDir };
-  });
+    },
+  }));
   const mod = await import("../src/index.js");
   return mod.default as unknown as (pi: TestPi) => Promise<void>;
 }

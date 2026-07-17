@@ -1,9 +1,9 @@
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import { AuthStorage, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { fingerprint, readCache, writeCache } from "./cache.js";
 import { type ProviderModels, setupLiteLLMCostTracking } from "./cost.js";
 import {
@@ -114,7 +114,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const COST_RATE_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+const COST_TIER_FIELDS = [...COST_RATE_FIELDS, "inputTokensAbove"] as const;
 
 // Mirrors pi core's ModelOverrideSchema: core rejects the whole models.json on invalid values,
 // so anything dropped here would also have been flagged for built-in providers. Headers matter
@@ -129,7 +131,19 @@ const MODEL_OVERRIDE_VALIDATORS: Record<keyof ModelOverride, (value: unknown) =>
   maxTokens: (value) => typeof value === "number",
   headers: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "string"),
   compat: isPlainObject,
-  cost: (value) => isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "number"),
+  cost: (value) =>
+    isPlainObject(value) &&
+    Object.entries(value).every(([key, entry]) =>
+      key === "tiers"
+        ? Array.isArray(entry) &&
+          entry.every(
+            (tier) =>
+              isPlainObject(tier) &&
+              COST_TIER_FIELDS.every((field) => typeof tier[field] === "number") &&
+              Object.keys(tier).every((field) => COST_TIER_FIELDS.includes(field as (typeof COST_TIER_FIELDS)[number])),
+          )
+        : COST_RATE_FIELDS.includes(key as (typeof COST_RATE_FIELDS)[number]) && typeof entry === "number",
+    ),
 };
 
 function sanitizeModelOverride(modelId: string, raw: unknown): ModelOverride | undefined {
@@ -230,14 +244,8 @@ async function applyOverrides(providerName: string, models: ProviderModelConfig[
   return applyModelOverrides(models, await readModelOverrides(providerName));
 }
 
-async function readAuthEntry(providerName = PROVIDER_NAME): Promise<AuthFileEntry | undefined> {
-  try {
-    const raw = await readFile(getAuthPath(), "utf8");
-    const parsed = JSON.parse(raw) as Record<string, AuthFileEntry>;
-    return parsed?.[providerName];
-  } catch {
-    return undefined;
-  }
+function readAuthEntry(providerName = PROVIDER_NAME): AuthFileEntry | undefined {
+  return readStoredCredential(providerName, getAuthPath()) as AuthFileEntry | undefined;
 }
 
 async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | undefined> {
@@ -290,21 +298,6 @@ function tokenExpiresAt(apiKey: string, opaqueFallback = PERMANENT_TOKEN_EXPIRES
   } catch {
     return opaqueFallback;
   }
-}
-
-function openInBrowser(url: string): void {
-  // Never invoke a shell here: cmd.exe re-parses metacharacters before `start`
-  // runs, which would make URL contents injectable. Launch is best-effort; the
-  // URL is also shown to the user, so launcher failures must not crash the process.
-  const [cmd, args]: [string, string[]] =
-    process.platform === "darwin"
-      ? ["open", [url]]
-      : process.platform === "win32"
-        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
-        : ["xdg-open", [url]];
-  spawn(cmd, args, { stdio: "ignore", detached: true })
-    .on("error", () => undefined)
-    .unref();
 }
 
 async function generateVirtualKey(
@@ -478,8 +471,8 @@ async function resolveCredentials(
   const authKey =
     entry?.type === "oauth"
       ? (executeHelpers ? resolveOAuthApiKey(entry) : entry.access).trim()
-      : entry?.type === "api_key"
-        ? (await AuthStorage.create(getAuthPath()).getApiKey(definition.name, { includeFallback: false }))?.trim()
+      : entry?.type === "api_key" && typeof entry.key === "string"
+        ? resolveConfigValue(entry.key, { executeCommands: executeHelpers })?.trim()
         : undefined;
   const gcloudKey = executeHelpers && gcloudCacheKey ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
@@ -1009,6 +1002,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       api: "openai-completions",
       headers: escapeHeaderConfig(state.headers),
       models,
+      refreshModels: ({ allowNetwork }) =>
+        allowNetwork ? runRefresh(state).then((result) => result.models) : Promise.resolve(state.models),
       oauth: definition.enableOAuth ? oauth : undefined,
     });
   }
@@ -1140,53 +1135,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
     return state.refreshInProgress;
   }
-
-  type LoginContext = Pick<ExtensionContext, "modelRegistry" | "signal" | "ui">;
-
-  async function runLogin(ctx: LoginContext): Promise<void> {
-    const credential = await loginLiteLLM(
-      {
-        onAuth: ({ url, instructions }) => {
-          openInBrowser(url);
-          ctx.ui.notify(instructions ? `${url} — ${instructions}` : url, "info");
-        },
-        onDeviceCode: () => undefined,
-        onPrompt: async ({ message, placeholder }) => {
-          const value = await ctx.ui.input(message, placeholder);
-          if (value === undefined) throw new Error("Login cancelled");
-          return value;
-        },
-        onProgress: (message) => ctx.ui.notify(message, "info"),
-        onSelect: async () => undefined,
-        signal: ctx.signal,
-      },
-      defaultLoginOptions(),
-    );
-
-    ctx.modelRegistry.authStorage.set(PROVIDER_NAME, { type: "oauth", ...credential });
-    ctx.modelRegistry.refresh();
-    const credentialBaseUrl = (credential as { baseUrl?: string }).baseUrl;
-    const credentialAccess = typeof credential.access === "string" ? credential.access : undefined;
-    defaultState.creds = { ...defaultState.creds, baseUrl: credentialBaseUrl };
-    defaultState.liveDiscoveryApiKey = credentialAccess;
-    registerSkillTools(defaultState);
-    await registerMcpTools(defaultState, (message) => ctx.ui.notify(message, "info"));
-    ctx.ui.notify(`Logged in to LiteLLM. Credentials saved to ${getAuthPath()}`, "info");
-  }
-
-  pi.on("input", async (event, ctx) => {
-    if (event.text.trim() !== `/login ${PROVIDER_NAME}`) return { action: "continue" };
-    if (!ctx.hasUI) return { action: "continue" };
-
-    try {
-      await runLogin(ctx);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== "Login cancelled") ctx.ui.notify(`LiteLLM login failed: ${message}`, "error");
-    }
-
-    return { action: "handled" };
-  });
 
   pi.registerCommand("litellm-refresh", {
     description: "Re-discover models from the LiteLLM proxy.",
