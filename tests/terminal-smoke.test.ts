@@ -1,11 +1,16 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { type Session, TerminalControl } from "@kitlangton/terminal-control";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const piPath = resolve(repoRoot, "node_modules/.bin/pi");
+const extensionPath = resolve(repoRoot, "dist/index.js");
+const execFileAsync = promisify(execFile);
 const enabled = process.env.LITELLM_TERMINAL_SMOKE === "1";
 const waitTimeoutMs = 90_000;
 const testTimeoutMs = 6 * waitTimeoutMs;
@@ -14,11 +19,16 @@ let terminal: TerminalControl | undefined;
 async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-terminal-"));
   try {
+    const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+    await execFileAsync(piPath, ["-e", extensionPath, "--list-models", "litellm"], {
+      cwd: repoRoot,
+      env,
+    });
     await using session = await terminal?.launch({
       command: [
-        resolve(repoRoot, "node_modules/.bin/pi"),
+        piPath,
         "-e",
-        resolve(repoRoot, "dist/index.js"),
+        extensionPath,
         "--provider",
         "litellm",
         "--model",
@@ -27,7 +37,8 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
         "--no-session",
       ],
       cwd: repoRoot,
-      env: { PI_CODING_AGENT_DIR: agentDir },
+      env,
+      inheritEnv: true,
       viewport: { cols: 100, rows: 30 },
     });
     if (!session) throw new Error("Terminal control is not initialized");
@@ -40,6 +51,15 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
 async function submit(session: Session, text: string): Promise<void> {
   await session.keyboard.type(text);
   await session.keyboard.press("Enter");
+}
+
+async function waitForInitialModel(session: Session): Promise<void> {
+  try {
+    await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+  } catch (error) {
+    const logs = await session.logs.text();
+    throw new Error(`Pi exited before showing the smoke model:\n${logs}`, { cause: error });
+  }
 }
 
 describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
@@ -55,7 +75,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "logs in to LiteLLM",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/login litellm");
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
@@ -75,7 +95,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "refreshes LiteLLM models",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/litellm-refresh");
 
@@ -91,7 +111,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
     "shows LiteLLM models in the model picker",
     async () => {
       await withPi(async (session) => {
-        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
+        await waitForInitialModel(session);
 
         await submit(session, "/model");
         await session.screen.waitForText("anthropic/vidaimock-claude", { timeoutMs: waitTimeoutMs });

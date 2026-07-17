@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 describe("runAuthSmoke", () => {
-  it("checks missing, bad, and master-key auth without enterprise checks", async () => {
+  it("checks missing and master-key auth without database-backed checks", async () => {
     const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
@@ -51,10 +51,9 @@ describe("runAuthSmoke", () => {
 
     expect(result).toEqual({
       enterprise: false,
-      checks: ["missing-token", "bad-token", "master-key-models", "master-key-chat"],
+      checks: ["missing-token", "master-key-models", "master-key-chat"],
     });
     expect(requests.map((request) => request.url)).toEqual([
-      "http://127.0.0.1:4000/v1/models",
       "http://127.0.0.1:4000/v1/models",
       "http://127.0.0.1:4000/v1/models",
       "http://127.0.0.1:4000/v1/chat/completions",
@@ -105,9 +104,9 @@ describe("runAuthSmoke", () => {
       enterprise: true,
       checks: [
         "missing-token",
-        "bad-token",
         "master-key-models",
         "master-key-chat",
+        "bad-token",
         "virtual-key-chat",
         "enterprise-admin-route",
         "sso-login",

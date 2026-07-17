@@ -13,6 +13,14 @@ on:
       - 'scripts/smoke*.ts'
       - 'src/**'
       - 'tests/**'
+  pull_request:
+    paths:
+      - '.github/workflows/litellm-smoke.yml'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'scripts/smoke*.ts'
+      - 'src/**'
+      - 'tests/**'
 
 permissions:
   contents: read
@@ -25,9 +33,9 @@ jobs:
       LITELLM_BASE_URL: http://127.0.0.1:4000
       LITELLM_API_KEY: sk-ci-litellm-smoke
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
-      LITELLM_LICENSE: ${{ secrets.LITELLM_LICENSE }}
+      LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
-      LITELLM_IMAGE: ${{ secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
+      LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database:main-latest' || 'docker.litellm.ai/berriai/litellm:main-latest' }}
       LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
@@ -182,7 +190,14 @@ jobs:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
         run: npx tsx scripts/smoke.ts
 
-      - name: Run auth smoke
+      - name: Run community auth smoke
+        env:
+          LITELLM_LICENSE: ''
+          LITELLM_SMOKE_TIMEOUT_MS: '60000'
+        run: npx tsx scripts/smoke-auth.ts
+
+      - name: Run Enterprise auth smoke
+        if: ${{ env.LITELLM_LICENSE != '' }}
         env:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
         run: npx tsx scripts/smoke-auth.ts
