@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { type Session, TerminalControl } from "@kitlangton/terminal-control";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const piPath = resolve(repoRoot, "node_modules/.bin/pi");
@@ -78,6 +78,8 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
         await waitForInitialModel(session);
 
         await submit(session, "/login litellm");
+        await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
+        await session.keyboard.press("Enter");
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_BASE_URL ?? "http://127.0.0.1:4000");
         await session.screen.waitForText("Select login method", { timeoutMs: waitTimeoutMs });
@@ -114,11 +116,8 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
         await waitForInitialModel(session);
 
         await submit(session, "/model");
+        await session.screen.waitForText("Only showing models from configured providers", { timeoutMs: waitTimeoutMs });
         await session.screen.waitForText("anthropic/vidaimock-claude", { timeoutMs: waitTimeoutMs });
-        const screen = await session.screen.text({ settleMs: 50, deadlineMs: 2_000 });
-
-        expect(screen).toContain("vidaimock-openai");
-        expect(screen).toContain("anthropic/vidaimock-claude");
       });
     },
     testTimeoutMs,
