@@ -44,7 +44,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Start LiteLLM smoke database");
     expect(workflow).toContain("postgres:16-alpine");
     expect(workflow).toContain('admin_only_routes: ["/key/generate"]');
-    expect(workflow).toContain("Run auth smoke");
+    expect(workflow).toContain("Run community auth smoke");
+    expect(workflow).toContain("Run Enterprise auth smoke");
     expect(workflow).toContain("npx tsx scripts/smoke-auth.ts");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
     expect(workflow).toContain("Run Pi CLI smoke");
@@ -91,8 +92,22 @@ describe("LiteLLM smoke workflow", () => {
     );
   });
 
-  it("gates auth smoke on the optional LiteLLM license", () => {
-    expect(readWorkflow()).toMatch(/- name: Run auth smoke\n {8}if: \$\{\{ env\.LITELLM_LICENSE != '' \}\}/);
+  it("separates community and Enterprise auth smoke", () => {
+    const workflow = readWorkflow();
+    const communityStart = workflow.indexOf("- name: Run community auth smoke");
+    const enterpriseStart = workflow.indexOf("- name: Run Enterprise auth smoke");
+    const cliStart = workflow.indexOf("- name: Run Pi CLI smoke");
+
+    expect(communityStart).toBeGreaterThan(-1);
+    expect(enterpriseStart).toBeGreaterThan(communityStart);
+    expect(cliStart).toBeGreaterThan(enterpriseStart);
+
+    const communityStep = workflow.slice(communityStart, enterpriseStart);
+    const enterpriseStep = workflow.slice(enterpriseStart, cliStart);
+    expect(communityStep).toContain("LITELLM_LICENSE: ''");
+    expect(communityStep).toContain("run: npx tsx scripts/smoke-auth.ts");
+    expect(enterpriseStep).toContain("if: $" + "{{ env.LITELLM_LICENSE != '' }}");
+    expect(enterpriseStep).toContain("run: npx tsx scripts/smoke-auth.ts");
   });
 
   it("uses minimal permissions and a pinned, checksum-verified VidaiMock build", () => {
