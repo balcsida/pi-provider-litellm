@@ -70,6 +70,13 @@ interface PackResult {
   files?: Array<{ path?: string }>;
 }
 
+export function parsePackageFiles(stdout: string): string[] {
+  const parsed = JSON.parse(stdout) as PackResult[] | Record<string, PackResult>;
+  return (Array.isArray(parsed) ? parsed : Object.values(parsed)).flatMap(
+    (result) => result.files?.map((file) => file.path).filter(Boolean) ?? [],
+  ) as string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -153,8 +160,7 @@ async function listPackageFiles(root: string, errors: string[]): Promise<string[
       cwd: root,
       maxBuffer: 1024 * 1024 * 10,
     });
-    const packResults = JSON.parse(stdout) as PackResult[];
-    return packResults.flatMap((result) => result.files?.map((file) => file.path).filter(Boolean) ?? []) as string[];
+    return parsePackageFiles(stdout);
   } catch (error) {
     errors.push(
       `npm pack --dry-run --json --ignore-scripts failed (${error instanceof Error ? error.message : error})`,

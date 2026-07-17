@@ -3,9 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { checkSupplyChain } from "../scripts/supply-chain-guard.js";
+import { checkSupplyChain, parsePackageFiles } from "../scripts/supply-chain-guard.js";
 
 describe("supply-chain guard", () => {
+  it("parses npm 11 and npm 12 package metadata", () => {
+    const packResult = { files: [{ path: "package.json" }] };
+
+    expect(parsePackageFiles(JSON.stringify([packResult]))).toEqual(["package.json"]);
+    expect(parsePackageFiles(JSON.stringify({ fixture: packResult }))).toEqual(["package.json"]);
+  });
+
   it("rejects install hooks, optional runtime dependencies, Git specs, and packaged payloads", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-guard-"));
 
