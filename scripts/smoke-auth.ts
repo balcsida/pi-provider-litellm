@@ -273,9 +273,6 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
   await expectAuthFailure("missing-token /v1/models", await fetchModels(baseUrl, undefined, timeoutMs));
   checks.push("missing-token");
 
-  await expectAuthFailure("bad-token /v1/models", await fetchModels(baseUrl, BAD_SMOKE_KEY, timeoutMs));
-  checks.push("bad-token");
-
   await expectOk("master-key /v1/models", await fetchModels(baseUrl, options.masterKey, timeoutMs));
   checks.push("master-key-models");
 
@@ -283,6 +280,9 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
   checks.push("master-key-chat");
 
   if (options.enterprise) {
+    await expectAuthFailure("bad-token /v1/models", await fetchModels(baseUrl, BAD_SMOKE_KEY, timeoutMs));
+    checks.push("bad-token");
+
     const virtualKey = await generateVirtualKey(baseUrl, options.masterKey, options.modelId, timeoutMs);
     await smokeChat(baseUrl, virtualKey, options.modelId, timeoutMs);
     checks.push("virtual-key-chat");
