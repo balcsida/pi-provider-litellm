@@ -1210,7 +1210,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         statesToRefresh.map((state) =>
           runRefresh(
             state,
-            isVerboseDiscovery() ? (ctx.ui?.notify ? (message) => ctx.ui.notify(message, "info") : undefined) : undefined,
+            isVerboseDiscovery()
+              ? ctx.ui?.notify
+                ? (message) => ctx.ui.notify(message, "info")
+                : undefined
+              : undefined,
           ),
         ),
       );
@@ -1258,9 +1262,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     for (const state of providerStates) {
       const cacheIsStale = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt > CACHE_STALE_MS;
       if (!state.refreshOnStart && !cacheIsStale) continue;
-      const progress = isVerboseDiscovery() && ctx.ui?.notify
-        ? (message: string) => ctx.ui.notify(message, "info")
-        : undefined;
+      const progress =
+        isVerboseDiscovery() && ctx.ui?.notify ? (message: string) => ctx.ui.notify(message, "info") : undefined;
       void runRefresh(state, progress).catch(() => undefined);
     }
   });
