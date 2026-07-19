@@ -54,7 +54,7 @@ describe("dependency security overrides", () => {
     // Its nested protobufjs copy therefore stays on the latest 7.x until that
     // is fixed upstream. Any other copy or version drift must fail this test.
     expect(copiesOf("protobufjs")).toEqual({
-      "node_modules/protobufjs": "8.2.1",
+      "node_modules/protobufjs": "8.7.1",
       "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs": "7.6.4",
     });
   });
