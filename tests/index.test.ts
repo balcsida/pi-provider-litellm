@@ -1824,6 +1824,8 @@ describe("multi-provider hardening", () => {
 
   it("does not execute an alias key command when a stored auth entry wins", async () => {
     const agentDir = await makeAgentDir();
+    delete process.env.LITELLM_BASE_URL;
+    delete process.env.LITELLM_API_KEY;
     const countingHelper = await writeHelper(agentDir, ["alias-command-key"]);
     await writeFile(
       join(agentDir, "auth.json"),
