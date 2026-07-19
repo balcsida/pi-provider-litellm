@@ -350,13 +350,14 @@ function mapFromModelsList(
 async function discoverFromHealth(
   base: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void },
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean },
 ): Promise<ProviderModelConfig[]> {
-  options.onProgress?.("Querying /health endpoint...");
+  const progress = options.silent ? undefined : options.onProgress;
+  progress?.("Querying /health endpoint...");
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
   const endpoints = (healthResult.data.healthy_endpoints ?? []).filter((entry) => entry.model || entry.model_id);
-  options.onProgress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
+  progress?.(`Discovered ${endpoints.length} model endpoints, fetching details...`);
   let completed = 0;
   const models = await Promise.all(
     endpoints.map(async (endpoint) => {
@@ -372,7 +373,7 @@ async function discoverFromHealth(
       }
       completed++;
       if (completed % 10 === 0 || completed === endpoints.length) {
-        options.onProgress?.(`Fetched ${completed}/${endpoints.length} models...`);
+        progress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
       return model;
     }),
@@ -392,10 +393,11 @@ function deduplicateModels(models: ProviderModelConfig[]): ProviderModelConfig[]
 export async function discoverModels(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void } = {},
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean } = {},
 ): Promise<DiscoveryResult> {
   const base = normalizeBaseUrl(baseUrl);
-  options.onProgress?.("Querying /model/info endpoint...");
+  const progress = options.silent ? undefined : options.onProgress;
+  progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
     const entries = new Map<string, ModelInfoEntry>();
@@ -414,17 +416,17 @@ export async function discoverModels(
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
   }
-  options.onProgress?.("/model/info unavailable, trying /v1/models...");
+  progress?.("/model/info unavailable, trying /v1/models...");
   const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
   if (!listResult.ok) {
     if ([401, 403, 404].includes(listResult.status)) {
-      options.onProgress?.("/v1/models unavailable, falling back to /health endpoint...");
+      progress?.("/v1/models unavailable, falling back to /health endpoint...");
       const models = await discoverFromHealth(base, apiKey, options);
       if (models.length > 0) return { source: "health", models: deduplicateModels(models) };
     }
     throw new Error(`/v1/models returned ${listResult.status}`);
   }
-  options.onProgress?.("Fetching models.dev catalog for metadata enrichment...");
+  progress?.("Fetching models.dev catalog for metadata enrichment...");
   const modelsDev = await getModelsDevCatalog(options);
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))

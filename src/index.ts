@@ -39,6 +39,7 @@ const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
+const ENV_VERBOSE_DISCOVERY = "LITELLM_VERBOSE_DISCOVERY";
 const DEFAULT_TIMEOUT_MS = 5000;
 const LOGIN_TIMEOUT_MS = 10_000;
 const CACHE_FILENAME = "litellm-models.json";
@@ -563,6 +564,10 @@ function isOffline(): boolean {
   return process.env[ENV_OFFLINE] === "1";
 }
 
+function isVerboseDiscovery(): boolean {
+  return process.env[ENV_VERBOSE_DISCOVERY] === "1";
+}
+
 function isListModelsMode(): boolean {
   return process.argv.includes("--list-models");
 }
@@ -625,7 +630,7 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void },
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean },
 ): Promise<{ result: DiscoveryResult; warning?: string }> {
   try {
     return { result: await discoverModels(baseUrl, apiKey, options) };
@@ -717,6 +722,7 @@ async function loginLiteLLM(
     timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
     headers: options.headers,
+    silent: !isVerboseDiscovery(),
     onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
   });
 
@@ -730,7 +736,9 @@ async function loginLiteLLM(
   };
   await writeCache(options.cachePath, cache);
   await options.onCacheWrite?.(cache);
-  callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
+  if (isVerboseDiscovery()) {
+    callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
+  }
 
   return {
     access: apiKey,
@@ -955,6 +963,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
         timeoutMs,
         headers,
+        silent: !isVerboseDiscovery(),
         onProgress: (message) => process.stderr.write(`LiteLLM: ${message}\n`),
       });
       if (warning) {
@@ -1109,8 +1118,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         state.creds.baseUrl,
         seededRuntimeApiKey(state, state.liveDiscoveryApiKey),
         state.headers,
-        (message) =>
-          onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`),
+        isVerboseDiscovery()
+          ? (message) =>
+              onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`)
+          : undefined,
       );
       for (const tool of tools) {
         pi.registerTool(tool);
@@ -1142,6 +1153,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       timeoutMs: getDiscoveryTimeoutMs(),
       signal,
       headers: state.headers,
+      silent: !isVerboseDiscovery(),
       onProgress: progress,
     });
     signal?.throwIfAborted();
@@ -1195,7 +1207,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return;
       }
       const settled = await Promise.allSettled(
-        statesToRefresh.map((state) => runRefresh(state, (message) => ctx.ui.notify(message, "info"))),
+        statesToRefresh.map((state) =>
+          runRefresh(
+            state,
+            isVerboseDiscovery() ? (ctx.ui?.notify ? (message) => ctx.ui.notify(message, "info") : undefined) : undefined,
+          ),
+        ),
       );
       const succeeded = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
       const failed = settled
@@ -1241,7 +1258,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     for (const state of providerStates) {
       const cacheIsStale = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt > CACHE_STALE_MS;
       if (!state.refreshOnStart && !cacheIsStale) continue;
-      const progress = ctx.ui?.notify ? (message: string) => ctx.ui.notify(message, "info") : undefined;
+      const progress = isVerboseDiscovery() && ctx.ui?.notify
+        ? (message: string) => ctx.ui.notify(message, "info")
+        : undefined;
       void runRefresh(state, progress).catch(() => undefined);
     }
   });

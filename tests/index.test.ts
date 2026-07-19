@@ -12,6 +12,7 @@ const ENV_KEYS = [
   "LITELLM_API_KEY_HELPER",
   "LITELLM_HEADERS",
   "LITELLM_OFFLINE",
+  "LITELLM_VERBOSE_DISCOVERY",
   "LITELLM_ANTHROPIC_API_KEY",
   "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
@@ -270,6 +271,7 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "new-key";
+    process.env.LITELLM_VERBOSE_DISCOVERY = "1";
     await writeFile(
       join(agentDir, "litellm-models.json"),
       JSON.stringify({
@@ -302,12 +304,14 @@ describe("extension startup", () => {
     await vi.waitFor(() =>
       expect(notify).toHaveBeenCalledWith("LiteLLM MCP: Discovering MCP tools from server...", "info"),
     );
+    delete process.env.LITELLM_VERBOSE_DISCOVERY;
   });
 
   it("keeps concurrent extension progress bound to the initiating session", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "new-key";
+    process.env.LITELLM_VERBOSE_DISCOVERY = "1";
     await writeFile(
       join(agentDir, "litellm-models.json"),
       JSON.stringify({
@@ -363,6 +367,7 @@ describe("extension startup", () => {
     const fallbackMessage = "LiteLLM: /model/info unavailable, trying /v1/models...";
     expect(firstNotify.mock.calls.filter(([message]) => message === fallbackMessage)).toHaveLength(1);
     expect(secondNotify.mock.calls.filter(([message]) => message === fallbackMessage)).toHaveLength(1);
+    delete process.env.LITELLM_VERBOSE_DISCOVERY;
   });
 
   it("registers the API key as an explicit environment reference", async () => {
@@ -1101,6 +1106,7 @@ describe("extension startup", () => {
   it("prompts during login and caches discovered models", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    process.env.LITELLM_VERBOSE_DISCOVERY = "1";
     const seenRequests: Array<{ url: string; authorization: string }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
@@ -1148,6 +1154,7 @@ describe("extension startup", () => {
     };
     expect(cache.models.map((model) => model.id)).toEqual(["vidaimock-openai"]);
     expect(progress).toHaveBeenCalledWith("LiteLLM: 1 models discovered (source: model_info)");
+    delete process.env.LITELLM_VERBOSE_DISCOVERY;
   });
 
   it("re-registers models discovered during login", async () => {
