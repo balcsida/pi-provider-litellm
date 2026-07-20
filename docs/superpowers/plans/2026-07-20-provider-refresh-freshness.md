@@ -65,3 +65,43 @@ Expected: the package builds successfully from clean generated output.
 
 Stage `src/index.ts` and `tests/index.test.ts`, then create the signed commit:
 `fix: avoid duplicate startup discovery`.
+
+### Task 2: Synchronize Terminal Smoke Commands
+
+**Files:**
+- Modify: `tests/terminal-smoke.test.ts`
+
+**Interfaces:**
+- Consumes: `Session.keyboard.type`, `Session.screen.waitForText`, and `Session.keyboard.press`.
+- Produces: `submit(session, text)` with editor-echo synchronization for slash commands only.
+
+- [ ] **Step 1: Write the failing regression test**
+
+Add one enabled test with a structural fake `Session`. Record calls while
+submitting `/login litellm` and a masked value. Expect the command order to be
+`type`, `waitForText`, `Enter`, and expect the masked value to skip the screen
+check.
+
+- [ ] **Step 2: Run the focused test to verify it fails**
+
+Run: `npm test -- tests/terminal-smoke.test.ts -t "waits for command echo without inspecting form values"`
+
+Expected: FAIL because `submit` presses Enter without waiting for the command
+to appear.
+
+- [ ] **Step 3: Implement the minimal synchronization**
+
+After typing, call `session.screen.waitForText(text, { timeoutMs: waitTimeoutMs })`
+only when `text.startsWith("/")`, then press Enter as before.
+
+- [ ] **Step 4: Verify focused and repository checks**
+
+Run the focused test again, then `npm run check` and
+`npm run clean && npm run build`.
+
+Expected: the focused test, repository checks, and clean build all pass.
+
+- [ ] **Step 5: Publish and verify CI**
+
+Create the signed commit `test: synchronize terminal smoke commands`, push the
+branch, and wait for every PR check, including `LiteLLM Smoke`, to finish.

@@ -25,3 +25,11 @@ Add a regression test that invokes Pi's provider callback after a completed
 session refresh and verifies that it performs no second request. Also verify
 that a forced callback still performs discovery. Run the focused test, the
 repository check, a clean build, and an interactive Pi startup smoke test.
+
+## CI Follow-up: Terminal Editor Readiness
+
+The first PR smoke run lost `/login litellm` after the model name became
+visible but before Pi's editor accepted input; the unchanged rerun completed in
+about nine seconds. Keep the 90-second failure bound and synchronize visible
+slash commands by waiting for their exact editor echo before pressing Enter.
+Do not apply the echo check to prompt values because credentials may be masked.
