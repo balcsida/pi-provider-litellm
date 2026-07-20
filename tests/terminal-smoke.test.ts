@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { type Session, TerminalControl } from "@kitlangton/terminal-control";
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const piPath = resolve(repoRoot, "node_modules/.bin/pi");
@@ -50,8 +50,30 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
 
 async function submit(session: Session, text: string): Promise<void> {
   await session.keyboard.type(text);
+  if (text.startsWith("/")) {
+    await session.screen.waitForText(text, { timeoutMs: waitTimeoutMs });
+  }
   await session.keyboard.press("Enter");
 }
+
+it("waits for command echo without inspecting form values", async () => {
+  const calls: unknown[] = [];
+  const session = {
+    keyboard: {
+      press: async (key: string) => void calls.push(key),
+      type: async () => void calls.push("type"),
+    },
+    screen: {
+      waitForText: async (text: string | RegExp, options?: { timeoutMs?: number }) =>
+        void calls.push(["waitForText", text, options]),
+    },
+  } as unknown as Session;
+
+  await submit(session, "/login litellm");
+  await submit(session, "sk-ci-litellm-smoke");
+
+  expect(calls).toEqual(["type", ["waitForText", "/login litellm", { timeoutMs: 90_000 }], "Enter", "type", "Enter"]);
+});
 
 async function waitForInitialModel(session: Session): Promise<void> {
   try {
