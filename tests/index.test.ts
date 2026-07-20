@@ -287,9 +287,10 @@ describe("extension startup", () => {
     await extension(pi);
 
     await startSession(pi);
+    const config = pi.providers.at(-1)?.config;
+    await config?.refreshModels?.({ allowNetwork: true });
     fetchMock.mockClear();
 
-    const config = pi.providers.at(-1)?.config;
     const models = await config?.refreshModels?.({ allowNetwork: true });
     expect(models).toEqual([expect.objectContaining({ id: "fresh-model" })]);
     expect(fetchMock).not.toHaveBeenCalled();
