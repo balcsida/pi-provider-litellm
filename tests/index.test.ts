@@ -31,6 +31,7 @@ type TestProviderConfig = {
   models?: unknown[];
   refreshModels?: (context: {
     allowNetwork: boolean;
+    force?: boolean;
     signal?: AbortSignal;
     credential?:
       | { type: "api_key"; key?: string }
@@ -264,6 +265,36 @@ describe("extension startup", () => {
     await vi.waitFor(() => {
       expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("fresh-model");
     });
+  });
+
+  it("does not repeat a fresh session refresh unless forced", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await startSession(pi);
+    fetchMock.mockClear();
+
+    const config = pi.providers.at(-1)?.config;
+    const models = await config?.refreshModels?.({ allowNetwork: true });
+    expect(models).toEqual([expect.objectContaining({ id: "fresh-model" })]);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await config?.refreshModels?.({ allowNetwork: true, force: true });
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/model\/info$/), expect.anything());
   });
 
   it("delivers session refresh progress through the TUI", async () => {
@@ -770,7 +801,7 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, force: true });
     expect(models).toEqual([expect.objectContaining({ id: "refreshed-model" })]);
   });
 

@@ -1033,10 +1033,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       api: "openai-completions",
       headers: escapeHeaderConfig(state.headers),
       models,
-      refreshModels: ({ allowNetwork, credential, signal }) =>
-        allowNetwork && !discoveryDisabledReason()
-          ? runRefresh(state, undefined, credential, signal).then((result) => result.models)
-          : Promise.resolve(state.models),
+      refreshModels: ({ allowNetwork, force, credential, signal }) => {
+        const cacheIsFresh = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS;
+        if (
+          !allowNetwork ||
+          discoveryDisabledReason() ||
+          (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force)
+        ) {
+          return Promise.resolve(state.models);
+        }
+        return runRefresh(state, undefined, credential, signal).then((result) => result.models);
+      },
       oauth: definition.enableOAuth ? oauth : undefined,
     });
   }
