@@ -288,15 +288,60 @@ describe("extension startup", () => {
 
     await startSession(pi);
     const config = pi.providers.at(-1)?.config;
-    await config?.refreshModels?.({ allowNetwork: true });
+    const credential = { type: "api_key" as const, key: "env-key" };
+    await config?.refreshModels?.({ allowNetwork: true, credential });
     fetchMock.mockClear();
 
-    const models = await config?.refreshModels?.({ allowNetwork: true });
+    const models = await config?.refreshModels?.({ allowNetwork: true, credential });
     expect(models).toEqual([expect.objectContaining({ id: "fresh-model" })]);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    await config?.refreshModels?.({ allowNetwork: true, force: true });
+    await config?.refreshModels?.({ allowNetwork: true, force: true, credential });
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/model\/info$/), expect.anything());
+  });
+
+  it("registers MCP tools without repeating fresh-cache model discovery", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+
+    expect(models).toEqual(cachedModels);
+    expect(requestedUrls).toEqual(["https://litellm.example.com/mcp-rest/tools/list"]);
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
   });
 
   it("delivers session refresh progress through the TUI", async () => {
@@ -841,11 +886,12 @@ describe("extension startup", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("uses Pi's resolved credential for provider refresh", async () => {
+  it("uses Pi's resolved credential for provider refresh despite a fresh cache", async () => {
     const agentDir = await makeAgentDir();
     const helperPath = await writeHelper(agentDir, ["helper-key"]);
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY_HELPER = helperPath;
+    await writeModelCache(agentDir, helperPath);
     const seenAuthHeaders: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
@@ -860,18 +906,23 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "new-key" } }),
+      "utf8",
+    );
 
     await pi.providers[0]?.config.refreshModels?.({
       allowNetwork: true,
-      credential: { type: "api_key", key: "resolved-key" },
+      credential: { type: "api_key", key: "new-key" },
     });
 
-    expect(seenAuthHeaders).toEqual(["Bearer resolved-key", "Bearer resolved-key"]);
+    expect(seenAuthHeaders).toEqual(["Bearer new-key", "Bearer new-key"]);
     expect(await readHelperCount(agentDir)).toBe(0);
     const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
       apiKeyFingerprint: string;
     };
-    expect(cache.apiKeyFingerprint).toBe(fingerprint(`!${helperPath}`));
+    expect(cache.apiKeyFingerprint).toBe(fingerprint("new-key"));
   });
 
   it("cancels provider refresh with Pi's signal", async () => {

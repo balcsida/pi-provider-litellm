@@ -89,21 +89,23 @@ type ProviderState = {
   cacheFetchedAt: number;
   refreshOnStart: boolean;
   liveDiscoveryApiKey?: string;
+  mcpRegistered: boolean;
   refreshInProgress: Promise<ProviderRefreshResult> | null;
 };
 
-function credentialsFromRefresh(state: ProviderState, credential: Credential): ResolvedCredentials {
+async function credentialsFromRefresh(state: ProviderState, credential: Credential): Promise<ResolvedCredentials> {
+  const current = await resolveCredentials(state.definition, { executeHelpers: false });
   const apiKey = credential.type === "oauth" ? credential.access : credential.key;
   const credentialBaseUrl = credential.type === "oauth" ? credential.baseUrl : undefined;
   const fingerprintSource =
-    credential.type === "api_key" && state.creds.apiKeyConfig?.startsWith("!")
-      ? state.creds.apiKeyConfig
+    credential.type === "api_key" && current.apiKeyConfig?.startsWith("!")
+      ? current.apiKeyConfig
       : credential.type === "oauth" && credential.refresh.startsWith("!")
         ? credential.refresh
         : apiKey;
   return {
-    ...state.creds,
-    baseUrl: typeof credentialBaseUrl === "string" ? normalizeBaseUrl(credentialBaseUrl) : state.creds.baseUrl,
+    ...current,
+    baseUrl: typeof credentialBaseUrl === "string" ? normalizeBaseUrl(credentialBaseUrl) : current.baseUrl,
     apiKey,
     apiKeyFingerprint: fingerprintSource ? fingerprint(fingerprintSource) : undefined,
   };
@@ -1008,6 +1010,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cacheFetchedAt,
       refreshOnStart,
       liveDiscoveryApiKey,
+      mcpRegistered: false,
       refreshInProgress: null,
     };
   }
@@ -1042,14 +1045,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       api: "openai-completions",
       headers: escapeHeaderConfig(state.headers),
       models,
-      refreshModels: ({ allowNetwork, force, credential, signal }) => {
+      refreshModels: async ({ allowNetwork, force, credential, signal }) => {
         const cacheIsFresh = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS;
-        if (
-          !allowNetwork ||
-          discoveryDisabledReason() ||
-          (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force)
-        ) {
-          return Promise.resolve(state.models);
+        const supplied = credential ? await credentialsFromRefresh(state, credential) : undefined;
+        const credentialChanged =
+          supplied !== undefined &&
+          (supplied.baseUrl !== state.creds.baseUrl || supplied.apiKeyFingerprint !== state.creds.apiKeyFingerprint);
+        if (!allowNetwork || discoveryDisabledReason()) return Promise.resolve(state.models);
+        if (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force && !credentialChanged) {
+          const registerTools =
+            state.definition.name === PROVIDER_NAME && !state.mcpRegistered
+              ? registerMcpTools(state)
+              : Promise.resolve();
+          return registerTools.then(() => state.models);
         }
         return runRefresh(state, undefined, credential, signal).then((result) => result.models);
       },
@@ -1119,11 +1127,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   async function registerMcpTools(state: ProviderState, onProgress?: ProgressCallback): Promise<void> {
-    if (!mcpEnabled || !state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
+    if (!mcpEnabled || !state.creds.baseUrl || discoveryDisabledReason()) return;
+    const apiKey = state.liveDiscoveryApiKey ?? (await resolveCredentials(state.definition)).apiKey;
+    if (!apiKey) return;
     try {
       const tools = await createMcpToolDefinitions(
         state.creds.baseUrl,
-        seededRuntimeApiKey(state, state.liveDiscoveryApiKey),
+        seededRuntimeApiKey(state, apiKey),
         state.headers,
         isVerboseDiscovery()
           ? (message) =>
@@ -1133,6 +1143,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       for (const tool of tools) {
         pi.registerTool(tool);
       }
+      state.mcpRegistered = true;
     } catch (error) {
       process.stderr.write(
         `LiteLLM (${state.definition.name}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
@@ -1148,7 +1159,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     credential?: Credential,
     signal?: AbortSignal,
   ): Promise<ProviderRefreshResult> {
-    const fresh = credential ? credentialsFromRefresh(state, credential) : await resolveCredentials(state.definition);
+    const fresh = credential
+      ? await credentialsFromRefresh(state, credential)
+      : await resolveCredentials(state.definition);
     const freshFp = fresh.apiKeyFingerprint;
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
       throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
