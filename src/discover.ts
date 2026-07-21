@@ -19,6 +19,7 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
+const MODELS_DEV_CACHE_TTL_MS = 28 * 24 * 60 * 60 * 1000;
 
 interface ModelsDevModel {
   name?: string;
@@ -47,6 +48,7 @@ interface ModelsDevCacheFile {
 }
 
 const modelsDevCaches = new Map<string, ModelsDevCacheFile>();
+const modelsDevRefreshes = new Map<string, Promise<ModelsDevResponse | undefined>>();
 
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
@@ -240,21 +242,26 @@ async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | un
   }
 }
 
-async function fetchAndStoreModelsDevCatalog(
-  key: string,
-  options: DiscoveryOptions,
-): Promise<ModelsDevResponse | undefined> {
-  try {
-    const catalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
-    const cache = { fetchedAt: Date.now(), catalog };
-    modelsDevCaches.set(key, cache);
-    if (options.modelsDevCachePath) {
-      await writeJsonAtomic(options.modelsDevCachePath, cache).catch(() => undefined);
+function refreshModelsDevCatalog(key: string, options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
+  const active = modelsDevRefreshes.get(key);
+  if (active) return active;
+  const refresh = (async () => {
+    try {
+      const catalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
+      const cache = { fetchedAt: Date.now(), catalog };
+      modelsDevCaches.set(key, cache);
+      if (options.modelsDevCachePath) {
+        await writeJsonAtomic(options.modelsDevCachePath, cache).catch(() => undefined);
+      }
+      return catalog;
+    } catch {
+      return undefined;
+    } finally {
+      modelsDevRefreshes.delete(key);
     }
-    return catalog;
-  } catch {
-    return undefined;
-  }
+  })();
+  modelsDevRefreshes.set(key, refresh);
+  return refresh;
 }
 
 async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
@@ -264,8 +271,10 @@ async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDev
     cache = await readModelsDevCache(options.modelsDevCachePath);
     if (cache) modelsDevCaches.set(key, cache);
   }
-  if (cache) return cache.catalog;
-  return fetchAndStoreModelsDevCatalog(key, options);
+  if (!cache) return refreshModelsDevCatalog(key, options);
+  if (Date.now() - cache.fetchedAt < MODELS_DEV_CACHE_TTL_MS) return cache.catalog;
+  void refreshModelsDevCatalog(key, { ...options, signal: undefined });
+  return cache.catalog;
 }
 
 function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<ProviderModelConfig> {

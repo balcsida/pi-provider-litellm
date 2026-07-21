@@ -11,6 +11,14 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 const MODELS_DEV_CATALOG = {
   openai: {
     models: {
@@ -450,6 +458,98 @@ describe("discoverModels fallback to /v1/models", () => {
 
     expect(urls).not.toContain("https://models.dev/api.json");
     expect(result.models[0]?.contextWindow).toBe(1_050_000);
+  });
+
+  it("returns stale metadata while refreshing it in the background", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const staleCatalog = {
+      openai: { models: { "gpt-5.5": { name: "Stale GPT", limit: { context: 200_000 } } } },
+    };
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1, catalog: staleCatalog }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const refresh = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") return refresh.promise;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({ name: "Stale GPT", contextWindow: 200_000 });
+    refresh.resolve(jsonResponse(200, MODELS_DEV_CATALOG));
+    await vi.waitFor(async () => {
+      const cache = JSON.parse(await readFile(cachePath, "utf8"));
+      expect(cache.catalog).toEqual(MODELS_DEV_CATALOG);
+    });
+  });
+
+  it("keeps stale metadata when background refresh fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const stale = { fetchedAt: 1, catalog: MODELS_DEV_CATALOG };
+    await writeFile(cachePath, JSON.stringify(stale), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const modelsDevRequests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests.push(url);
+        return new Response(null, { status: 503 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]?.contextWindow).toBe(1_050_000);
+    await vi.waitFor(() => expect(modelsDevRequests).toHaveLength(1));
+    expect(JSON.parse(await readFile(cachePath, "utf8"))).toEqual(stale);
+  });
+
+  it("deduplicates concurrent stale cache refreshes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1, catalog: MODELS_DEV_CATALOG }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const refresh = deferred<Response>();
+    let refreshes = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        refreshes++;
+        return refresh.promise;
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await Promise.all([
+      discoverModels("https://one.example.com", "sk-test", { modelsDevCachePath: cachePath }),
+      discoverModels("https://two.example.com", "sk-test", { modelsDevCachePath: cachePath }),
+    ]);
+
+    expect(refreshes).toBe(1);
+    refresh.resolve(jsonResponse(200, MODELS_DEV_CATALOG));
+    await vi.waitFor(async () => {
+      expect(JSON.parse(await readFile(cachePath, "utf8")).fetchedAt).toBe(Date.now());
+    });
   });
 
   it("replaces a malformed models.dev cache from the network", async () => {
