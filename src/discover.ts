@@ -254,6 +254,7 @@ async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | un
       typeof parsed.fetchedAt !== "number" ||
       !Number.isFinite(parsed.fetchedAt) ||
       parsed.fetchedAt < 0 ||
+      parsed.fetchedAt > Date.now() ||
       !isRecord(parsed.catalog)
     ) {
       return undefined;
