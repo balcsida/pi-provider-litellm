@@ -43,9 +43,13 @@ function isCacheFileShape(value: unknown): value is CacheFile {
   );
 }
 
-export async function writeCache(path: string, cache: CacheFile): Promise<void> {
+export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, JSON.stringify(cache, null, 2), "utf8");
+  await writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
   await rename(tmp, path);
+}
+
+export async function writeCache(path: string, cache: CacheFile): Promise<void> {
+  await writeJsonAtomic(path, cache);
 }

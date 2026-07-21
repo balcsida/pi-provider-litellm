@@ -1,7 +1,9 @@
+import { readFile } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { writeJsonAtomic } from "./cache.js";
 import type {
   DiscoveryOptions,
   DiscoveryResult,
@@ -17,7 +19,6 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
-let modelsDevCatalog: ModelsDevResponse | undefined;
 
 interface ModelsDevModel {
   name?: string;
@@ -39,6 +40,13 @@ interface ModelsDevModel {
 }
 
 type ModelsDevResponse = Record<string, { models?: Record<string, ModelsDevModel> }>;
+
+interface ModelsDevCacheFile {
+  fetchedAt: number;
+  catalog: ModelsDevResponse;
+}
+
+const modelsDevCaches = new Map<string, ModelsDevCacheFile>();
 
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
@@ -210,14 +218,54 @@ async function fetchPublicJson<T>(url: string, options: DiscoveryOptions): Promi
   return (await response.json()) as T;
 }
 
-async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
-  if (modelsDevCatalog) return modelsDevCatalog;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | undefined> {
   try {
-    modelsDevCatalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
-    return modelsDevCatalog;
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      !isRecord(parsed) ||
+      typeof parsed.fetchedAt !== "number" ||
+      !Number.isFinite(parsed.fetchedAt) ||
+      parsed.fetchedAt < 0 ||
+      !isRecord(parsed.catalog)
+    ) {
+      return undefined;
+    }
+    return { fetchedAt: parsed.fetchedAt, catalog: parsed.catalog as ModelsDevResponse };
   } catch {
     return undefined;
   }
+}
+
+async function fetchAndStoreModelsDevCatalog(
+  key: string,
+  options: DiscoveryOptions,
+): Promise<ModelsDevResponse | undefined> {
+  try {
+    const catalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
+    const cache = { fetchedAt: Date.now(), catalog };
+    modelsDevCaches.set(key, cache);
+    if (options.modelsDevCachePath) {
+      await writeJsonAtomic(options.modelsDevCachePath, cache).catch(() => undefined);
+    }
+    return catalog;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
+  const key = options.modelsDevCachePath ?? MODELS_DEV_URL;
+  let cache = modelsDevCaches.get(key);
+  if (!cache && options.modelsDevCachePath) {
+    cache = await readModelsDevCache(options.modelsDevCachePath);
+    if (cache) modelsDevCaches.set(key, cache);
+  }
+  if (cache) return cache.catalog;
+  return fetchAndStoreModelsDevCatalog(key, options);
 }
 
 function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<ProviderModelConfig> {

@@ -21,6 +21,7 @@ export interface DiscoveryOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   modelsDev?: boolean;
+  modelsDevCachePath?: string;
 }
 
 export interface ModelInfoEntry {
