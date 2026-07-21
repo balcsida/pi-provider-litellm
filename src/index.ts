@@ -1055,7 +1055,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         if (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force && !credentialChanged) {
           const registerTools =
             state.definition.name === PROVIDER_NAME && !state.mcpRegistered
-              ? registerMcpTools(state)
+              ? registerMcpTools(state, undefined, signal, supplied?.apiKey)
               : Promise.resolve();
           return registerTools.then(() => state.models);
         }
@@ -1070,6 +1070,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cachePath: getCachePath(PROVIDER_NAME),
       headers: defaultState.headers,
       onCacheWrite: async (next) => {
+        if (
+          next.baseUrl !== defaultState.creds.baseUrl ||
+          next.apiKeyFingerprint !== defaultState.creds.apiKeyFingerprint
+        ) {
+          defaultState.mcpRegistered = false;
+          defaultState.liveDiscoveryApiKey = undefined;
+        }
         defaultState.cacheFetchedAt = next.fetchedAt;
         const overridden = await applyOverrides(PROVIDER_NAME, next.models);
         defaultState.models = overridden;
@@ -1126,11 +1133,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     };
   }
 
-  async function registerMcpTools(state: ProviderState, onProgress?: ProgressCallback): Promise<void> {
+  async function registerMcpTools(
+    state: ProviderState,
+    onProgress?: ProgressCallback,
+    signal?: AbortSignal,
+    suppliedApiKey?: string,
+  ): Promise<void> {
     if (!mcpEnabled || !state.creds.baseUrl || discoveryDisabledReason()) return;
-    const apiKey = state.liveDiscoveryApiKey ?? (await resolveCredentials(state.definition)).apiKey;
-    if (!apiKey) return;
     try {
+      signal?.throwIfAborted();
+      state.mcpRegistered = true;
+      const apiKey = suppliedApiKey ?? state.liveDiscoveryApiKey ?? (await resolveCredentials(state.definition)).apiKey;
+      if (!apiKey) {
+        state.mcpRegistered = false;
+        return;
+      }
       const tools = await createMcpToolDefinitions(
         state.creds.baseUrl,
         seededRuntimeApiKey(state, apiKey),
@@ -1139,12 +1156,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           ? (message) =>
               onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`)
           : undefined,
+        signal,
       );
+      signal?.throwIfAborted();
       for (const tool of tools) {
         pi.registerTool(tool);
       }
-      state.mcpRegistered = true;
     } catch (error) {
+      state.mcpRegistered = false;
+      if (signal?.aborted) throw signal.reason;
       process.stderr.write(
         `LiteLLM (${state.definition.name}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
       );
@@ -1194,7 +1214,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     state.refreshOnStart = false;
     registerProvider(state, overridden, fresh.apiKeyConfig);
     updateAllCosts();
-    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress);
+    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress, signal);
     return { providerName: state.definition.name, models: overridden, source: result.source };
   }
 

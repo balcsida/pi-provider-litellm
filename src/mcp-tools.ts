@@ -28,12 +28,18 @@ interface RawLiteLLMMcpTool {
   };
 }
 
-function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
+function withTimeout(timeoutMs: number, parentSignal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+  const abort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) abort();
+  else parentSignal?.addEventListener("abort", abort, { once: true });
   return {
     signal: controller.signal,
-    cancel: () => clearTimeout(timer),
+    cancel: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abort);
+    },
   };
 }
 
@@ -88,9 +94,10 @@ export async function discoverMcpTools(
   apiKey: string,
   headers?: Record<string, string>,
   onProgress?: (message: string) => void,
+  parentSignal?: AbortSignal,
 ): Promise<LiteLLMMcpTool[]> {
   onProgress?.("Discovering MCP tools from server...");
-  const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS);
+  const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS, parentSignal);
   try {
     onProgress?.("Querying MCP tools/list endpoint...");
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/list`, {
@@ -103,7 +110,7 @@ export async function discoverMcpTools(
     });
     if (!response.ok) {
       onProgress?.(`MCP tools discovery failed with status ${response.status}`);
-      return [];
+      throw new Error(`HTTP ${response.status}`);
     }
     const body = (await response.json()) as unknown;
     const bodyRecord = asRecord(body);
@@ -112,9 +119,9 @@ export async function discoverMcpTools(
     const tools = rawTools.map(normalizeMcpTool).filter((tool): tool is LiteLLMMcpTool => tool !== undefined);
     onProgress?.(`Successfully discovered ${tools.length} MCP tools`);
     return tools;
-  } catch {
+  } catch (error) {
     onProgress?.("MCP tools discovery encountered an error");
-    return [];
+    throw error;
   } finally {
     cancel();
   }
@@ -216,9 +223,10 @@ export async function createMcpToolDefinitions(
   getApiKey: () => Promise<string>,
   headers?: Record<string, string>,
   onProgress?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolDefinition[]> {
   const discoveryApiKey = await getApiKey();
-  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, headers, onProgress);
+  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, headers, onProgress, signal);
 
   return tools.map((mcpTool) => {
     const safeServer = sanitizeName(mcpTool.server_name);

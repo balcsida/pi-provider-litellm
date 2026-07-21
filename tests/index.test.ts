@@ -344,6 +344,192 @@ describe("extension startup", () => {
     expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
   });
 
+  it("retries MCP discovery after a cached-path failure", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        }),
+      );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
+  });
+
+  it("retries MCP discovery after a forced-refresh failure", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    let mcpAttempts = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "refreshed-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        mcpAttempts += 1;
+        if (mcpAttempts === 2) throw new Error("offline");
+        return jsonResponse(200, { tools: [] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, force: true });
+    await pi.providers.at(-1)?.config.refreshModels?.({ allowNetwork: true });
+
+    expect(mcpAttempts).toBe(3);
+  });
+
+  it("shares cached MCP registration across concurrent refreshes", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requestedUrls.push(String(input));
+      return jsonResponse(200, {
+        tools: [
+          {
+            name: "search",
+            description: "Search the web",
+            inputSchema: { type: "object", properties: {} },
+            mcp_info: { server_name: "brave", server_id: "brave-api" },
+          },
+        ],
+      });
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await Promise.all([
+      pi.providers[0]?.config.refreshModels?.({ allowNetwork: true }),
+      pi.providers[0]?.config.refreshModels?.({ allowNetwork: true }),
+    ]);
+
+    expect(requestedUrls).toEqual(["https://litellm.example.com/mcp-rest/tools/list"]);
+    expect(pi.tools.filter((tool) => tool.name === "mcp_brave_search")).toHaveLength(1);
+  });
+
+  it("keeps cached models when the MCP credential helper fails", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeFailingHelper(agentDir);
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    await writeModelCache(agentDir, helperPath);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+
+    expect(models).toEqual(cachedModels);
+    expect(await readHelperCount(agentDir)).toBe(1);
+  });
+
+  it("cancels cached MCP discovery without registering tools", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://litellm.example.com",
+        apiKeyFingerprint: fingerprint("env-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    let resolveDiscovery: ((response: Response) => void) | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((resolve, reject) => {
+          resolveDiscovery = resolve;
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        }),
+    );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const controller = new AbortController();
+
+    const refresh = pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, signal: controller.signal });
+    await vi.waitFor(() => expect(resolveDiscovery).toBeDefined());
+    controller.abort(new Error("refresh cancelled"));
+    resolveDiscovery?.(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "search",
+            description: "Search the web",
+            inputSchema: { type: "object", properties: {} },
+            mcp_info: { server_name: "brave", server_id: "brave-api" },
+          },
+        ],
+      }),
+    );
+
+    await expect(refresh).rejects.toThrow("refresh cancelled");
+    expect(pi.tools.map((tool) => tool.name)).not.toContain("mcp_brave_search");
+  });
+
   it("delivers session refresh progress through the TUI", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
@@ -1268,6 +1454,60 @@ describe("extension startup", () => {
     expect(pi.providers).toHaveLength(2);
     expect(pi.providers[1]?.config.baseUrl).toBe("http://127.0.0.1:4000/v1");
     expect(registeredModels?.map((model) => model.id)).toEqual(["vidaimock-openai"]);
+  });
+
+  it("discovers MCP tools again after login changes credentials", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://old.example.com";
+    process.env.LITELLM_API_KEY = "old-key";
+    await writeFile(
+      join(agentDir, "litellm-models.json"),
+      JSON.stringify({
+        baseUrl: "https://old.example.com",
+        apiKeyFingerprint: fingerprint("old-key"),
+        fetchedAt: Date.now(),
+        source: "model_info",
+        models: cachedModels,
+      }),
+      "utf8",
+    );
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url === "https://new.example.com/model/info") {
+        return jsonResponse(200, { data: [{ model_name: "new-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        const server = url.startsWith("https://new.example.com") ? "new" : "old";
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: server, server_id: `${server}-api` },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+
+    const credential = await pi.providers[0]?.config.oauth?.login({
+      onPrompt: async (options) => (options.placeholder ? "https://new.example.com" : "new-key"),
+      signal: new AbortController().signal,
+    });
+    const storedCredential = { type: "oauth" as const, ...credential! };
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: storedCredential }), "utf8");
+    await pi.providers.at(-1)?.config.refreshModels?.({ allowNetwork: true, credential: storedCredential });
+
+    expect(requestedUrls).toContain("https://new.example.com/mcp-rest/tools/list");
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_new_search");
   });
 
   it("leaves /login litellm to Pi's registered OAuth provider", async () => {
