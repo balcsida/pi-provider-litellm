@@ -390,8 +390,11 @@ export async function discoverModels(
     }
     throw new Error(`/v1/models returned ${listResult.status}`);
   }
-  progress?.("Fetching models.dev catalog for metadata enrichment...");
-  const modelsDev = await getModelsDevCatalog(options);
+  let modelsDev: ModelsDevResponse | undefined;
+  if (options.modelsDev !== false) {
+    progress?.("Loading models.dev catalog for metadata enrichment...");
+    modelsDev = await getModelsDevCatalog(options);
+  }
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
     .filter((m): m is ProviderModelConfig => m !== undefined);

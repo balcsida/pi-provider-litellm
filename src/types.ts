@@ -20,6 +20,7 @@ export interface DiscoveryOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  modelsDev?: boolean;
 }
 
 export interface ModelInfoEntry {

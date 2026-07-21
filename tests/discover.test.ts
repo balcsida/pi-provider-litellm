@@ -361,6 +361,32 @@ describe("discoverModels fallback to /v1/models", () => {
     });
   }
 
+  it("skips models.dev enrichment when disabled", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [{ id: "gpt-5.5", object: "model", owned_by: "openai" }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+    });
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      contextWindow: 272000,
+    });
+  });
+
   it("uses Pi catalog metadata when models.dev is unavailable", async () => {
     const urls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
