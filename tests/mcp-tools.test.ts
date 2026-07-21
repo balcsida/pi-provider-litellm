@@ -80,10 +80,10 @@ describe("discoverMcpTools", () => {
     );
   });
 
-  it("returns an empty list when discovery fails", async () => {
+  it("rejects when discovery fails", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
 
-    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).resolves.toEqual([]);
+    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).rejects.toThrow("offline");
   });
 });
 

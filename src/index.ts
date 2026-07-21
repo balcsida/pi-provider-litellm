@@ -39,6 +39,7 @@ const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
+const ENV_VERBOSE_DISCOVERY = "LITELLM_VERBOSE_DISCOVERY";
 const DEFAULT_TIMEOUT_MS = 5000;
 const LOGIN_TIMEOUT_MS = 10_000;
 const CACHE_FILENAME = "litellm-models.json";
@@ -88,21 +89,23 @@ type ProviderState = {
   cacheFetchedAt: number;
   refreshOnStart: boolean;
   liveDiscoveryApiKey?: string;
+  mcpRegistered: boolean;
   refreshInProgress: Promise<ProviderRefreshResult> | null;
 };
 
-function credentialsFromRefresh(state: ProviderState, credential: Credential): ResolvedCredentials {
+async function credentialsFromRefresh(state: ProviderState, credential: Credential): Promise<ResolvedCredentials> {
+  const current = await resolveCredentials(state.definition, { executeHelpers: false });
   const apiKey = credential.type === "oauth" ? credential.access : credential.key;
   const credentialBaseUrl = credential.type === "oauth" ? credential.baseUrl : undefined;
   const fingerprintSource =
-    credential.type === "api_key" && state.creds.apiKeyConfig?.startsWith("!")
-      ? state.creds.apiKeyConfig
+    credential.type === "api_key" && current.apiKeyConfig?.startsWith("!")
+      ? current.apiKeyConfig
       : credential.type === "oauth" && credential.refresh.startsWith("!")
         ? credential.refresh
         : apiKey;
   return {
-    ...state.creds,
-    baseUrl: typeof credentialBaseUrl === "string" ? normalizeBaseUrl(credentialBaseUrl) : state.creds.baseUrl,
+    ...current,
+    baseUrl: typeof credentialBaseUrl === "string" ? normalizeBaseUrl(credentialBaseUrl) : current.baseUrl,
     apiKey,
     apiKeyFingerprint: fingerprintSource ? fingerprint(fingerprintSource) : undefined,
   };
@@ -563,6 +566,10 @@ function isOffline(): boolean {
   return process.env[ENV_OFFLINE] === "1";
 }
 
+function isVerboseDiscovery(): boolean {
+  return process.env[ENV_VERBOSE_DISCOVERY] === "1";
+}
+
 function isListModelsMode(): boolean {
   return process.argv.includes("--list-models");
 }
@@ -625,7 +632,7 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
 async function discoverWithFallback(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void },
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean },
 ): Promise<{ result: DiscoveryResult; warning?: string }> {
   try {
     return { result: await discoverModels(baseUrl, apiKey, options) };
@@ -717,6 +724,7 @@ async function loginLiteLLM(
     timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
     headers: options.headers,
+    silent: !isVerboseDiscovery(),
     onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
   });
 
@@ -730,7 +738,9 @@ async function loginLiteLLM(
   };
   await writeCache(options.cachePath, cache);
   await options.onCacheWrite?.(cache);
-  callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
+  if (isVerboseDiscovery()) {
+    callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
+  }
 
   return {
     access: apiKey,
@@ -955,6 +965,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
         timeoutMs,
         headers,
+        silent: !isVerboseDiscovery(),
         onProgress: (message) => process.stderr.write(`LiteLLM: ${message}\n`),
       });
       if (warning) {
@@ -999,6 +1010,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cacheFetchedAt,
       refreshOnStart,
       liveDiscoveryApiKey,
+      mcpRegistered: false,
       refreshInProgress: null,
     };
   }
@@ -1033,10 +1045,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       api: "openai-completions",
       headers: escapeHeaderConfig(state.headers),
       models,
-      refreshModels: ({ allowNetwork, credential, signal }) =>
-        allowNetwork && !discoveryDisabledReason()
-          ? runRefresh(state, undefined, credential, signal).then((result) => result.models)
-          : Promise.resolve(state.models),
+      refreshModels: async ({ allowNetwork, force, credential, signal }) => {
+        const cacheIsFresh = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS;
+        const supplied = credential ? await credentialsFromRefresh(state, credential) : undefined;
+        const credentialChanged =
+          supplied !== undefined &&
+          (supplied.baseUrl !== state.creds.baseUrl || supplied.apiKeyFingerprint !== state.creds.apiKeyFingerprint);
+        if (!allowNetwork || discoveryDisabledReason()) return Promise.resolve(state.models);
+        if (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force && !credentialChanged) {
+          const registerTools =
+            state.definition.name === PROVIDER_NAME && !state.mcpRegistered
+              ? registerMcpTools(state, undefined, signal, supplied?.apiKey)
+              : Promise.resolve();
+          return registerTools.then(() => state.models);
+        }
+        return runRefresh(state, undefined, credential, signal).then((result) => result.models);
+      },
       oauth: definition.enableOAuth ? oauth : undefined,
     });
   }
@@ -1046,6 +1070,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cachePath: getCachePath(PROVIDER_NAME),
       headers: defaultState.headers,
       onCacheWrite: async (next) => {
+        if (
+          next.baseUrl !== defaultState.creds.baseUrl ||
+          next.apiKeyFingerprint !== defaultState.creds.apiKeyFingerprint
+        ) {
+          defaultState.mcpRegistered = false;
+          defaultState.liveDiscoveryApiKey = undefined;
+        }
         defaultState.cacheFetchedAt = next.fetchedAt;
         const overridden = await applyOverrides(PROVIDER_NAME, next.models);
         defaultState.models = overridden;
@@ -1102,20 +1133,38 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     };
   }
 
-  async function registerMcpTools(state: ProviderState, onProgress?: ProgressCallback): Promise<void> {
-    if (!mcpEnabled || !state.creds.baseUrl || !state.liveDiscoveryApiKey || discoveryDisabledReason()) return;
+  async function registerMcpTools(
+    state: ProviderState,
+    onProgress?: ProgressCallback,
+    signal?: AbortSignal,
+    suppliedApiKey?: string,
+  ): Promise<void> {
+    if (!mcpEnabled || !state.creds.baseUrl || discoveryDisabledReason()) return;
     try {
+      signal?.throwIfAborted();
+      state.mcpRegistered = true;
+      const apiKey = suppliedApiKey ?? state.liveDiscoveryApiKey ?? (await resolveCredentials(state.definition)).apiKey;
+      if (!apiKey) {
+        state.mcpRegistered = false;
+        return;
+      }
       const tools = await createMcpToolDefinitions(
         state.creds.baseUrl,
-        seededRuntimeApiKey(state, state.liveDiscoveryApiKey),
+        seededRuntimeApiKey(state, apiKey),
         state.headers,
-        (message) =>
-          onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`),
+        isVerboseDiscovery()
+          ? (message) =>
+              onProgress ? onProgress(`LiteLLM MCP: ${message}`) : process.stderr.write(`LiteLLM MCP: ${message}\n`)
+          : undefined,
+        signal,
       );
+      signal?.throwIfAborted();
       for (const tool of tools) {
         pi.registerTool(tool);
       }
     } catch (error) {
+      state.mcpRegistered = false;
+      if (signal?.aborted) throw signal.reason;
       process.stderr.write(
         `LiteLLM (${state.definition.name}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
       );
@@ -1130,7 +1179,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     credential?: Credential,
     signal?: AbortSignal,
   ): Promise<ProviderRefreshResult> {
-    const fresh = credential ? credentialsFromRefresh(state, credential) : await resolveCredentials(state.definition);
+    const fresh = credential
+      ? await credentialsFromRefresh(state, credential)
+      : await resolveCredentials(state.definition);
     const freshFp = fresh.apiKeyFingerprint;
     if (!fresh.baseUrl || !fresh.apiKey || !freshFp) {
       throw new Error(`no credentials for ${state.definition.name}. Run /login litellm or set env vars.`);
@@ -1142,6 +1193,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       timeoutMs: getDiscoveryTimeoutMs(),
       signal,
       headers: state.headers,
+      silent: !isVerboseDiscovery(),
       onProgress: progress,
     });
     signal?.throwIfAborted();
@@ -1162,7 +1214,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     state.refreshOnStart = false;
     registerProvider(state, overridden, fresh.apiKeyConfig);
     updateAllCosts();
-    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress);
+    if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress, signal);
     return { providerName: state.definition.name, models: overridden, source: result.source };
   }
 
@@ -1195,7 +1247,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return;
       }
       const settled = await Promise.allSettled(
-        statesToRefresh.map((state) => runRefresh(state, (message) => ctx.ui.notify(message, "info"))),
+        statesToRefresh.map((state) =>
+          runRefresh(
+            state,
+            isVerboseDiscovery()
+              ? ctx.ui?.notify
+                ? (message) => ctx.ui.notify(message, "info")
+                : undefined
+              : undefined,
+          ),
+        ),
       );
       const succeeded = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
       const failed = settled
@@ -1241,7 +1302,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     for (const state of providerStates) {
       const cacheIsStale = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt > CACHE_STALE_MS;
       if (!state.refreshOnStart && !cacheIsStale) continue;
-      const progress = ctx.ui?.notify ? (message: string) => ctx.ui.notify(message, "info") : undefined;
+      const progress =
+        isVerboseDiscovery() && ctx.ui?.notify ? (message: string) => ctx.ui.notify(message, "info") : undefined;
       void runRefresh(state, progress).catch(() => undefined);
     }
   });
