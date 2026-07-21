@@ -436,6 +436,50 @@ describe("discoverModels fallback to /v1/models", () => {
     });
   });
 
+  it("lets initial cache-miss callers abort independently", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const first = new AbortController();
+    const later = new AbortController();
+    const third = new AbortController();
+    let modelsDevRequests = 0;
+    let resolveModelsDev!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests++;
+        return new Promise<Response>((resolve, reject) => {
+          resolveModelsDev = resolve;
+          const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const discover = (signal: AbortSignal) =>
+      discoverModels("https://litellm.example.com", "sk-test", { modelsDevCachePath: cachePath, signal });
+    const firstResult = discover(first.signal);
+    const laterResult = discover(later.signal);
+    const thirdResult = discover(third.signal);
+
+    await vi.waitFor(() => expect(modelsDevRequests).toBe(1));
+    first.abort(new Error("first aborted"));
+    later.abort(new Error("later aborted"));
+    await expect(firstResult).rejects.toThrow("first aborted");
+    await expect(laterResult).rejects.toThrow("later aborted");
+    resolveModelsDev(jsonResponse(200, MODELS_DEV_CATALOG));
+
+    await expect(thirdResult).resolves.toMatchObject({
+      models: [{ id: "gpt-5.5", contextWindow: 1_050_000 }],
+    });
+    expect(modelsDevRequests).toBe(1);
+  });
+
   it("uses a fresh persistent models.dev cache without fetching", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     const cachePath = join(dir, "litellm-models-dev.json");
