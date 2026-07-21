@@ -146,7 +146,7 @@ describe("extension startup", () => {
     await startSession(pi);
 
     expect(urls).not.toContain("https://models.dev/api.json");
-    expect((pi.providers.at(-1)?.config.models as Array<{ id: string }>)[0]?.id).toBe("gpt-5.5");
+    expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("gpt-5.5");
   });
 
   it("uses mismatched cached models until session-start refresh", async () => {
