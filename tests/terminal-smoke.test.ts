@@ -48,15 +48,19 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
   }
 }
 
-async function submit(session: Session, text: string): Promise<void> {
+async function submit(session: Session, text: string, autocompleteText?: string): Promise<void> {
   await session.keyboard.type(text);
   if (text.startsWith("/")) {
     await session.screen.waitForText(text, { timeoutMs: waitTimeoutMs });
   }
+  if (autocompleteText) {
+    await session.screen.waitForText(autocompleteText, { timeoutMs: waitTimeoutMs });
+    await session.keyboard.press("Escape");
+  }
   await session.keyboard.press("Enter");
 }
 
-it("waits for command echo without inspecting form values", async () => {
+it("dismisses command autocomplete without inspecting form values", async () => {
   const calls: unknown[] = [];
   const session = {
     keyboard: {
@@ -69,10 +73,18 @@ it("waits for command echo without inspecting form values", async () => {
     },
   } as unknown as Session;
 
-  await submit(session, "/login litellm");
+  await submit(session, "/login litellm", "LiteLLM · subscription/API key");
   await submit(session, "sk-ci-litellm-smoke");
 
-  expect(calls).toEqual(["type", ["waitForText", "/login litellm", { timeoutMs: 90_000 }], "Enter", "type", "Enter"]);
+  expect(calls).toEqual([
+    "type",
+    ["waitForText", "/login litellm", { timeoutMs: 90_000 }],
+    ["waitForText", "LiteLLM · subscription/API key", { timeoutMs: 90_000 }],
+    "Escape",
+    "Enter",
+    "type",
+    "Enter",
+  ]);
 });
 
 async function waitForInitialModel(session: Session): Promise<void> {
@@ -99,7 +111,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
       await withPi(async (session) => {
         await waitForInitialModel(session);
 
-        await submit(session, "/login litellm");
+        await submit(session, "/login litellm", "LiteLLM · subscription/API key");
         await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
         await session.keyboard.press("Enter");
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });

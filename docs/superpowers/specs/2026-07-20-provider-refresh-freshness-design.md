@@ -28,8 +28,8 @@ repository check, a clean build, and an interactive Pi startup smoke test.
 
 ## CI Follow-up: Terminal Editor Readiness
 
-The first PR smoke run lost `/login litellm` after the model name became
-visible but before Pi's editor accepted input; the unchanged rerun completed in
-about nine seconds. Keep the 90-second failure bound and synchronize visible
-slash commands by waiting for their exact editor echo before pressing Enter.
-Do not apply the echo check to prompt values because credentials may be masked.
+Pi's asynchronous provider autocomplete can consume Enter to accept `litellm`
+without submitting `/login litellm`. Keep the 90-second failure bound, wait for
+the exact command and LiteLLM provider suggestion, then dismiss autocomplete
+with Escape before pressing Enter. Do not apply visible-text checks to prompt
+values because credentials may be masked.

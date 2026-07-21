@@ -73,26 +73,27 @@ Stage `src/index.ts` and `tests/index.test.ts`, then create the signed commit:
 
 **Interfaces:**
 - Consumes: `Session.keyboard.type`, `Session.screen.waitForText`, and `Session.keyboard.press`.
-- Produces: `submit(session, text)` with editor-echo synchronization for slash commands only.
+- Produces: `submit(session, text, autocompleteText?)` with editor-echo synchronization and explicit autocomplete dismissal.
 
 - [ ] **Step 1: Write the failing regression test**
 
 Add one enabled test with a structural fake `Session`. Record calls while
-submitting `/login litellm` and a masked value. Expect the command order to be
-`type`, `waitForText`, `Enter`, and expect the masked value to skip the screen
-check.
+submitting `/login litellm` and a masked value. Expect the login order to be
+`type`, exact-command wait, provider-suggestion wait, `Escape`, `Enter`, and
+expect the masked value to skip screen checks.
 
 - [ ] **Step 2: Run the focused test to verify it fails**
 
-Run: `npm test -- tests/terminal-smoke.test.ts -t "waits for command echo without inspecting form values"`
+Run: `npm test -- tests/terminal-smoke.test.ts -t "dismisses command autocomplete without inspecting form values"`
 
-Expected: FAIL because `submit` presses Enter without waiting for the command
-to appear.
+Expected: FAIL because `submit` does not dismiss provider autocomplete before
+pressing Enter.
 
 - [ ] **Step 3: Implement the minimal synchronization**
 
-After typing, call `session.screen.waitForText(text, { timeoutMs: waitTimeoutMs })`
-only when `text.startsWith("/")`, then press Enter as before.
+After typing a slash command, wait for its exact echo. For `/login litellm`,
+also wait for `LiteLLM · subscription/API key`, press Escape to dismiss the
+active provider autocomplete, then press Enter.
 
 - [ ] **Step 4: Verify focused and repository checks**
 
