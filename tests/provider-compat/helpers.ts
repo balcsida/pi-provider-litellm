@@ -1,15 +1,11 @@
-import type {
-  Api,
-  Model,
-  Provider,
-  ProviderModelsStore,
-  SimpleStreamOptions,
-  StreamOptions,
-} from "@earendil-works/pi-ai";
+import type { Api, AuthContext, Model, Models, Provider } from "@earendil-works/pi-ai";
+import { createModels, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { afterEach, vi } from "vitest";
 
 export const RED_CIRCLE_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nLkAAAAASUVORK5CYII=";
+export const SECOND_PIXEL_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 type Chunk = { data: unknown; delay: number };
 type RequestBody = { messages: Array<{ role: string; content: unknown }>; [key: string]: unknown };
@@ -20,17 +16,17 @@ export function sseChunk(data: unknown, delay = 0): Chunk {
 
 export async function createCompatibilityHarness(): Promise<{
   provider: Provider;
+  models: Models;
   model: Model<Api>;
   requests: RequestBody[];
   respond: (...chunks: Chunk[]) => void;
 }> {
-  vi.resetModules();
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
     defineTool: (tool: unknown) => tool,
     getAgentDir: () => "/tmp/pi-provider-litellm-compat",
   }));
-  process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-  process.env.LITELLM_API_KEY = "sk-test";
+  vi.stubEnv("LITELLM_BASE_URL", "https://litellm.example.com");
+  vi.stubEnv("LITELLM_API_KEY", "sk-test");
 
   const requests: RequestBody[] = [];
   const responses: Chunk[][] = [];
@@ -86,50 +82,29 @@ export async function createCompatibilityHarness(): Promise<{
   } as never);
   const provider = providers[0];
   if (!provider?.refreshModels) throw new Error("LiteLLM provider was not registered");
-  const store: ProviderModelsStore = {
-    read: async () => undefined,
-    write: async () => undefined,
-    delete: async () => undefined,
-  };
   const credential = {
     type: "api_key" as const,
     key: "sk-test",
     env: { LITELLM_BASE_URL: "https://litellm.example.com" },
   };
-  await provider.refreshModels({ allowNetwork: true, credential, store });
-  const model = provider.getModels()[0];
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify(provider.id, async () => credential);
+  const authContext: AuthContext = {
+    env: async (name) => process.env[name],
+    fileExists: async () => false,
+  };
+  const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+  models.setProvider(provider);
+  const refresh = await models.refresh({ allowNetwork: true });
+  const refreshError = refresh.errors.get(provider.id);
+  if (refreshError) throw refreshError;
+  const model = models.getModel(provider.id, "local-model");
   if (!model) throw new Error("LiteLLM model was not discovered");
-  const auth = await provider.auth.apiKey?.resolve({
-    credential,
-    ctx: { env: async (name) => process.env[name], fileExists: async () => false },
-  });
-  if (!auth?.auth.apiKey) throw new Error("LiteLLM auth was not resolved");
-  const requestModel = { ...model, baseUrl: auth.auth.baseUrl ?? model.baseUrl };
-  const stream = provider.stream.bind(provider);
-  const streamSimple = provider.streamSimple.bind(provider);
-  provider.stream = ((_: Model<Api>, context: Parameters<Provider["stream"]>[1], options?: StreamOptions) =>
-    stream(requestModel, context, {
-      ...options,
-      apiKey: auth.auth.apiKey,
-      headers: auth.auth.headers,
-    })) as Provider["stream"];
-  provider.streamSimple = ((
-    _: Model<Api>,
-    context: Parameters<Provider["streamSimple"]>[1],
-    options?: SimpleStreamOptions,
-  ) =>
-    streamSimple(requestModel, context, {
-      ...options,
-      apiKey: auth.auth.apiKey,
-      headers: auth.auth.headers,
-    })) as Provider["streamSimple"];
 
-  return { provider, model, requests, respond };
+  return { provider, models, model, requests, respond };
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.resetModules();
-  delete process.env.LITELLM_BASE_URL;
-  delete process.env.LITELLM_API_KEY;
+  vi.unstubAllEnvs();
 });

@@ -6,14 +6,14 @@ const user = (content: string) => ({ role: "user" as const, content, timestamp: 
 
 describe("native provider stream compatibility", () => {
   it("completes two text turns with usage", async () => {
-    const { provider, model, respond } = await createCompatibilityHarness();
+    const { models, model, respond } = await createCompatibilityHarness();
     const context: Context = { messages: [user("First")] };
     respond(
       sseChunk({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
       sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } }),
     );
 
-    const first = await provider.streamSimple(model, context).result();
+    const first = await models.streamSimple(model, context).result();
     expect(first.content).toEqual([{ type: "text", text: "Hello" }]);
     expect(first.usage.input).toBeGreaterThan(0);
     expect(first.usage.output).toBeGreaterThan(0);
@@ -23,24 +23,30 @@ describe("native provider stream compatibility", () => {
       sseChunk({ choices: [{ delta: { content: "Again" }, finish_reason: null }] }),
       sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 1 } }),
     );
-    expect((await provider.streamSimple(model, context).result()).content).toEqual([{ type: "text", text: "Again" }]);
+    const second = await models.streamSimple(model, context).result();
+    expect(second.content).toEqual([{ type: "text", text: "Again" }]);
+    expect(second.usage.input).toBeGreaterThan(0);
+    expect(second.usage.output).toBeGreaterThan(0);
   });
 
   it("emits text start, delta, and end events", async () => {
-    const { provider, model, respond } = await createCompatibilityHarness();
+    const { models, model, respond } = await createCompatibilityHarness();
     respond(
       sseChunk({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
       sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
     );
 
-    const types: string[] = [];
-    for await (const event of provider.streamSimple(model, { messages: [user("Hi")] })) types.push(event.type);
+    const events: Array<{ type: string; delta?: string }> = [];
+    for await (const event of models.streamSimple(model, { messages: [user("Hi")] })) {
+      if (event.type === "text_delta") events.push({ type: event.type, delta: event.delta });
+      else if (event.type === "text_start" || event.type === "text_end") events.push({ type: event.type });
+    }
 
-    expect(types).toEqual(expect.arrayContaining(["text_start", "text_delta", "text_end"]));
+    expect(events).toEqual([{ type: "text_start" }, { type: "text_delta", delta: "Hello" }, { type: "text_end" }]);
   });
 
   it("assembles tool-call argument deltas", async () => {
-    const { provider, model, respond } = await createCompatibilityHarness();
+    const { models, model, respond } = await createCompatibilityHarness();
     respond(
       sseChunk({
         choices: [
@@ -61,7 +67,7 @@ describe("native provider stream compatibility", () => {
       }),
     );
 
-    const message = await provider
+    const message = await models
       .streamSimple(model, {
         messages: [user("Add")],
         tools: [
@@ -74,7 +80,7 @@ describe("native provider stream compatibility", () => {
   });
 
   it("handles thinking and a tool result across turns", async () => {
-    const { provider, model, requests, respond } = await createCompatibilityHarness();
+    const { models, model, requests, respond } = await createCompatibilityHarness();
     const context: Context = { messages: [user("Calculate")], tools: [] };
     respond(
       sseChunk({ choices: [{ delta: { reasoning_content: "714" }, finish_reason: null }] }),
@@ -90,7 +96,7 @@ describe("native provider stream compatibility", () => {
         usage: { prompt_tokens: 2, completion_tokens: 2 },
       }),
     );
-    const first = await provider.streamSimple(model, context, { reasoning: "high" }).result();
+    const first = await models.streamSimple(model, context, { reasoning: "high" }).result();
     expect(first.content).toContainEqual(expect.objectContaining({ type: "thinking", thinking: "714" }));
 
     context.messages.push(first, {
@@ -105,14 +111,14 @@ describe("native provider stream compatibility", () => {
       sseChunk({ choices: [{ delta: { content: "887" }, finish_reason: null }] }),
       sseChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 4, completion_tokens: 1 } }),
     );
-    const second = await provider.streamSimple(model, context).result();
+    const second = await models.streamSimple(model, context).result();
 
     expect(second.content).toContainEqual({ type: "text", text: "887" });
     expect(requests.at(-1)?.messages).toContainEqual(expect.objectContaining({ role: "tool", content: "887" }));
   });
 
   it("serializes image input", async () => {
-    const { provider, model, requests, respond } = await createCompatibilityHarness();
+    const { models, model, requests, respond } = await createCompatibilityHarness();
     respond(
       sseChunk({
         choices: [{ delta: { content: "red" }, finish_reason: "stop" }],
@@ -120,7 +126,7 @@ describe("native provider stream compatibility", () => {
       }),
     );
 
-    await provider
+    await models
       .streamSimple(model, {
         messages: [
           { role: "user", content: [{ type: "image", data: RED_CIRCLE_PNG, mimeType: "image/png" }], timestamp: 1 },

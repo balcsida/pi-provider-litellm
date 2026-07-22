@@ -1,8 +1,8 @@
 import { expect, it } from "vitest";
-import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk } from "./helpers.js";
+import { createCompatibilityHarness, RED_CIRCLE_PNG, SECOND_PIXEL_PNG, sseChunk } from "./helpers.js";
 
 it("preserves multiple image inputs within the model contract", async () => {
-  const { provider, model, requests, respond } = await createCompatibilityHarness();
+  const { models, model, requests, respond } = await createCompatibilityHarness();
   respond(
     sseChunk({
       choices: [{ delta: { content: "two" }, finish_reason: "stop" }],
@@ -10,14 +10,14 @@ it("preserves multiple image inputs within the model contract", async () => {
     }),
   );
 
-  await provider
+  await models
     .streamSimple(model, {
       messages: [
         {
           role: "user",
           content: [
             { type: "image", data: RED_CIRCLE_PNG, mimeType: "image/png" },
-            { type: "image", data: RED_CIRCLE_PNG, mimeType: "image/png" },
+            { type: "image", data: SECOND_PIXEL_PNG, mimeType: "image/png" },
           ],
           timestamp: 1,
         },
@@ -25,6 +25,8 @@ it("preserves multiple image inputs within the model contract", async () => {
     })
     .result();
 
-  const content = requests[0]?.messages[0]?.content;
-  expect(Array.isArray(content) ? content.filter((part) => part.type === "image_url") : []).toHaveLength(2);
+  expect(requests[0]?.messages[0]?.content).toEqual([
+    { type: "image_url", image_url: { url: `data:image/png;base64,${RED_CIRCLE_PNG}` } },
+    { type: "image_url", image_url: { url: `data:image/png;base64,${SECOND_PIXEL_PNG}` } },
+  ]);
 });
