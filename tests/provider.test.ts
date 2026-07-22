@@ -10,6 +10,14 @@ import { describe, expect, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult } from "../src/types.js";
 
+const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
+vi.mock("@earendil-works/pi-ai/api/openai-completions.lazy", () => ({
+  openAICompletionsApi: () => ({ stream: apiSpies.completions, streamSimple: apiSpies.completions }),
+}));
+vi.mock("@earendil-works/pi-ai/api/openai-responses.lazy", () => ({
+  openAIResponsesApi: () => ({ stream: apiSpies.responses, streamSimple: apiSpies.responses }),
+}));
+
 const credential: Credential = { type: "api_key", key: "secret" };
 const auth: ProviderAuth = {
   apiKey: { name: "API key", resolve: async () => ({ auth: { apiKey: "secret" } }) },
@@ -30,7 +38,7 @@ const discovered = (id: string): DiscoveryResult => ({
   ],
 });
 
-function native(id: string): Model<"openai-completions"> {
+function native(id: string): Model<"openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
 
@@ -74,6 +82,16 @@ describe("toNativeModels", () => {
         baseUrl: "https://proxy.example/v1",
       }),
     ]);
+  });
+
+  it("preserves a discovered Responses API and defaults missing APIs to Completions", () => {
+    const [responses, completions] = toNativeModels("litellm", "https://proxy.example/v1", [
+      { ...discovered("responses").models[0], api: "openai-responses" },
+      discovered("completions").models[0],
+    ]);
+
+    expect(responses.api).toBe("openai-responses");
+    expect(completions.api).toBe("openai-completions");
   });
 });
 
@@ -156,6 +174,39 @@ describe("createLiteLLMProvider", () => {
     expect(discover).toHaveBeenCalledOnce();
   });
 
+  it("shares legacy import and refresh callbacks across concurrent initialization", async () => {
+    let release!: (models: readonly Model<"openai-completions" | "openai-responses">[]) => void;
+    const pending = new Promise<readonly Model<"openai-completions" | "openai-responses">[]>((resolve) => {
+      release = resolve;
+    });
+    const legacyModels = vi.fn(() => pending);
+    const onRefresh = vi.fn();
+    const modelsStore = store();
+    const value = controller({ legacyModels, onRefresh });
+
+    const first = value.provider.refreshModels?.(context(modelsStore, false));
+    const second = value.provider.refreshModels?.(context(modelsStore, false));
+    release([native("legacy")]);
+    await Promise.all([first, second]);
+
+    expect(legacyModels).toHaveBeenCalledOnce();
+    expect(modelsStore.write).toHaveBeenCalledOnce();
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("routes Responses models through the Responses API", async () => {
+    apiSpies.responses.mockReturnValueOnce({});
+    const responseModel = toNativeModels("litellm", "https://proxy.example/v1", [
+      { ...discovered("responses").models[0], api: "openai-responses" },
+    ])[0];
+    const value = controller();
+
+    value.provider.stream(responseModel, { messages: [] });
+
+    expect(apiSpies.responses).toHaveBeenCalledOnce();
+    expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+
   it("force refreshes with the last Pi context and supplied signal", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const onRefresh = vi.fn();
@@ -172,5 +223,28 @@ describe("createLiteLLMProvider", () => {
     expect(legacyModels).toHaveBeenLastCalledWith(expect.objectContaining({ allowNetwork: true, force: true }));
     expect(onRefresh).toHaveBeenLastCalledWith([native("fresh")], credential);
     expect(modelsStore.write).toHaveBeenCalledOnce();
+  });
+
+  it("does not return a stale discovery when force refresh is already aborted", async () => {
+    const modelsStore = store([native("old")]);
+    const value = controller();
+    await value.provider.refreshModels?.(context(modelsStore, true));
+    const abort = new AbortController();
+    abort.abort();
+
+    await expect(value.forceRefresh(abort.signal)).rejects.toThrow(/aborted/i);
+  });
+
+  it("does not return an unpublished discovery when force refresh is aborted during discovery", async () => {
+    const abort = new AbortController();
+    const value = controller({
+      discover: vi.fn(async () => {
+        abort.abort();
+        return discovered("unpublished");
+      }),
+    });
+    await value.provider.refreshModels?.(context(store([native("old")]), false));
+
+    await expect(value.forceRefresh(abort.signal)).rejects.toThrow(/aborted/i);
   });
 });

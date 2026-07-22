@@ -492,7 +492,7 @@ async function discoverWithFallback(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
-      result: { models: [] as ProviderModelConfig[], source: "models_list" },
+      result: { models: [], source: "models_list" },
       warning: message,
     };
   }

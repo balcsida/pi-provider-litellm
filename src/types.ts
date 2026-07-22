@@ -2,7 +2,11 @@ import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
-export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl">;
+export type LiteLLMApi = "openai-completions" | "openai-responses";
+
+export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
+  api?: LiteLLMApi;
+};
 
 export interface CacheFile {
   baseUrl: string;
