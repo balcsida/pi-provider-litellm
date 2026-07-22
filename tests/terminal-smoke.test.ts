@@ -61,6 +61,13 @@ async function submit(session: Session, text: string, autocompleteText?: string)
   await session.keyboard.press("Enter");
 }
 
+async function selectApiKeyAuthMethod(session: Session): Promise<void> {
+  await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
+  await session.screen.waitForText("Sign in with an API key", { timeoutMs: waitTimeoutMs });
+  await session.keyboard.press("ArrowDown");
+  await session.keyboard.press("Enter");
+}
+
 it("dismisses command autocomplete without inspecting form values", async () => {
   const calls: unknown[] = [];
   const session = {
@@ -75,17 +82,39 @@ it("dismisses command autocomplete without inspecting form values", async () => 
     },
   } as unknown as Session;
 
-  await submit(session, "/login litellm", "LiteLLM API key");
+  await submit(session, "/login litellm", "LiteLLM · subscription/API key");
   await submit(session, "sk-ci-litellm-smoke");
 
   expect(calls).toEqual([
     "type",
     ["waitForText", "/login litellm", { timeoutMs: 90_000 }],
-    ["waitForText", "LiteLLM API key", { timeoutMs: 90_000 }],
+    ["waitForText", "LiteLLM · subscription/API key", { timeoutMs: 90_000 }],
     "Escape",
     ["waitForIdle", { timeoutMs: 90_000 }],
     "Enter",
     "type",
+    "Enter",
+  ]);
+});
+
+it("selects Pi's native API-key authentication method", async () => {
+  const calls: unknown[] = [];
+  const session = {
+    keyboard: {
+      press: async (key: string) => void calls.push(key),
+    },
+    screen: {
+      waitForText: async (text: string | RegExp, options?: { timeoutMs?: number }) =>
+        void calls.push(["waitForText", text, options]),
+    },
+  } as unknown as Session;
+
+  await selectApiKeyAuthMethod(session);
+
+  expect(calls).toEqual([
+    ["waitForText", "Select authentication method for LiteLLM", { timeoutMs: 90_000 }],
+    ["waitForText", "Sign in with an API key", { timeoutMs: 90_000 }],
+    "ArrowDown",
     "Enter",
   ]);
 });
@@ -114,10 +143,8 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
       await withPi(async (session) => {
         await waitForInitialModel(session);
 
-        await submit(session, "/login litellm", "LiteLLM API key");
-        await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
-        await session.screen.waitForText("LiteLLM API key", { timeoutMs: waitTimeoutMs });
-        await session.keyboard.press("Enter");
+        await submit(session, "/login litellm", "LiteLLM · subscription/API key");
+        await selectApiKeyAuthMethod(session);
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_BASE_URL ?? "http://127.0.0.1:4000");
         await session.screen.waitForText("Enter API key", { timeoutMs: waitTimeoutMs });

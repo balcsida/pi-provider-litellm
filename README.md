@@ -40,7 +40,7 @@ Inside pi:
 /login litellm
 ```
 
-You can also run `/login`, select `LiteLLM`, then select `LiteLLM API key`.
+To configure an API key, run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`. With `/login litellm`, choose `Sign in with an API key` directly.
 
 You'll be prompted for the base URL and API key. Credentials are persisted to `~/.pi/agent/auth.json`.
 
