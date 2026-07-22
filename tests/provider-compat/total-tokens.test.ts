@@ -16,12 +16,27 @@ describe("native provider total token compatibility", () => {
           prompt_tokens: 13,
           completion_tokens: 5,
           prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 },
+          completion_tokens_details: { reasoning_tokens: 2 },
         },
       }),
     );
     const first = await models.streamSimple(model, context).result();
 
-    expect(first.usage).toMatchObject({ input: 8, output: 5, cacheRead: 3, cacheWrite: 2, totalTokens: 18 });
+    expect(first.usage).toMatchObject({
+      input: 8,
+      output: 5,
+      cacheRead: 3,
+      cacheWrite: 2,
+      reasoning: 2,
+      totalTokens: 18,
+    });
+    expect(first.usage.cost.input).toBeCloseTo(0.000008, 12);
+    expect(first.usage.cost.output).toBeCloseTo(0.00001, 12);
+    expect(first.usage.cost.cacheRead).toBeCloseTo(0.000009, 12);
+    expect(first.usage.cost.cacheWrite).toBeCloseTo(0.000008, 12);
+    expect(first.usage.cost.total).toBeCloseTo(0.000035, 12);
+    expect(first.usage.reasoning).toBe(2);
+    expect(first.usage.reasoning).toBeLessThanOrEqual(first.usage.output);
     expect(first.usage.totalTokens).toBe(
       first.usage.input + first.usage.output + first.usage.cacheRead + first.usage.cacheWrite,
     );
@@ -40,7 +55,18 @@ describe("native provider total token compatibility", () => {
     );
     const second = await models.streamSimple(model, context).result();
 
-    expect(second.usage).toMatchObject({ input: 13, output: 4, cacheRead: 7, cacheWrite: 1, totalTokens: 25 });
+    expect(second.usage).toMatchObject({
+      input: 13,
+      output: 4,
+      cacheRead: 7,
+      cacheWrite: 1,
+      totalTokens: 25,
+    });
+    expect(second.usage.cost.input).toBeCloseTo(0.000013, 12);
+    expect(second.usage.cost.output).toBeCloseTo(0.000008, 12);
+    expect(second.usage.cost.cacheRead).toBeCloseTo(0.000021, 12);
+    expect(second.usage.cost.cacheWrite).toBeCloseTo(0.000004, 12);
+    expect(second.usage.cost.total).toBeCloseTo(0.000046, 12);
     expect(second.usage.totalTokens).toBe(
       second.usage.input + second.usage.output + second.usage.cacheRead + second.usage.cacheWrite,
     );
