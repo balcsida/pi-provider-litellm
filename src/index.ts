@@ -504,7 +504,7 @@ async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredenti
   return { type: "api_key", key, env: { [ENV_BASE_URL]: normalizeBaseUrl(rawBaseUrl) } };
 }
 
-async function loginOAuth(interaction: AuthInteraction): Promise<OAuthCredential> {
+async function loginOAuth(interaction: AuthInteraction, headers?: Record<string, string>): Promise<OAuthCredential> {
   const rawBaseUrl = (
     await interaction.prompt({
       type: "text",
@@ -534,12 +534,7 @@ async function loginOAuth(interaction: AuthInteraction): Promise<OAuthCredential
   if (wantVirtualKey !== "n" && wantVirtualKey !== "no") {
     try {
       interaction.notify({ type: "progress", message: "Generating virtual key..." });
-      const generated = await generateVirtualKey(
-        baseUrl,
-        rawToken,
-        interaction.signal,
-        parseCustomHeaders(process.env[ENV_HEADERS]),
-      );
+      const generated = await generateVirtualKey(baseUrl, rawToken, interaction.signal, headers);
       access = generated.key;
       expires =
         generated.expiresAt === undefined
@@ -582,15 +577,32 @@ async function resolveApiKeyAuth(
   const stored = credential?.key
     ? resolveConfigValue(credential.key, { executeCommands: executeHelpers })?.trim()
     : undefined;
+  let source: string | undefined;
   let creds: ResolvedCredentials;
   if (stored) {
+    source = "stored credential";
     creds = {
       baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : undefined,
       apiKey: stored,
       apiKeyFingerprint: fingerprint(stored),
     };
   } else {
-    creds = await resolveCredentials({ ...definition, useSavedAuth: false }, { executeHelpers });
+    creds = await resolveCredentials({ ...definition, useDefaultEnv: false, useSavedAuth: false }, { executeHelpers });
+    if (!creds.apiKey && definition.useDefaultEnv) {
+      const helper = normalizeCommand(await ctx.env(ENV_API_KEY_HELPER));
+      if (helper) {
+        creds.apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
+        creds.apiKeyConfig = helper;
+        source = ENV_API_KEY_HELPER;
+      } else {
+        const envKey = cleanConfig(await ctx.env(ENV_API_KEY));
+        if (envKey) {
+          creds.apiKey = envKey;
+          creds.apiKeyConfig = ENV_API_KEY;
+          source = ENV_API_KEY;
+        }
+      }
+    }
     if (!creds.baseUrl && baseUrl) creds.baseUrl = normalizeBaseUrl(baseUrl);
   }
   if (!creds.apiKey) return undefined;
@@ -601,7 +613,7 @@ async function resolveApiKeyAuth(
       headers: resolveHeaders(definition),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
-    source: stored ? "stored credential" : (creds.apiKeyConfig ?? ENV_API_KEY),
+    source: source ?? creds.apiKeyConfig ?? ENV_API_KEY,
   };
 }
 
@@ -617,10 +629,19 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
-        if (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
-          return { type: "api_key", source: "gcloud ADC" };
-        if (definition.apiKeyConfig) return { type: "api_key", source: definition.apiKeyConfig };
-        if (definition.useDefaultEnv && getApiKeyHelperCommand())
+        const configured = await resolveCredentials(
+          { ...definition, useDefaultEnv: false, useSavedAuth: false },
+          { executeHelpers: false },
+        );
+        if (configured.apiKeyFingerprint)
+          return {
+            type: "api_key",
+            source:
+              definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+                ? "gcloud ADC"
+                : (configured.apiKeyConfig ?? ENV_API_KEY),
+          };
+        if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER)))
           return { type: "api_key", source: ENV_API_KEY_HELPER };
         return definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))
           ? { type: "api_key", source: ENV_API_KEY }
@@ -632,13 +653,13 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
       ? {
           name: "LiteLLM SSO",
           loginLabel: "Sign in with LiteLLM SSO",
-          login: loginOAuth,
+          login: (interaction) => loginOAuth(interaction, resolveHeaders(definition)),
           refresh: async (credential, signal) => ({
             ...(await refreshLiteLLM(credential, signal)),
             type: "oauth" as const,
           }),
           toAuth: async (credential) => ({
-            apiKey: resolveOAuthApiKey(credential),
+            apiKey: credential.access,
             baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
             headers: resolveHeaders(definition),
           }),

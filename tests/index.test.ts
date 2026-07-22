@@ -142,6 +142,12 @@ function resolveApiKey(provider: Provider, credential?: Extract<Credential, { ty
   });
 }
 
+function resolveApiKeyWithEnv(provider: Provider, env: Record<string, string | undefined>) {
+  return provider.auth.apiKey?.resolve({
+    ctx: { env: async (name) => env[name], fileExists: async () => false },
+  });
+}
+
 function interaction(
   prompt: AuthInteraction["prompt"],
   notify: AuthInteraction["notify"] = vi.fn(),
@@ -1118,6 +1124,44 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 
+  it("resolves native auth from the injected context instead of process env", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://process.example.com";
+    process.env.LITELLM_API_KEY = "process-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      resolveApiKeyWithEnv(pi.providers[0]!, {
+        LITELLM_BASE_URL: "https://context.example.com",
+        LITELLM_API_KEY: "context-key",
+      }),
+    ).resolves.toMatchObject({
+      auth: { apiKey: "context-key", baseUrl: "https://context.example.com/v1" },
+      source: "LITELLM_API_KEY",
+    });
+  });
+
+  it("executes only the helper supplied by the injected auth context", async () => {
+    const agentDir = await makeAgentDir();
+    const contextHelper = await writeHelper(agentDir, ["context-helper-key"]);
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      resolveApiKeyWithEnv(pi.providers[0]!, {
+        LITELLM_BASE_URL: "https://context.example.com",
+        LITELLM_API_KEY_HELPER: contextHelper,
+        LITELLM_API_KEY: "context-env-key",
+      }),
+    ).resolves.toMatchObject({ auth: { apiKey: "context-helper-key" }, source: "LITELLM_API_KEY_HELPER" });
+    expect(await readHelperCount(agentDir)).toBe(1);
+  });
+
   it("leaves model refresh to Pi after login", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
@@ -1400,6 +1444,29 @@ describe("extension startup", () => {
     await startSession(pi);
 
     expect(seenAuthHeaders).toEqual([`Bearer ${fresh}`, `Bearer ${fresh}`]);
+  });
+
+  it("executes an OAuth refresh command only during refresh", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["refreshed-token", "unexpected-second-run"]);
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const credential = {
+      type: "oauth" as const,
+      access: "expired-token",
+      refresh: `!${helperPath}`,
+      expires: 0,
+      baseUrl: "https://litellm.example.com",
+    };
+
+    const refreshed = await pi.providers[0]?.auth.oauth?.refresh(credential);
+    expect(await readHelperCount(agentDir)).toBe(1);
+    await expect(pi.providers[0]?.auth.oauth?.toAuth(refreshed!)).resolves.toMatchObject({
+      apiKey: "refreshed-token",
+    });
+    expect(await readHelperCount(agentDir)).toBe(1);
   });
 
   it("enterprise SSO login generates a virtual key and uses it as the access token", async () => {
@@ -1944,7 +2011,13 @@ describe("multi-provider hardening", () => {
   it("sends custom headers when generating a login virtual key", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    process.env.LITELLM_HEADERS = JSON.stringify({ "x-litellm-customer-id": "team-a" });
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: { providers: { litellm: { headers: { "x-litellm-customer-id": "team-a" } } } },
+      }),
+      "utf8",
+    );
     const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
     const seenRequests: Array<{ url: string; customer: string | null }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
