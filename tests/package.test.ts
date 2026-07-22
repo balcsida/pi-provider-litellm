@@ -20,13 +20,15 @@ describe("package gallery metadata", () => {
 });
 
 describe("pi package compatibility", () => {
-  it("accepts every pi package version through peer dependencies", async () => {
+  it("requires the native Provider extension API", async () => {
     const { default: manifest } = await import("../package.json", {
       with: { type: "json" },
     });
 
-    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe("*");
-    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe("*");
+    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.0");
+    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.0");
+    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.81.1");
+    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.81.1");
   });
 });
 
@@ -48,14 +50,9 @@ describe("dependency security overrides", () => {
     const fastXmlBuilderCopies = Object.values(copiesOf("fast-xml-builder"));
     expect(fastXmlBuilderCopies).not.toHaveLength(0);
     expect(fastXmlBuilderCopies.every((version) => version === "1.2.0")).toBe(true);
-    // pi-coding-agent publishes its own "overrides" field, so npm isolates its
-    // subtree from root overrides (none of plain, @google/genai-scoped, or
-    // pi-coding-agent-scoped overrides reach it; verified with npm 11.16).
-    // Its nested protobufjs copy therefore stays on the latest 7.x until that
-    // is fixed upstream. Any other copy or version drift must fail this test.
+    // Pi 0.81.1 no longer ships a nested protobufjs copy.
     expect(copiesOf("protobufjs")).toEqual({
       "node_modules/protobufjs": "8.7.1",
-      "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs": "7.6.4",
     });
   });
 });
