@@ -75,13 +75,13 @@ it("dismisses command autocomplete without inspecting form values", async () => 
     },
   } as unknown as Session;
 
-  await submit(session, "/login litellm", "LiteLLM · subscription/API key");
+  await submit(session, "/login litellm", "LiteLLM API key");
   await submit(session, "sk-ci-litellm-smoke");
 
   expect(calls).toEqual([
     "type",
     ["waitForText", "/login litellm", { timeoutMs: 90_000 }],
-    ["waitForText", "LiteLLM · subscription/API key", { timeoutMs: 90_000 }],
+    ["waitForText", "LiteLLM API key", { timeoutMs: 90_000 }],
     "Escape",
     ["waitForIdle", { timeoutMs: 90_000 }],
     "Enter",
@@ -114,13 +114,12 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
       await withPi(async (session) => {
         await waitForInitialModel(session);
 
-        await submit(session, "/login litellm", "LiteLLM · subscription/API key");
+        await submit(session, "/login litellm", "LiteLLM API key");
         await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
+        await session.screen.waitForText("LiteLLM API key", { timeoutMs: waitTimeoutMs });
         await session.keyboard.press("Enter");
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_BASE_URL ?? "http://127.0.0.1:4000");
-        await session.screen.waitForText("Select login method", { timeoutMs: waitTimeoutMs });
-        await submit(session, "1");
         await session.screen.waitForText("Enter API key", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_API_KEY ?? "sk-ci-litellm-smoke");
 

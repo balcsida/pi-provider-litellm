@@ -30,6 +30,19 @@ describe("pi package compatibility", () => {
     expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.81.1");
     expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.81.1");
   });
+
+  it("documents native Provider model persistence", async () => {
+    const readme = await readFile("README.md", "utf8");
+
+    expect(readme).toContain("Pi 0.81.0+ is required");
+    expect(readme).toContain("native Provider");
+    expect(readme).toContain("~/.pi/agent/models-store.json");
+    expect(readme).toContain("`/model` performs a background refresh");
+    expect(readme).toContain("`pi update --models` forces a Pi-wide refresh");
+    expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
+    expect(readme).not.toContain("older than 24 hours");
+    expect(readme).not.toContain("enter `2` for SSO");
+  });
 });
 
 describe("dependency security overrides", () => {
