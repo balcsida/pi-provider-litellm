@@ -184,7 +184,6 @@ describe("runSsoLoginSmoke", () => {
       }),
     );
   });
-
 });
 
 describe("runAuthSmokeFromEnv", () => {

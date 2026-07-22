@@ -146,6 +146,43 @@ describe("feature parity", () => {
     expect(result.systemPrompt).toContain("Terraform conventions");
   });
 
+  it("clears cached Skills auth when Pi reports revoked credentials", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "active-key", baseUrl: "https://active.example.com/v1" },
+          }),
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+    vi.mocked(globalThis.fetch).mockClear();
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => undefined,
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+
+    const listTool = pi.tools.find((tool) => tool.name === "litellm_skill_list");
+    await expect(listTool?.execute?.("call-1", {}, undefined, undefined, {})).rejects.toThrow(
+      "no credentials for litellm",
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it("disables LiteLLM skills through settings", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     await writeFile(

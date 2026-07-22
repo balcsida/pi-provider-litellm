@@ -110,7 +110,6 @@ describe("supply-chain guard", () => {
       await writeFile(join(fixture, "README.md"), "# fixture\n");
       await writeFile(join(fixture, "LICENSE"), "MIT\n");
       for (const file of [
-        "cache",
         "cost",
         "discover",
         "gcloud-token",
@@ -118,6 +117,7 @@ describe("supply-chain guard", () => {
         "index",
         "litellm",
         "mcp-tools",
+        "provider",
         "skills",
         "types",
       ]) {

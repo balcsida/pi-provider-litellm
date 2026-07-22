@@ -2,7 +2,7 @@ import type { Static } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { normalizeBaseUrl } from "./discover.js";
-import type { LiteLLMSkill } from "./types.js";
+import type { LiteLLMRuntimeAuth, LiteLLMSkill } from "./types.js";
 
 const SKILLS_CACHE_TTL_MS = 60_000;
 
@@ -210,11 +210,7 @@ function parseJsonObject(value: string, fieldName: string): Record<string, unkno
   return parsed as Record<string, unknown>;
 }
 
-export function createSkillToolDefinitions(
-  baseUrl: string,
-  getApiKey: () => Promise<string>,
-  headers?: Record<string, string>,
-): ToolDefinition[] {
+export function createSkillToolDefinitions(getAuth: () => Promise<LiteLLMRuntimeAuth>): ToolDefinition[] {
   return [
     defineTool({
       name: "litellm_skill_list",
@@ -223,8 +219,8 @@ export function createSkillToolDefinitions(
       promptSnippet: "List LiteLLM Skills Gateway skills",
       parameters: Type.Object({}),
       async execute() {
-        const apiKey = await getApiKey();
-        const skills = await listSkills(baseUrl, apiKey, headers);
+        const auth = await getAuth();
+        const skills = await listSkills(auth.baseUrl, auth.apiKey, auth.headers);
         return { content: [{ type: "text", text: formatSkills(skills) }], details: { count: skills.length } };
       },
     }),
@@ -234,14 +230,14 @@ export function createSkillToolDefinitions(
       description: "Create a skill on the LiteLLM proxy Skills Gateway.",
       parameters: CreateSkillParams,
       async execute(_toolCallId, params: Static<typeof CreateSkillParams>) {
-        const apiKey = await getApiKey();
+        const auth = await getAuth();
         const source = params.sourceJson ? parseJsonObject(params.sourceJson, "sourceJson") : undefined;
         const inputSchema = params.inputSchemaJson
           ? parseJsonObject(params.inputSchemaJson, "inputSchemaJson")
           : undefined;
         const result = await createSkill(
-          baseUrl,
-          apiKey,
+          auth.baseUrl,
+          auth.apiKey,
           {
             name: params.name,
             description: params.description,
@@ -249,7 +245,7 @@ export function createSkillToolDefinitions(
             code: params.code,
             inputSchema,
           },
-          headers,
+          auth.headers,
         );
         return { content: [{ type: "text", text: "LiteLLM skill created." }], details: { result } };
       },
@@ -260,8 +256,8 @@ export function createSkillToolDefinitions(
       description: "Delete a skill from the LiteLLM proxy Skills Gateway.",
       parameters: DeleteSkillParams,
       async execute(_toolCallId, params: Static<typeof DeleteSkillParams>) {
-        const apiKey = await getApiKey();
-        await deleteSkill(baseUrl, apiKey, params.skillId, headers);
+        const auth = await getAuth();
+        await deleteSkill(auth.baseUrl, auth.apiKey, params.skillId, auth.headers);
         return { content: [{ type: "text", text: `LiteLLM skill deleted: ${params.skillId}` }], details: {} };
       },
     }),

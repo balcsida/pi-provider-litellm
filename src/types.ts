@@ -4,6 +4,12 @@ export type DiscoverySource = "model_info" | "models_list" | "health";
 
 export type LiteLLMApi = "openai-completions" | "openai-responses";
 
+export type LiteLLMRuntimeAuth = {
+  baseUrl: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+};
+
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
   api?: LiteLLMApi;
 };

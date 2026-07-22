@@ -25,7 +25,7 @@ import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { DiscoveryOptions, ResolvedCredentials } from "./types.js";
+import type { DiscoveryOptions, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -738,7 +738,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
   const providerNames = new Set(definitions.map((definition) => definition.name));
-  const definitionByName = new Map(definitions.map((definition) => [definition.name, definition] as const));
 
   function discoveryDisabledReason(): string | null {
     if (isOffline()) return `${ENV_OFFLINE}=1`;
@@ -774,21 +773,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   let mcpRegistered = false;
-  let defaultRuntimeAuth: { baseUrl: string; apiKey: string } | undefined;
+  let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
-  async function registerMcpTools(
-    baseUrl: string,
-    apiKey: string,
-    headers: Record<string, string> | undefined,
-    signal?: AbortSignal,
-  ): Promise<void> {
+  async function resolveDefaultRuntimeAuth(): Promise<LiteLLMRuntimeAuth> {
+    if (!defaultRuntimeAuth) throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
+    return defaultRuntimeAuth;
+  }
+
+  async function registerMcpTools(signal?: AbortSignal): Promise<void> {
     if (!mcpEnabled || mcpRegistered || discoveryDisabledReason()) return;
     try {
       signal?.throwIfAborted();
       const tools = await createMcpToolDefinitions(
-        baseUrl,
-        async () => defaultRuntimeAuth?.apiKey ?? apiKey,
-        headers,
+        resolveDefaultRuntimeAuth,
         isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
         signal,
       );
@@ -823,14 +820,26 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
           });
           signal?.throwIfAborted();
-          if (definition.name === PROVIDER_NAME) {
-            defaultRuntimeAuth = { baseUrl: auth.baseUrl, apiKey: auth.apiKey };
-            await registerMcpTools(auth.baseUrl, auth.apiKey, auth.headers, signal);
-          }
           return result;
         },
       });
       Object.assign(controller.provider, { headers: resolveHeaders(definition) });
+      const refreshModels = controller.provider.refreshModels!;
+      controller.provider.refreshModels = async (context) => {
+        try {
+          await refreshModels(context);
+        } finally {
+          if (
+            definition.name === PROVIDER_NAME &&
+            context.allowNetwork &&
+            !discoveryDisabledReason() &&
+            context.credential
+          ) {
+            defaultRuntimeAuth = await authForCredential(definition, context.credential);
+            await registerMcpTools(context.signal);
+          }
+        }
+      };
       pi.registerProvider(controller.provider);
       return [definition.name, controller] as const;
     }),
@@ -838,19 +847,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   setupLiteLLMCostTracking(pi, [...controllers.keys()]);
 
-  const defaultDefinition = definitionByName.get(PROVIDER_NAME)!;
-  const defaultBaseUrl = normalizeBaseUrl(requestBaseUrl(defaultDefinition));
   if (skillsEnabled) {
-    for (const tool of createSkillToolDefinitions(
-      defaultBaseUrl,
-      async () => {
-        if (defaultRuntimeAuth) return defaultRuntimeAuth.apiKey;
-        const credentials = await resolveCredentials(defaultDefinition);
-        if (!credentials.apiKey) throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
-        return credentials.apiKey;
-      },
-      resolveHeaders(defaultDefinition),
-    )) {
+    for (const tool of createSkillToolDefinitions(resolveDefaultRuntimeAuth)) {
       pi.registerTool(tool);
     }
   }
@@ -932,14 +930,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    defaultRuntimeAuth = undefined;
     if (!skillsEnabled || discoveryDisabledReason()) return;
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
     const baseUrl = auth?.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth?.auth.apiKey;
     if (!baseUrl || !apiKey) return;
-    defaultRuntimeAuth = { baseUrl: normalizeBaseUrl(baseUrl), apiKey };
-    const skills = await listSkills(baseUrl, apiKey, resolveHeaders(defaultDefinition));
+    const headers = Object.fromEntries(
+      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+    defaultRuntimeAuth = {
+      baseUrl: normalizeBaseUrl(baseUrl),
+      apiKey,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+    };
+    const skills = await listSkills(defaultRuntimeAuth.baseUrl, defaultRuntimeAuth.apiKey, defaultRuntimeAuth.headers);
     const section = createSkillsPromptSection(skills);
     if (!section) return;
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };

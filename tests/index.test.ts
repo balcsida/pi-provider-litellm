@@ -247,6 +247,83 @@ describe("extension startup", () => {
     expect(pi.providers).toHaveLength(1);
   });
 
+  it("ignores legacy cache files without deleting them", async () => {
+    process.env.LITELLM_OFFLINE = "1";
+    const agentDir = await makeAgentDir();
+    const cachePath = join(agentDir, "litellm-models.json");
+    const legacyCache = JSON.stringify({ models: [{ id: "legacy-model" }] });
+    await writeFile(cachePath, legacyCache, "utf8");
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: false,
+      credential: { type: "api_key", key: "sk-test" },
+      store: createModelsStore(),
+    });
+
+    expect(await readFile(cachePath, "utf8")).toBe(legacyCache);
+    expect(pi.providers[0]?.getModels()).toEqual([]);
+  });
+
+  it("registers MCP tools after an online Pi-managed model restore", async () => {
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const stored = {
+      id: "stored-model",
+      name: "Stored model",
+      provider: "litellm",
+      api: "openai-completions",
+      baseUrl: "https://litellm.example.com/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4096,
+    };
+
+    await expect(
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: {
+          type: "api_key",
+          key: "sk-test",
+          env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+        },
+        store: createModelsStore([stored]),
+      }),
+    ).rejects.toThrow("unexpected URL");
+
+    expect(requestedUrls).toEqual([
+      "https://litellm.example.com/model/info",
+      "https://litellm.example.com/mcp-rest/tools/list",
+    ]);
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
+    expect(pi.providers[0]?.getModels()).toEqual([stored]);
+  });
+
   it("retains Pi-managed models when discovery fails", async () => {
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
