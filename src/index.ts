@@ -266,6 +266,48 @@ function resolveTemplateConfigValue(config: string): string | undefined {
   return resolved;
 }
 
+async function resolveTemplateConfigValueFromContext(
+  config: string,
+  env: (name: string) => Promise<string | undefined>,
+): Promise<string | undefined> {
+  let resolved = "";
+  for (let index = 0; index < config.length; ) {
+    const dollarIndex = config.indexOf("$", index);
+    if (dollarIndex === -1) return resolved + config.slice(index);
+    resolved += config.slice(index, dollarIndex);
+    const nextChar = config[dollarIndex + 1];
+    if (nextChar === "$" || nextChar === "!") {
+      resolved += nextChar;
+      index = dollarIndex + 2;
+      continue;
+    }
+    if (nextChar === "{") {
+      const endIndex = config.indexOf("}", dollarIndex + 2);
+      if (endIndex === -1) {
+        resolved += "$";
+        index = dollarIndex + 1;
+        continue;
+      }
+      const envValue = await env(config.slice(dollarIndex + 2, endIndex));
+      if (envValue === undefined) return undefined;
+      resolved += envValue;
+      index = endIndex + 1;
+      continue;
+    }
+    const match = config.slice(dollarIndex + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (!match) {
+      resolved += "$";
+      index = dollarIndex + 1;
+      continue;
+    }
+    const envValue = await env(match[0]);
+    if (envValue === undefined) return undefined;
+    resolved += envValue;
+    index = dollarIndex + 1 + match[0].length;
+  }
+  return resolved;
+}
+
 function resolveConfigValue(config: string, { executeCommands }: { executeCommands: boolean }): string | undefined {
   if (config.startsWith("!")) return executeCommands ? executeApiKeyCommand(config) : undefined;
   return resolveTemplateConfigValue(config);
@@ -587,7 +629,23 @@ async function resolveApiKeyAuth(
       apiKeyFingerprint: fingerprint(stored),
     };
   } else {
-    creds = await resolveCredentials({ ...definition, useDefaultEnv: false, useSavedAuth: false }, { executeHelpers });
+    creds = await resolveCredentials(
+      { ...definition, apiKeyConfig: undefined, useDefaultEnv: false, useSavedAuth: false },
+      { executeHelpers },
+    );
+    if (!creds.apiKey && definition.apiKeyConfig) {
+      const configured = definition.apiKeyConfig.startsWith("!")
+        ? executeHelpers
+          ? executeApiKeyCommand(definition.apiKeyConfig)
+          : undefined
+        : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
+      if (configured) {
+        creds.apiKey = configured;
+        creds.apiKeyConfig = definition.apiKeyConfig;
+      } else if (!definition.apiKeyConfig.startsWith("!")) {
+        warnUnresolvedApiKeyConfig(definition.name, definition.apiKeyConfig);
+      }
+    }
     if (!creds.apiKey && definition.useDefaultEnv) {
       const helper = normalizeCommand(await ctx.env(ENV_API_KEY_HELPER));
       if (helper) {
@@ -630,7 +688,7 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
         const configured = await resolveCredentials(
-          { ...definition, useDefaultEnv: false, useSavedAuth: false },
+          { ...definition, apiKeyConfig: undefined, useDefaultEnv: false, useSavedAuth: false },
           { executeHelpers: false },
         );
         if (configured.apiKeyFingerprint)
@@ -641,6 +699,12 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
                 ? "gcloud ADC"
                 : (configured.apiKeyConfig ?? ENV_API_KEY),
           };
+        if (definition.apiKeyConfig) {
+          const configuredKey = definition.apiKeyConfig.startsWith("!")
+            ? definition.apiKeyConfig
+            : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
+          if (configuredKey) return { type: "api_key", source: definition.apiKeyConfig };
+        }
         if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER)))
           return { type: "api_key", source: ENV_API_KEY_HELPER };
         return definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))

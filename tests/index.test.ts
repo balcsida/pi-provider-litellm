@@ -1162,6 +1162,34 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
+  it("resolves configured key templates from the injected auth context", async () => {
+    const agentDir = await makeAgentDir();
+    const lowerPriorityHelper = await writeHelper(agentDir, ["unexpected-helper-key"]);
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { providers: { litellm: { apiKey: "$CUSTOM_LITELLM_KEY" } } } }),
+      "utf8",
+    );
+    process.env.CUSTOM_LITELLM_KEY = "process-configured-key";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      resolveApiKeyWithEnv(pi.providers[0]!, {
+        LITELLM_BASE_URL: "https://context.example.com",
+        CUSTOM_LITELLM_KEY: "context-configured-key",
+        LITELLM_API_KEY_HELPER: lowerPriorityHelper,
+        LITELLM_API_KEY: "context-default-key",
+      }),
+    ).resolves.toMatchObject({
+      auth: { apiKey: "context-configured-key", baseUrl: "https://context.example.com/v1" },
+      source: "$CUSTOM_LITELLM_KEY",
+    });
+    expect(await readHelperCount(agentDir)).toBe(0);
+  });
+
   it("leaves model refresh to Pi after login", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
