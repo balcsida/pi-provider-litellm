@@ -139,30 +139,31 @@ describe("LiteLLM smoke workflow", () => {
     expect(readTerminalSmoke()).toContain("inheritEnv: true");
   });
 
-  it("primes each fresh terminal smoke agent directory", () => {
+  it("runs one cold terminal lifecycle without preselecting an unavailable model", () => {
     const terminalSmoke = readTerminalSmoke();
-    const primeAndLaunch = `const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
-    await execFileAsync(piPath, ["-e", extensionPath, "--list-models", "litellm"], {
-      cwd: repoRoot,
-      env,
-    });
-    await using session = await terminal?.launch({
-      command: [
-        piPath,
-        "-e",
-        extensionPath,
-        "--provider",
-        "litellm",
-        "--model",
-        process.env.LITELLM_CLI_SMOKE_MODEL ?? "vidaimock-openai",
-        "--no-tools",
-        "--no-session",
-      ],
-      cwd: repoRoot,
-      env,
-      inheritEnv: true,`;
 
-    expect(terminalSmoke).toContain(primeAndLaunch);
+    expect(terminalSmoke).toContain('it(\n    "logs in, refreshes, and selects LiteLLM models"');
+    expect(terminalSmoke).toContain("process.env.PI_CODING_AGENT_DIR?.trim()");
+    expect(terminalSmoke).toContain("if (!configuredAgentDir) await rm(agentDir, { force: true, recursive: true });");
+    expect(terminalSmoke).toContain('waitForText("Warning: No models available"');
+    expect(terminalSmoke).toContain('waitUntil((snapshot) => !snapshot.text.includes("Enter API key")');
+    expect(terminalSmoke).not.toContain('execFileAsync(piPath, ["-e", extensionPath, "--list-models", "litellm"]');
+    expect(terminalSmoke).not.toContain('"--provider",\n        "litellm"');
+    expect(terminalSmoke).not.toContain('"--model",');
+  });
+
+  it("shares terminal login state with the later Pi CLI smoke", () => {
+    const workflow = readWorkflow();
+    const initializeStart = workflow.indexOf("- name: Initialize shared Pi agent directory");
+    const terminalStart = workflow.indexOf("- name: Run interactive Pi terminal smoke");
+    const cliStart = workflow.indexOf("- name: Run Pi CLI smoke");
+
+    expect(workflow).toContain("PI_CODING_AGENT_DIR: $" + "{{ runner.temp }}/pi-cli-smoke");
+    expect(initializeStart).toBeGreaterThan(-1);
+    expect(terminalStart).toBeGreaterThan(initializeStart);
+    expect(cliStart).toBeGreaterThan(terminalStart);
+    expect(workflow.slice(initializeStart, terminalStart)).toContain('mkdir -p "$PI_CODING_AGENT_DIR"');
+    expect(workflow.slice(cliStart)).not.toContain('rm -rf "$PI_CODING_AGENT_DIR"');
   });
 
   it("documents the mocked smoke workflow without provider secrets", () => {
