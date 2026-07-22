@@ -24,5 +24,9 @@ it.each(["emoji 😀", "LinkedIn 🚀🎉", "broken \uD83D"])("serializes tool r
     .result();
 
   expect(message.stopReason).toBe("stop");
-  expect(requests[0]?.messages).toContainEqual(expect.objectContaining({ role: "tool" }));
+  expect(requests[0]?.messages.find(({ role }) => role === "tool")).toEqual({
+    role: "tool",
+    content: text === "broken \uD83D" ? "broken " : text,
+    tool_call_id: "call_1",
+  });
 });
