@@ -1,6 +1,8 @@
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
+
+export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl">;
 
 export interface CacheFile {
   baseUrl: string;
@@ -8,11 +10,11 @@ export interface CacheFile {
   headersFingerprint?: string;
   fetchedAt: number;
   source: DiscoverySource;
-  models: ProviderModelConfig[];
+  models: DiscoveredModel[];
 }
 
 export interface DiscoveryResult {
-  models: ProviderModelConfig[];
+  models: DiscoveredModel[];
   source: DiscoverySource;
 }
 

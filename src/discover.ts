@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { writeJsonAtomic } from "./cache.js";
 import type {
+  DiscoveredModel,
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
@@ -89,7 +89,7 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): ProviderModelConfig["compat"] {
+export function buildCompat(modelId: string): DiscoveredModel["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -155,8 +155,8 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
 
 function mapModelInfoCost(
   info: NonNullable<ModelInfoEntry["model_info"]>,
-  fallback?: ProviderModelConfig["cost"],
-): NonNullable<ProviderModelConfig["cost"]> {
+  fallback?: DiscoveredModel["cost"],
+): NonNullable<DiscoveredModel["cost"]> {
   return {
     input: info.input_cost_per_token !== undefined ? info.input_cost_per_token * 1_000_000 : (fallback?.input ?? 0),
     output: info.output_cost_per_token !== undefined ? info.output_cost_per_token * 1_000_000 : (fallback?.output ?? 0),
@@ -357,9 +357,9 @@ async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDev
   return cache.catalog;
 }
 
-function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<ProviderModelConfig> {
+function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<DiscoveredModel> {
   if (!model) return {};
-  const metadata: Partial<ProviderModelConfig> = {};
+  const metadata: Partial<DiscoveredModel> = {};
   if (model.name) metadata.name = model.name;
   if (model.reasoning !== undefined) metadata.reasoning = model.reasoning;
   if (model.modalities?.input) {
@@ -379,7 +379,7 @@ function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<Provid
   return metadata;
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefined {
+function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   const id = entry.model_name;
   if (!id) return undefined;
   const info = entry.model_info ?? {};
@@ -403,14 +403,14 @@ function mapFromModelInfo(entry: ModelInfoEntry): ProviderModelConfig | undefine
 function mapFromHealthModelInfo(
   entry: ModelInfoEntry,
   fallbackId: string | undefined,
-): ProviderModelConfig | undefined {
+): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
   if (model) delete model.thinkingLevelMap;
   return model;
 }
 
-function mapFromHealthEndpoint(entry: { model?: string }): ProviderModelConfig | undefined {
+function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
@@ -430,7 +430,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): ProviderModelConfig |
 function mapFromModelsList(
   entry: ModelsListEntry,
   modelsDev: ModelsDevResponse | undefined,
-): ProviderModelConfig | undefined {
+): DiscoveredModel | undefined {
   const id = entry.id;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
@@ -452,7 +452,7 @@ async function discoverFromHealth(
   base: string,
   apiKey: string,
   options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean },
-): Promise<ProviderModelConfig[]> {
+): Promise<DiscoveredModel[]> {
   const progress = options.silent ? undefined : options.onProgress;
   progress?.("Querying /health endpoint...");
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
@@ -479,10 +479,10 @@ async function discoverFromHealth(
       return model;
     }),
   );
-  return models.filter((model): model is ProviderModelConfig => model !== undefined);
+  return models.filter((model): model is DiscoveredModel => model !== undefined);
 }
 
-function deduplicateModels(models: ProviderModelConfig[]): ProviderModelConfig[] {
+function deduplicateModels(models: DiscoveredModel[]): DiscoveredModel[] {
   const seen = new Set<string>();
   return models.filter((m) => {
     if (seen.has(m.id)) return false;
@@ -511,7 +511,7 @@ export async function discoverModels(
         model_info: { ...previous?.model_info, ...entry.model_info },
       });
     }
-    const models = [...entries.values()].map(mapFromModelInfo).filter((m): m is ProviderModelConfig => m !== undefined);
+    const models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
     return { source: "model_info", models };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
@@ -534,6 +534,6 @@ export async function discoverModels(
   }
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
-    .filter((m): m is ProviderModelConfig => m !== undefined);
+    .filter((m): m is DiscoveredModel => m !== undefined);
   return { source: "models_list", models: deduplicateModels(models) };
 }
