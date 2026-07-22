@@ -1,5 +1,6 @@
 import type { Api, AssistantMessage, AuthContext, Model, Models, Provider } from "@earendil-works/pi-ai";
-import { createModels, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { afterEach, vi } from "vitest";
 
 export const RED_CIRCLE_PNG =
@@ -56,7 +57,9 @@ export async function createCompatibilityHarness(): Promise<{
   provider: Provider;
   models: Models;
   model: Model<Api>;
+  foreignModel: Model<Api>;
   requests: RequestBody[];
+  foreignRequests: RequestBody[];
   respond: (...chunks: Chunk[]) => void;
 }> {
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
@@ -67,6 +70,7 @@ export async function createCompatibilityHarness(): Promise<{
   vi.stubEnv("LITELLM_API_KEY", "sk-test");
 
   const requests: RequestBody[] = [];
+  const foreignRequests: RequestBody[] = [];
   const responses: Chunk[][] = [];
   const respond = (...chunks: Chunk[]) => responses.push(chunks);
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -95,8 +99,33 @@ export async function createCompatibilityHarness(): Promise<{
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
     if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
 
-    requests.push((request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody);
-    const chunks = responses.shift();
+    const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
+    (url.startsWith("https://foreign.example.com") ? foreignRequests : requests).push(requestBody);
+    const history = JSON.stringify(requestBody.messages);
+    if (history.includes("Overflow the context")) {
+      return Response.json(
+        {
+          error: {
+            message: "Requested token count exceeds the model's maximum context length of 4096 tokens",
+            type: "invalid_request_error",
+            param: "messages",
+            code: "context_length_exceeded",
+          },
+        },
+        { status: 400 },
+      );
+    }
+    const chunks =
+      responses.shift() ??
+      (url.startsWith("https://foreign.example.com") && history.includes("Continue elsewhere")
+        ? successfulResponse("foreign continued")
+        : history.includes("Continue in LiteLLM")
+          ? successfulResponse("LiteLLM continued")
+          : history.includes("diameter: 2 px")
+            ? successfulResponse("diameter 2 px")
+            : history.includes("Inspect the image")
+              ? successfulResponse("red circle")
+              : undefined);
     if (!chunks) throw new Error("missing mock response");
     const signal = request?.signal ?? init?.signal;
     const body = new ReadableStream({
@@ -139,13 +168,33 @@ export async function createCompatibilityHarness(): Promise<{
   };
   const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
   models.setProvider(provider);
+  const foreignModel = {
+    id: "foreign-model",
+    name: "Foreign model",
+    api: "openai-completions" as const,
+    provider: "foreign",
+    baseUrl: "https://foreign.example.com/v1",
+    reasoning: true,
+    input: ["text", "image"] as ("text" | "image")[],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 4096,
+    maxTokens: 1024,
+  };
+  models.setProvider(
+    createProvider({
+      id: "foreign",
+      auth: { apiKey: { name: "Foreign", resolve: async () => ({ auth: { apiKey: "foreign-test" } }) } },
+      models: [foreignModel],
+      api: openAICompletionsApi(),
+    }),
+  );
   const refresh = await models.refresh({ allowNetwork: true });
   const refreshError = refresh.errors.get(provider.id);
   if (refreshError) throw refreshError;
   const model = models.getModel(provider.id, "local-model");
   if (!model) throw new Error("LiteLLM model was not discovered");
 
-  return { provider, models, model, requests, respond };
+  return { provider, models, model, foreignModel, requests, foreignRequests, respond };
 }
 
 afterEach(() => {
