@@ -1,4 +1,4 @@
-import type { Api, AuthContext, Model, Models, Provider } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, AuthContext, Model, Models, Provider } from "@earendil-works/pi-ai";
 import { createModels, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { afterEach, vi } from "vitest";
 
@@ -12,6 +12,44 @@ type RequestBody = { messages: Array<{ role: string; content: unknown }>; [key: 
 
 export function sseChunk(data: unknown, waitForAbort = false): Chunk {
   return { data, waitForAbort };
+}
+
+export function user(content: string) {
+  return { role: "user" as const, content, timestamp: 1 };
+}
+
+export function assistant(
+  model: Model<Api>,
+  content: AssistantMessage["content"],
+  stopReason: AssistantMessage["stopReason"] = "stop",
+): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason,
+    timestamp: 2,
+  };
+}
+
+export function successfulResponse(text: string): Chunk[] {
+  return [
+    sseChunk({ choices: [{ delta: { content: text }, finish_reason: null }] }),
+    sseChunk({
+      choices: [{ delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }),
+  ];
 }
 
 export async function createCompatibilityHarness(): Promise<{
