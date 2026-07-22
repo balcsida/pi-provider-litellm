@@ -20,9 +20,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
-  legacyModels(context: RefreshModelsContext): Promise<readonly Model<LiteLLMApi>[] | undefined>;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult>;
-  onRefresh?(models: readonly Model<LiteLLMApi>[], credential?: Credential): Promise<void> | void;
 };
 
 export function toNativeModels(
@@ -41,7 +39,6 @@ export function toNativeModels(
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): LiteLLMProviderController {
   let lastContext: RefreshModelsContext | undefined;
   let lastDiscovery: DiscoveryResult | undefined;
-  let inflightRefresh: Promise<void> | undefined;
   const inner = createProvider<LiteLLMApi>({
     id: options.id,
     name: options.name,
@@ -62,21 +59,9 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): LiteLLMP
   const innerRefresh = inner.refreshModels!;
   const provider: Provider<LiteLLMApi> = {
     ...inner,
-    refreshModels(context) {
+    async refreshModels(context) {
       lastContext = context;
-      inflightRefresh ??= (async () => {
-        try {
-          if (!(await context.store.read())) {
-            const legacy = await options.legacyModels(context);
-            if (legacy) await context.store.write({ models: legacy, checkedAt: Date.now() });
-          }
-          await innerRefresh(context);
-          await options.onRefresh?.(provider.getModels(), context.credential);
-        } finally {
-          inflightRefresh = undefined;
-        }
-      })();
-      return inflightRefresh;
+      await innerRefresh(context);
     },
   };
 

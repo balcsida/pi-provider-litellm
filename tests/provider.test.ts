@@ -66,7 +66,6 @@ function controller(overrides: Partial<Parameters<typeof createLiteLLMProvider>[
     name: "LiteLLM",
     baseUrl: "https://proxy.example/v1",
     auth,
-    legacyModels: vi.fn(async () => undefined),
     discover: vi.fn(async () => discovered("fresh")),
     ...overrides,
   });
@@ -96,6 +95,15 @@ describe("toNativeModels", () => {
 });
 
 describe("createLiteLLMProvider", () => {
+  it("delegates native store restoration directly to createProvider", async () => {
+    const modelsStore = store([native("stored")]);
+    const value = controller();
+
+    await value.provider.refreshModels?.(context(modelsStore, false));
+
+    expect(modelsStore.read).toHaveBeenCalledOnce();
+  });
+
   it("restores stored models offline without discovery", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const value = controller({ discover });
@@ -104,18 +112,6 @@ describe("createLiteLLMProvider", () => {
 
     expect(value.provider.getModels()).toEqual([native("stored")]);
     expect(discover).not.toHaveBeenCalled();
-  });
-
-  it("imports a valid legacy cache into an empty native store", async () => {
-    const modelsStore = store();
-    const legacyModels = vi.fn(async () => [native("legacy")]);
-    const value = controller({ legacyModels });
-
-    await value.provider.refreshModels?.(context(modelsStore, false));
-
-    expect(legacyModels).toHaveBeenCalledOnce();
-    expect(modelsStore.write).toHaveBeenCalledOnce();
-    expect(value.provider.getModels()).toEqual([native("legacy")]);
   });
 
   it("publishes and persists successful discovery", async () => {
@@ -174,26 +170,6 @@ describe("createLiteLLMProvider", () => {
     expect(discover).toHaveBeenCalledOnce();
   });
 
-  it("shares legacy import and refresh callbacks across concurrent initialization", async () => {
-    let release!: (models: readonly Model<"openai-completions" | "openai-responses">[]) => void;
-    const pending = new Promise<readonly Model<"openai-completions" | "openai-responses">[]>((resolve) => {
-      release = resolve;
-    });
-    const legacyModels = vi.fn(() => pending);
-    const onRefresh = vi.fn();
-    const modelsStore = store();
-    const value = controller({ legacyModels, onRefresh });
-
-    const first = value.provider.refreshModels?.(context(modelsStore, false));
-    const second = value.provider.refreshModels?.(context(modelsStore, false));
-    release([native("legacy")]);
-    await Promise.all([first, second]);
-
-    expect(legacyModels).toHaveBeenCalledOnce();
-    expect(modelsStore.write).toHaveBeenCalledOnce();
-    expect(onRefresh).toHaveBeenCalledOnce();
-  });
-
   it("routes Responses models through the Responses API", async () => {
     apiSpies.responses.mockReturnValueOnce({});
     const responseModel = toNativeModels("litellm", "https://proxy.example/v1", [
@@ -209,19 +185,14 @@ describe("createLiteLLMProvider", () => {
 
   it("force refreshes with the last Pi context and supplied signal", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
-    const onRefresh = vi.fn();
-    const legacyModels = vi.fn(async () => undefined);
     const modelsStore = store([native("old")]);
-    const value = controller({ discover, legacyModels, onRefresh });
+    const value = controller({ discover });
     await value.provider.refreshModels?.(context(modelsStore, false));
-    await modelsStore.delete();
     const abort = new AbortController();
 
     await expect(value.forceRefresh(abort.signal)).resolves.toEqual(discovered("fresh"));
 
     expect(discover).toHaveBeenCalledWith(credential, abort.signal);
-    expect(legacyModels).toHaveBeenLastCalledWith(expect.objectContaining({ allowNetwork: true, force: true }));
-    expect(onRefresh).toHaveBeenLastCalledWith([native("fresh")], credential);
     expect(modelsStore.write).toHaveBeenCalledOnce();
   });
 

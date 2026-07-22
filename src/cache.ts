@@ -9,18 +9,9 @@ export function fingerprint(apiKey: string): string {
   return scryptSync(apiKey, FINGERPRINT_SALT, 32).toString("hex");
 }
 
-export function isCacheValid(
-  cache: CacheFile | null,
-  baseUrl: string,
-  apiKey: string,
-  headersFingerprint?: string,
-): boolean {
+export function isCacheValid(cache: CacheFile | null, baseUrl: string, apiKey: string): boolean {
   if (!cache) return false;
-  return (
-    cache.baseUrl === baseUrl &&
-    cache.apiKeyFingerprint === fingerprint(apiKey) &&
-    cache.headersFingerprint === headersFingerprint
-  );
+  return cache.baseUrl === baseUrl && cache.apiKeyFingerprint === fingerprint(apiKey);
 }
 
 export async function readCache(path: string): Promise<CacheFile | null> {
@@ -57,4 +48,8 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
   await rename(tmp, path);
+}
+
+export async function writeCache(path: string, cache: CacheFile): Promise<void> {
+  await writeJsonAtomic(path, cache);
 }
