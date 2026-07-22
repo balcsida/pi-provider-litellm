@@ -53,7 +53,11 @@ describe("feature parity", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers[0]?.config.apiKey).toMatch(/^!.*gcloud-token-cli\.js/);
+    await expect(
+      pi.providers[0]?.auth.apiKey?.check?.({
+        ctx: { env: async (name) => process.env[name], fileExists: async () => false },
+      }),
+    ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
   });
 
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {

@@ -68,8 +68,7 @@ describe("Pi core model overrides", () => {
       allowModelNetwork: false,
     });
     const pi = createPi();
-    pi.registerProvider = (name, config) =>
-      runtime.registerProvider(name, config as unknown as Parameters<ModelRuntime["registerProvider"]>[1]);
+    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
     await (await loadExtension(agentDir))(pi);
 
     expect(runtime.getModel("litellm", "cached-model")).toMatchObject({ name: "Cached override", contextWindow: 321 });

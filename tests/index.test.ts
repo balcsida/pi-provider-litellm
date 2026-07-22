@@ -2,6 +2,13 @@ import { execSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+  AuthInteraction,
+  Credential,
+  Provider,
+  ProviderModelsStore,
+  RefreshModelsContext,
+} from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprint } from "../src/cache.js";
 import { createLoadedPi, createPi, loadExtension, type TestPi } from "./test-helpers.js";
@@ -104,6 +111,70 @@ async function writeModelCache(agentDir: string, helperPath: string, models: unk
   );
 }
 
+function createModelsStore(): ProviderModelsStore {
+  let entry: Awaited<ReturnType<ProviderModelsStore["read"]>>;
+  return {
+    read: async () => entry,
+    write: async (next) => {
+      entry = next;
+    },
+    delete: async () => {
+      entry = undefined;
+    },
+  };
+}
+
+async function refreshProvider(
+  provider: Provider,
+  options: Omit<RefreshModelsContext, "store"> & { store?: ProviderModelsStore },
+): Promise<readonly unknown[]> {
+  await provider.refreshModels?.({ ...options, store: options.store ?? createModelsStore() });
+  return provider.getModels();
+}
+
+function resolveApiKey(provider: Provider, credential?: Extract<Credential, { type: "api_key" }>) {
+  return provider.auth.apiKey?.resolve({
+    credential,
+    ctx: {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    },
+  });
+}
+
+function interaction(
+  prompt: AuthInteraction["prompt"],
+  notify: AuthInteraction["notify"] = vi.fn(),
+  signal?: AbortSignal,
+): AuthInteraction {
+  return { prompt, notify, signal };
+}
+
+async function loginOAuth(
+  provider: Provider,
+  callbacks: {
+    onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+    onAuth?: (event: { url: string; instructions?: string }) => void;
+    onProgress?: (message: string) => void;
+    signal?: AbortSignal;
+  },
+) {
+  return provider.auth.oauth?.login(
+    interaction(
+      (prompt) =>
+        callbacks.onPrompt({
+          message: prompt.message,
+          placeholder: "placeholder" in prompt ? prompt.placeholder : undefined,
+        }),
+      (event) => {
+        if (event.type === "auth_url") callbacks.onAuth?.(event);
+        if (event.type === "progress") callbacks.onProgress?.(event.message);
+      },
+      callbacks.signal,
+    ),
+  );
+}
+
 async function startSession(pi: TestPi, refreshes = pi.providers.length): Promise<void> {
   const providerCount = pi.providers.length;
   for (const handler of pi.handlers.get("session_start") ?? []) {
@@ -146,7 +217,7 @@ describe("extension startup", () => {
     await startSession(pi);
 
     expect(urls).not.toContain("https://models.dev/api.json");
-    expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("gpt-5.5");
+    expect(pi.providers.at(-1)?.getModels()[0]?.id).toBe("gpt-5.5");
   });
 
   it("uses mismatched cached models until session-start refresh", async () => {
@@ -177,13 +248,15 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+    expect(pi.providers[0]?.getModels()).toEqual(cachedModels);
 
     for (const handler of pi.handlers.get("session_start") ?? []) {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
     }
     await vi.waitFor(() => {
-      expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("fresh-model");
+      expect((pi.providers.at(-1)?.getModels() as unknown as Array<{ id: string }> | undefined)?.[0]?.id).toBe(
+        "fresh-model",
+      );
     });
   });
 
@@ -206,16 +279,16 @@ describe("extension startup", () => {
     await extension(pi);
 
     await startSession(pi);
-    const config = pi.providers.at(-1)?.config;
+    const provider = pi.providers.at(-1)!;
     const credential = { type: "api_key" as const, key: "env-key" };
-    await config?.refreshModels?.({ allowNetwork: true, credential });
+    await refreshProvider(provider, { allowNetwork: true, credential });
     fetchMock.mockClear();
 
-    const models = await config?.refreshModels?.({ allowNetwork: true, credential });
+    const models = await refreshProvider(provider, { allowNetwork: true, credential });
     expect(models).toEqual([expect.objectContaining({ id: "fresh-model" })]);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    await config?.refreshModels?.({ allowNetwork: true, force: true, credential });
+    await refreshProvider(provider, { allowNetwork: true, force: true, credential });
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/model\/info$/), expect.anything());
   });
 
@@ -256,7 +329,7 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    const models = await refreshProvider(pi.providers[0]!, { allowNetwork: true });
 
     expect(models).toEqual(cachedModels);
     expect(requestedUrls).toEqual(["https://litellm.example.com/mcp-rest/tools/list"]);
@@ -297,8 +370,8 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
-    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true });
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search");
@@ -336,9 +409,9 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
-    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, force: true });
-    await pi.providers.at(-1)?.config.refreshModels?.({ allowNetwork: true });
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true });
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true, force: true });
+    await refreshProvider(pi.providers.at(-1)!, { allowNetwork: true });
 
     expect(mcpAttempts).toBe(3);
   });
@@ -377,8 +450,8 @@ describe("extension startup", () => {
     await extension(pi);
 
     await Promise.all([
-      pi.providers[0]?.config.refreshModels?.({ allowNetwork: true }),
-      pi.providers[0]?.config.refreshModels?.({ allowNetwork: true }),
+      refreshProvider(pi.providers[0]!, { allowNetwork: true }),
+      refreshProvider(pi.providers[0]!, { allowNetwork: true }),
     ]);
 
     expect(requestedUrls).toEqual(["https://litellm.example.com/mcp-rest/tools/list"]);
@@ -395,7 +468,7 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    const models = await refreshProvider(pi.providers[0]!, { allowNetwork: true });
 
     expect(models).toEqual(cachedModels);
     expect(await readHelperCount(agentDir)).toBe(1);
@@ -429,7 +502,7 @@ describe("extension startup", () => {
     await extension(pi);
     const controller = new AbortController();
 
-    const refresh = pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, signal: controller.signal });
+    const refresh = refreshProvider(pi.providers[0]!, { allowNetwork: true, signal: controller.signal });
     await vi.waitFor(() => expect(resolveDiscovery).toBeDefined());
     controller.abort(new Error("refresh cancelled"));
     resolveDiscovery?.(
@@ -554,7 +627,7 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+    expect(pi.providers[0]?.auth.apiKey).toMatchObject({ name: "LiteLLM API key", login: expect.any(Function) });
   });
 
   it("registers the env key when gcloud ADC auth falls back during discovery", async () => {
@@ -582,7 +655,7 @@ describe("extension startup", () => {
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to read ADC file"));
     expect(seenAuthHeaders).toEqual(["Bearer env-key"]);
-    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
+    expect(await resolveApiKey(pi.providers[0]!)).toMatchObject({ auth: { apiKey: "env-key" } });
     const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
       apiKeyFingerprint: string;
     };
@@ -621,7 +694,7 @@ describe("extension startup", () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile(agentDir, "first-adc", "first-refresh");
     let pi = await createLoadedPi(agentDir);
     await startSession(pi);
-    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+    expect((pi.providers.at(-1)!.getModels() as unknown as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "first-model",
     ]);
 
@@ -630,7 +703,7 @@ describe("extension startup", () => {
     await startSession(pi);
 
     expect(seenModelAuthHeaders).toEqual(["Bearer first-token", "Bearer second-token"]);
-    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+    expect((pi.providers.at(-1)!.getModels() as unknown as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "second-model",
     ]);
   });
@@ -641,7 +714,7 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
+    expect(pi.providers[0]?.baseUrl).toBe("https://litellm.example.com/v1");
   });
 
   it("refreshes LiteLLM models through Pi's provider callback", async () => {
@@ -672,7 +745,7 @@ describe("extension startup", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, force: true });
+    const models = await refreshProvider(pi.providers[0]!, { allowNetwork: true, force: true });
     expect(models).toEqual([expect.objectContaining({ id: "refreshed-model" })]);
   });
 
@@ -699,7 +772,7 @@ describe("extension startup", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    const models = await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    const models = await refreshProvider(pi.providers[0]!, { allowNetwork: true });
     expect(models).toEqual([expect.objectContaining({ id: "cached-model" })]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -728,7 +801,7 @@ describe("extension startup", () => {
       "utf8",
     );
 
-    await pi.providers[0]?.config.refreshModels?.({
+    await refreshProvider(pi.providers[0]!, {
       allowNetwork: true,
       credential: { type: "api_key", key: "callback-key" },
     });
@@ -756,7 +829,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
     const controller = new AbortController();
 
-    const refresh = pi.providers[0]?.config.refreshModels?.({ allowNetwork: true, signal: controller.signal });
+    const refresh = refreshProvider(pi.providers[0]!, { allowNetwork: true, signal: controller.signal });
     controller.abort(new Error("refresh cancelled"));
 
     await expect(refresh).rejects.toThrow("refresh cancelled");
@@ -835,25 +908,29 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
-    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
-    expect(pi.providers[0]?.config).toMatchObject({
+    expect(pi.providers.slice(0, 2).map((provider) => provider.id)).toEqual(["litellm", "litellm-anthropic"]);
+    expect(pi.providers[0]).toMatchObject({
       baseUrl: "https://litellm.example.com/v1",
-      apiKey: "$LITELLM_API_KEY",
       headers: { "x-litellm-customer-id": "openai-customer" },
     });
-    expect(pi.providers[1]?.config).toMatchObject({
+    expect(pi.providers[1]).toMatchObject({
       baseUrl: "https://litellm-anthropic.example.com/v1",
-      apiKey: "$LITELLM_ANTHROPIC_API_KEY",
       headers: { "x-litellm-customer-id": "anthropic-customer" },
     });
     expect(
       (
-        pi.providers.filter((provider) => provider.name === "litellm").at(-1)!.config.models as Array<{ id: string }>
+        pi.providers
+          .filter((provider) => provider.id === "litellm")
+          .at(-1)!
+          .getModels() as unknown as Array<{ id: string }>
       ).map((model) => model.id),
     ).toEqual(["gpt-5"]);
     expect(
       (
-        pi.providers.filter((provider) => provider.name === "litellm-anthropic").at(-1)!.config.models as Array<{
+        pi.providers
+          .filter((provider) => provider.id === "litellm-anthropic")
+          .at(-1)!
+          .getModels() as unknown as Array<{
           id: string;
         }>
       ).map((model) => model.id),
@@ -931,8 +1008,8 @@ describe("extension startup", () => {
       url: "https://litellm-anthropic.example.com/model/info",
       authorization: "Bearer anthropic-key",
     });
-    expect(pi.providers[0]?.config.apiKey).toBe(`!${helperPath}`);
-    expect(pi.providers[1]?.config.apiKey).toBe("$LITELLM_ANTHROPIC_API_KEY");
+    expect(await resolveApiKey(pi.providers[0]!)).toMatchObject({ auth: { apiKey: "default-helper-key" } });
+    expect(await resolveApiKey(pi.providers[1]!)).toMatchObject({ auth: { apiKey: "anthropic-key" } });
   });
 
   it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
@@ -990,7 +1067,7 @@ describe("extension startup", () => {
     expect(notify).toHaveBeenCalledWith("LiteLLM refresh disabled (LITELLM_DISCOVERY_TIMEOUT_MS=0)", "warning");
   });
 
-  it("prompts during login and caches discovered models", async () => {
+  it("returns a native API-key credential without discovery side effects", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     process.env.LITELLM_VERBOSE_DISCOVERY = "1";
@@ -1010,39 +1087,38 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    const promptMessages: string[] = [];
-    const progress = vi.fn();
-    const credential = await pi.providers[0]?.config.oauth?.login({
-      onPrompt: async (options) => {
-        promptMessages.push(options.message);
-        if (options.placeholder) return " http://127.0.0.1:4000/v1 ";
-        if (options.message.includes("Select login method")) return "1";
-        return " sk-login ";
-      },
-      onProgress: progress,
-      signal: new AbortController().signal,
-    });
+    const prompt = vi.fn().mockResolvedValueOnce(" http://127.0.0.1:4000/v1 ").mockResolvedValueOnce(" sk-login ");
+    const credential = await pi.providers[0]?.auth.apiKey?.login?.(interaction(prompt));
 
-    expect(promptMessages).toEqual([
-      "Enter LiteLLM proxy URL (no trailing /v1):",
-      "Select login method (1 = API key / !command, 2 = SSO / Enterprise JWT):",
-      "Enter API key:",
-    ]);
-    expect(seenRequests).toEqual([{ url: "http://127.0.0.1:4000/model/info", authorization: "Bearer sk-login" }]);
-    expect(credential).toMatchObject({
-      access: "sk-login",
-      refresh: "",
-      baseUrl: "http://127.0.0.1:4000",
+    expect(prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "text" }));
+    expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "secret" }));
+    expect(seenRequests).toEqual([]);
+    expect(credential).toEqual({
+      type: "api_key",
+      key: "sk-login",
+      env: { LITELLM_BASE_URL: "http://127.0.0.1:4000" },
     });
-    const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
-      models: Array<{ id: string }>;
-    };
-    expect(cache.models.map((model) => model.id)).toEqual(["vidaimock-openai"]);
-    expect(progress).toHaveBeenCalledWith("LiteLLM: 1 models discovered (source: model_info)");
     delete process.env.LITELLM_VERBOSE_DISCOVERY;
   });
 
-  it("re-registers models discovered during login", async () => {
+  it("checks command-backed auth without executing the helper", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["helper-key"]);
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const result = await pi.providers[0]?.auth.apiKey?.check?.({
+      ctx: { env: async (name) => process.env[name], fileExists: async () => false },
+    });
+
+    expect(result).toEqual({ type: "api_key", source: "LITELLM_API_KEY_HELPER" });
+    expect(await readHelperCount(agentDir)).toBe(0);
+  });
+
+  it("leaves model refresh to Pi after login", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -1057,17 +1133,17 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers).toHaveLength(1);
-    expect(pi.providers[0]?.config.models).toEqual([]);
+    expect(pi.providers[0]?.getModels()).toEqual([]);
 
-    await pi.providers[0]?.config.oauth?.login({
+    await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => (options.placeholder ? " http://127.0.0.1:4000/v1 " : " sk-login "),
       signal: new AbortController().signal,
     });
 
-    const registeredModels = pi.providers[1]?.config.models as Array<{ id: string }> | undefined;
-    expect(pi.providers).toHaveLength(2);
-    expect(pi.providers[1]?.config.baseUrl).toBe("http://127.0.0.1:4000/v1");
-    expect(registeredModels?.map((model) => model.id)).toEqual(["vidaimock-openai"]);
+    const registeredModels = pi.providers[1]?.getModels() as unknown as Array<{ id: string }> | undefined;
+    expect(pi.providers).toHaveLength(1);
+    expect(registeredModels).toBeUndefined();
+    expect(vi.mocked(globalThis.fetch).mock.calls.every(([url]) => !String(url).endsWith("/model/info"))).toBe(true);
   });
 
   it("discovers MCP tools again after login changes credentials", async () => {
@@ -1110,15 +1186,15 @@ describe("extension startup", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
-    await pi.providers[0]?.config.refreshModels?.({ allowNetwork: true });
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true });
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => (options.placeholder ? "https://new.example.com" : "new-key"),
       signal: new AbortController().signal,
     });
-    const storedCredential = { type: "oauth" as const, ...credential! };
+    const storedCredential = credential!;
     await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: storedCredential }), "utf8");
-    await pi.providers.at(-1)?.config.refreshModels?.({ allowNetwork: true, credential: storedCredential });
+    await refreshProvider(pi.providers.at(-1)!, { allowNetwork: true, credential: storedCredential });
 
     expect(requestedUrls).toContain("https://new.example.com/mcp-rest/tools/list");
     expect(pi.tools.map((tool) => tool.name)).toContain("mcp_new_search");
@@ -1129,7 +1205,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     expect(pi.commands.has("login")).toBe(false);
-    expect(pi.providers[0]?.config.oauth).toBeDefined();
+    expect(pi.providers[0]?.auth.oauth).toBeDefined();
     expect(pi.handlers.has("input")).toBe(false);
   });
 
@@ -1155,11 +1231,11 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
     expect(callCount).toBe(0);
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => (options.placeholder ? " http://127.0.0.1:4000/v1 " : " sk-login "),
       signal: new AbortController().signal,
     });
-    expect(callCount).toBe(1);
+    expect(callCount).toBe(0);
     await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: { type: "oauth", ...credential } }), "utf8");
 
     vi.mocked(Date.now).mockReturnValue(loginTime + 25 * 60 * 60 * 1000);
@@ -1168,13 +1244,7 @@ describe("extension startup", () => {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
     }
 
-    await vi.waitFor(() => {
-      expect(callCount).toBe(2);
-      expect(pi.providers).toHaveLength(3);
-      expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe(
-        "vidaimock-openai-2",
-      );
-    });
+    expect(callCount).toBe(0);
   });
 
   it("registers the helper as a per-request `!command` provider key that re-runs each request", async () => {
@@ -1203,9 +1273,8 @@ describe("extension startup", () => {
     // (ModelRegistry.getApiKeyAndHeaders) resolves provider keys via resolveConfigValueUncached,
     // re-executing the command on every request — it does NOT use the process-lifetime command
     // cache. Simulate that by resolving the registered command twice and asserting fresh tokens.
-    const registeredKey = pi.providers[0]?.config.apiKey;
-    expect(registeredKey).toBe(`!${helperPath}`);
-    expect(pi.providers[0]?.config.baseUrl).toBe("https://litellm.example.com/v1");
+    const registeredKey = `!${helperPath}`;
+    expect(pi.providers[0]?.baseUrl).toBe("https://litellm.example.com/v1");
 
     const command = (registeredKey as string).slice(1);
     const resolveUncached = () => execSync(command, { encoding: "utf8" }).trim();
@@ -1233,7 +1302,7 @@ describe("extension startup", () => {
       const pi = await createLoadedPi(agentDir);
       expect(fetchMock).toHaveBeenCalledTimes(fetches ? 1 : 0);
       expect(await readHelperCount(agentDir)).toBe(helperRuns);
-      expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+      expect(pi.providers[0]?.getModels()).toEqual(cachedModels);
     } finally {
       process.argv = originalArgv;
     }
@@ -1253,7 +1322,7 @@ describe("extension startup", () => {
       const pi = await createLoadedPi(agentDir);
       expect(fetchMock).not.toHaveBeenCalled();
       expect(await readHelperCount(agentDir)).toBe(1);
-      expect(pi.providers[0]?.config.models).toEqual(cachedModels);
+      expect(pi.providers[0]?.getModels()).toEqual(cachedModels);
     } finally {
       process.argv = originalArgv;
     }
@@ -1272,21 +1341,18 @@ describe("extension startup", () => {
     );
 
     const pi = await createLoadedPi(agentDir);
-    const credential = await pi.providers[0]?.config.oauth?.login({
-      onPrompt: async (options) => (options.placeholder ? "https://litellm.example.com" : `!${helperPath}`),
-    });
-    const refreshed = await pi.providers[0]?.config.oauth?.refreshToken(credential!);
-    const apiKey = pi.providers[0]?.config.oauth?.getApiKey(refreshed!);
+    const credential = await pi.providers[0]?.auth.apiKey?.login?.(
+      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+    );
+    const firstAuth = await resolveApiKey(pi.providers[0]!, credential);
+    const secondAuth = await resolveApiKey(pi.providers[0]!, credential);
 
-    expect(credential?.access).toBe(first);
-    expect(credential?.refresh).toBe(`!${helperPath}`);
-    expect(credential?.expires).toBeLessThan((Math.floor(now / 1000) + 60) * 1000);
-    expect(refreshed?.access).toBe(second);
-    expect(apiKey).toBe(second);
+    expect(firstAuth?.auth.apiKey).toBe(first);
+    expect(secondAuth?.auth.apiKey).toBe(second);
     expect(await readHelperCount(agentDir)).toBe(2);
   });
 
-  it("marks opaque command-backed tokens expired without re-running after refresh", async () => {
+  it("resolves opaque command-backed API keys for each request", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const helperPath = await writeHelper(agentDir, ["opaque-first", "opaque-second", "unexpected-third"]);
@@ -1295,15 +1361,12 @@ describe("extension startup", () => {
     );
 
     const pi = await createLoadedPi(agentDir);
-    const credential = await pi.providers[0]?.config.oauth?.login({
-      onPrompt: async (options) => (options.placeholder ? "https://litellm.example.com" : `!${helperPath}`),
-    });
-    const refreshed = await pi.providers[0]?.config.oauth?.refreshToken(credential!);
-    const apiKey = pi.providers[0]?.config.oauth?.getApiKey(refreshed!);
+    const credential = await pi.providers[0]?.auth.apiKey?.login?.(
+      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+    );
 
-    expect(credential).toMatchObject({ access: "opaque-first", refresh: `!${helperPath}`, expires: 0 });
-    expect(refreshed).toMatchObject({ access: "opaque-second", refresh: `!${helperPath}`, expires: 0 });
-    expect(apiKey).toBe("opaque-second");
+    expect((await resolveApiKey(pi.providers[0]!, credential))?.auth.apiKey).toBe("opaque-first");
+    expect((await resolveApiKey(pi.providers[0]!, credential))?.auth.apiKey).toBe("opaque-second");
     expect(await readHelperCount(agentDir)).toBe(2);
   });
 
@@ -1359,7 +1422,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     const authInfos: Array<{ url: string; instructions?: string }> = [];
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1372,6 +1435,7 @@ describe("extension startup", () => {
 
     expect(authInfos).toEqual([
       {
+        type: "auth_url",
         url: "https://litellm.example.com/sso/key/generate",
         instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
       },
@@ -1382,6 +1446,10 @@ describe("extension startup", () => {
       expires: Number.MAX_SAFE_INTEGER,
       baseUrl: "https://litellm.example.com",
     });
+    await expect(pi.providers[0]?.auth.oauth?.toAuth(credential!)).resolves.toMatchObject({
+      apiKey: "sk-virtual-abc",
+      baseUrl: "https://litellm.example.com/v1",
+    });
     expect(seenRequests).toContainEqual(
       expect.objectContaining({
         url: "https://litellm.example.com/key/generate",
@@ -1389,12 +1457,7 @@ describe("extension startup", () => {
         authorization: `Bearer ${jwt}`,
       }),
     );
-    expect(seenRequests).toContainEqual(
-      expect.objectContaining({
-        url: "https://litellm.example.com/model/info",
-        authorization: "Bearer sk-virtual-abc",
-      }),
-    );
+    expect(seenRequests.every(({ url }) => !url.endsWith("/model/info"))).toBe(true);
   });
 
   it("enterprise SSO login strips Bearer prefix from pasted SSO token", async () => {
@@ -1412,7 +1475,7 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    await pi.providers[0]?.config.oauth?.login({
+    await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1440,7 +1503,7 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1483,7 +1546,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     const controller = new AbortController();
-    const loginPromise = pi.providers[0]?.config.oauth?.login({
+    const loginPromise = loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1528,7 +1591,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
     const controller = new AbortController();
     const reason = new Error("caller cancelled login");
-    const loginPromise = pi.providers[0]?.config.oauth?.login({
+    const loginPromise = loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1559,7 +1622,7 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1589,7 +1652,7 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1599,7 +1662,7 @@ describe("extension startup", () => {
       signal: new AbortController().signal,
     });
 
-    await expect(pi.providers[0]?.config.oauth?.refreshToken(credential!)).rejects.toThrow(
+    await expect(pi.providers[0]?.auth.oauth?.refresh(credential!)).rejects.toThrow(
       "LiteLLM credential cannot be refreshed; run /login litellm again",
     );
   });
@@ -1618,7 +1681,7 @@ describe("extension startup", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    const credential = await pi.providers[0]?.config.oauth?.login({
+    const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1640,7 +1703,7 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
 
     await expect(
-      pi.providers[0]?.config.oauth?.login({
+      loginOAuth(pi.providers[0]!, {
         onPrompt: async (options) => {
           if (options.placeholder) return "https://litellm.example.com";
           if (options.message.includes("Select login method")) return "2";
@@ -1684,9 +1747,11 @@ describe("multi-provider hardening", () => {
     const pi = await createLoadedPi(agentDir);
     await startSession(pi, 1);
 
-    expect(pi.providers.slice(0, 2).map((provider) => provider.name)).toEqual(["litellm", "litellm-anthropic"]);
-    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual(["gpt-5"]);
-    expect(pi.providers[1]?.config.models).toEqual([]);
+    expect(pi.providers.slice(0, 2).map((provider) => provider.id)).toEqual(["litellm", "litellm-anthropic"]);
+    expect((pi.providers.at(-1)!.getModels() as unknown as Array<{ id: string }>).map((model) => model.id)).toEqual([
+      "gpt-5",
+    ]);
+    expect(pi.providers[1]?.getModels()).toEqual([]);
   });
 
   it("does not register the default env key for an alias missing its apiKey", async () => {
@@ -1708,12 +1773,12 @@ describe("multi-provider hardening", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers[0]?.config.apiKey).toBe("$LITELLM_API_KEY");
-    expect(pi.providers[1]?.name).toBe("litellm-anthropic");
-    expect(pi.providers[1]?.config.apiKey).toBeUndefined();
+    expect(await resolveApiKey(pi.providers[0]!)).toMatchObject({ auth: { apiKey: "openai-key" } });
+    expect(pi.providers[1]?.id).toBe("litellm-anthropic");
+    expect(await resolveApiKey(pi.providers[1]!)).toBeUndefined();
   });
 
-  it("escapes resolved header values so Pi core does not re-resolve them per request", async () => {
+  it("keeps resolved native provider header values literal", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "openai-key";
@@ -1733,7 +1798,7 @@ describe("multi-provider hardening", () => {
     await startSession(pi);
 
     expect(seenSecretHeaders).toEqual(["v$X"]);
-    expect(pi.providers[0]?.config.headers).toEqual({ "x-secret": "v$$X", "x-bang": "$!not-a-command" });
+    expect(pi.providers[0]?.headers).toEqual({ "x-secret": "v$X", "x-bang": "!not-a-command" });
   });
 
   it("prefers a configured default-provider apiKey over the env helper command", async () => {
@@ -1764,7 +1829,7 @@ describe("multi-provider hardening", () => {
     await startSession(pi);
 
     expect(seenAuthHeaders).toEqual(["Bearer custom-key"]);
-    expect(pi.providers[0]?.config.apiKey).toBe("$CUSTOM_LITELLM_KEY");
+    expect(await resolveApiKey(pi.providers[0]!)).toMatchObject({ auth: { apiKey: "custom-key" } });
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 
@@ -1892,7 +1957,7 @@ describe("multi-provider hardening", () => {
     });
     const pi = await createLoadedPi(agentDir);
 
-    await pi.providers[0]?.config.oauth?.login({
+    await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.placeholder) return "https://litellm.example.com";
         if (options.message.includes("Select login method")) return "2";
@@ -1924,7 +1989,7 @@ describe("multi-provider hardening", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers.map((provider) => provider.name)).toEqual(["litellm", "team-claude"]);
+    expect(pi.providers.map((provider) => provider.id)).toEqual(["litellm", "team-claude"]);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Team Claude"));
   });
 
@@ -1950,7 +2015,7 @@ describe("multi-provider hardening", () => {
 
     const pi = await createLoadedPi(agentDir);
 
-    expect(pi.providers[1]?.config.headers).toEqual({ "x-num": "30", "x-bool": "false" });
+    expect(pi.providers[1]?.headers).toEqual({ "x-num": "30", "x-bool": "false" });
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-obj"));
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-null"));
   });
@@ -1986,7 +2051,7 @@ describe("multi-provider hardening", () => {
     await startSession(pi);
 
     expect(seenRequests).toEqual([{ customer: "team-b" }]);
-    expect((pi.providers.at(-1)!.config.models as Array<{ id: string }>).map((model) => model.id)).toEqual([
+    expect((pi.providers.at(-1)!.getModels() as unknown as Array<{ id: string }>).map((model) => model.id)).toEqual([
       "fresh-model",
     ]);
   });

@@ -3,11 +3,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Api,
+  ApiKeyCredential,
   AssistantMessage,
+  AuthInteraction,
   Credential,
   Model,
+  OAuthCredential,
   OAuthCredentials,
-  OAuthLoginCallbacks,
+  ProviderAuth,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
@@ -22,8 +25,16 @@ import {
 } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
+import { createLiteLLMProvider } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { AuthFileEntry, CacheFile, DiscoveryOptions, DiscoveryResult, ResolvedCredentials } from "./types.js";
+import type {
+  AuthFileEntry,
+  CacheFile,
+  DiscoveredModel,
+  DiscoveryOptions,
+  DiscoveryResult,
+  ResolvedCredentials,
+} from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -211,14 +222,8 @@ async function generateVirtualKey(
   return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
 }
 
-function getLiteLLMApiKey(credentials: OAuthCredentials): string {
-  return credentials.access;
-}
-
 function resolveOAuthApiKey(credentials: OAuthCredentials): string {
-  return credentials.refresh.startsWith("!")
-    ? executeApiKeyCommand(credentials.refresh)
-    : getLiteLLMApiKey(credentials);
+  return credentials.refresh.startsWith("!") ? executeApiKeyCommand(credentials.refresh) : credentials.access;
 }
 
 function resolveTemplateConfigValue(config: string): string | undefined {
@@ -321,19 +326,6 @@ function computeHeadersFingerprint(headers: Record<string, string> | undefined):
     .sort()
     .map((key) => [key, headers[key]]);
   return fingerprint(JSON.stringify(sorted));
-}
-
-// Pi core resolves registered header values with the same $VAR/!command syntax
-// at request time, so already-resolved literals must be escaped or they get
-// resolved a second time ($UNSET would then fail every request).
-function escapeConfigValue(value: string): string {
-  const escaped = value.replace(/\$/g, "$$$$");
-  return escaped.startsWith("!") ? `$${escaped}` : escaped;
-}
-
-function escapeHeaderConfig(headers: Record<string, string> | undefined): Record<string, string> | undefined {
-  if (!headers) return undefined;
-  return Object.fromEntries(Object.entries(headers).map(([key, value]) => [key, escapeConfigValue(value)]));
 }
 
 async function resolveCredentials(
@@ -498,113 +490,75 @@ async function discoverWithFallback(
   }
 }
 
-async function loginLiteLLM(
-  callbacks: OAuthLoginCallbacks,
-  options: {
-    cachePath: string;
-    headers?: Record<string, string>;
-    onCacheWrite?: (cache: CacheFile) => void | Promise<void>;
-  },
-): Promise<OAuthCredentials> {
+async function loginApiKey(interaction: AuthInteraction): Promise<ApiKeyCredential> {
   const rawBaseUrl = (
-    await callbacks.onPrompt({
+    await interaction.prompt({
+      type: "text",
       message: "Enter LiteLLM proxy URL (no trailing /v1):",
       placeholder: "https://litellm.example.com",
     })
   ).trim();
   if (!rawBaseUrl) throw new Error("Base URL is required");
-
-  const baseUrl = normalizeBaseUrl(rawBaseUrl);
-  const method = (
-    await callbacks.onPrompt({
-      message: "Select login method (1 = API key / !command, 2 = SSO / Enterprise JWT):",
-    })
-  ).trim();
-
-  let apiKey: string;
-  let refresh: string;
-  let expires: number;
-
-  if (method === "2") {
-    callbacks.onAuth?.({
-      url: `${baseUrl}/sso/key/generate`,
-      instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
-    });
-    const rawToken = (await callbacks.onPrompt({ message: "Paste your SSO token from the LiteLLM UI:" }))
-      .trim()
-      .replace(/^Bearer\s+/i, "")
-      .trim();
-    if (!rawToken) throw new Error("SSO token is required");
-
-    const wantVirtualKey = (
-      await callbacks.onPrompt({ message: "Generate a LiteLLM virtual key from this token? (y/n):" })
-    )
-      .trim()
-      .toLowerCase();
-
-    if (wantVirtualKey !== "n" && wantVirtualKey !== "no") {
-      try {
-        callbacks.onProgress?.("Generating virtual key...");
-        const generated = await generateVirtualKey(baseUrl, rawToken, callbacks.signal, options.headers);
-        apiKey = generated.key;
-        refresh = "";
-        expires =
-          generated.expiresAt === undefined
-            ? PERMANENT_TOKEN_EXPIRES_AT
-            : Math.max(Date.now(), generated.expiresAt - TOKEN_REFRESH_LEAD_MS);
-        callbacks.onProgress?.("Virtual key generated and will be used for API calls.");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        callbacks.onProgress?.(`LiteLLM: virtual key generation failed (${message}); using SSO token directly.`);
-        apiKey = rawToken;
-        refresh = "";
-        expires = tokenExpiresAt(rawToken, PERMANENT_TOKEN_EXPIRES_AT);
-      }
-    } else {
-      apiKey = rawToken;
-      refresh = "";
-      expires = tokenExpiresAt(rawToken, PERMANENT_TOKEN_EXPIRES_AT);
-    }
-  } else {
-    const apiKeyInput = (await callbacks.onPrompt({ message: "Enter API key:" })).trim();
-    if (!apiKeyInput) throw new Error("Both base URL and API key are required");
-    refresh = apiKeyInput.startsWith("!") ? apiKeyInput : "";
-    apiKey = refresh ? executeApiKeyCommand(refresh) : apiKeyInput;
-    expires = tokenExpiresAt(apiKey, refresh ? EXPIRE_TOKEN_IMMEDIATELY : PERMANENT_TOKEN_EXPIRES_AT);
-  }
-
-  const { models, source } = await discoverModels(baseUrl, apiKey, {
-    ...getModelsDevDiscoveryOptions(),
-    timeoutMs: LOGIN_TIMEOUT_MS,
-    signal: callbacks.signal,
-    headers: options.headers,
-    silent: !isVerboseDiscovery(),
-    onProgress: (message) => callbacks.onProgress?.(`LiteLLM: ${message}`),
-  });
-
-  const cache: CacheFile = {
-    baseUrl,
-    apiKeyFingerprint: fingerprint(refresh || apiKey),
-    headersFingerprint: computeHeadersFingerprint(options.headers),
-    fetchedAt: Date.now(),
-    source,
-    models,
-  };
-  await writeCache(options.cachePath, cache);
-  await options.onCacheWrite?.(cache);
-  if (isVerboseDiscovery()) {
-    callbacks.onProgress?.(`LiteLLM: ${models.length} models discovered (source: ${source})`);
-  }
-
-  return {
-    access: apiKey,
-    refresh,
-    expires,
-    baseUrl,
-  } as OAuthCredentials & { baseUrl: string };
+  const key = (await interaction.prompt({ type: "secret", message: "Enter API key:" })).trim();
+  if (!key) throw new Error("Both base URL and API key are required");
+  return { type: "api_key", key, env: { [ENV_BASE_URL]: normalizeBaseUrl(rawBaseUrl) } };
 }
 
-async function refreshLiteLLM(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+async function loginOAuth(interaction: AuthInteraction): Promise<OAuthCredential> {
+  const rawBaseUrl = (
+    await interaction.prompt({
+      type: "text",
+      message: "Enter LiteLLM proxy URL (no trailing /v1):",
+      placeholder: "https://litellm.example.com",
+    })
+  ).trim();
+  if (!rawBaseUrl) throw new Error("Base URL is required");
+  const baseUrl = normalizeBaseUrl(rawBaseUrl);
+  interaction.notify({
+    type: "auth_url",
+    url: `${baseUrl}/sso/key/generate`,
+    instructions: "Authenticate via SSO, then copy your token from the LiteLLM UI.",
+  });
+  const rawToken = (await interaction.prompt({ type: "secret", message: "Paste your SSO token from the LiteLLM UI:" }))
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+  if (!rawToken) throw new Error("SSO token is required");
+  const wantVirtualKey = (
+    await interaction.prompt({ type: "text", message: "Generate a LiteLLM virtual key from this token? (y/n):" })
+  )
+    .trim()
+    .toLowerCase();
+  let access = rawToken;
+  let expires = tokenExpiresAt(rawToken, PERMANENT_TOKEN_EXPIRES_AT);
+  if (wantVirtualKey !== "n" && wantVirtualKey !== "no") {
+    try {
+      interaction.notify({ type: "progress", message: "Generating virtual key..." });
+      const generated = await generateVirtualKey(
+        baseUrl,
+        rawToken,
+        interaction.signal,
+        parseCustomHeaders(process.env[ENV_HEADERS]),
+      );
+      access = generated.key;
+      expires =
+        generated.expiresAt === undefined
+          ? PERMANENT_TOKEN_EXPIRES_AT
+          : Math.max(Date.now(), generated.expiresAt - TOKEN_REFRESH_LEAD_MS);
+      interaction.notify({ type: "progress", message: "Virtual key generated and will be used for API calls." });
+    } catch (error) {
+      if (interaction.signal?.aborted) throw interaction.signal.reason;
+      const message = error instanceof Error ? error.message : String(error);
+      interaction.notify({
+        type: "progress",
+        message: `LiteLLM: virtual key generation failed (${message}); using SSO token directly.`,
+      });
+    }
+  }
+  return { type: "oauth", access, refresh: "", expires, baseUrl };
+}
+
+async function refreshLiteLLM(credentials: OAuthCredentials, _signal?: AbortSignal): Promise<OAuthCredentials> {
   if (!credentials.refresh.startsWith("!")) {
     if (credentials.expires < PERMANENT_TOKEN_EXPIRES_AT) {
       throw new Error("LiteLLM credential cannot be refreshed; run /login litellm again");
@@ -615,10 +569,82 @@ async function refreshLiteLLM(credentials: OAuthCredentials): Promise<OAuthCrede
   return { ...credentials, access, expires: tokenExpiresAt(access, EXPIRE_TOKEN_IMMEDIATELY) };
 }
 
-function modifyLiteLLMModels(models: Model<Api>[], cred: OAuthCredentials): Model<Api>[] {
-  const baseUrl = (cred as { baseUrl?: string }).baseUrl;
-  if (!baseUrl) return models;
-  return models.map((m) => (m.provider === PROVIDER_NAME ? { ...m, baseUrl: `${baseUrl}/v1` } : m));
+async function resolveApiKeyAuth(
+  definition: ProviderDefinition,
+  ctx: { env(name: string): Promise<string | undefined> },
+  credential?: ApiKeyCredential,
+  executeHelpers = true,
+) {
+  const baseUrl =
+    cleanConfig(credential?.env?.[ENV_BASE_URL]) ??
+    cleanConfig(definition.baseUrl) ??
+    (definition.useDefaultEnv ? cleanConfig(await ctx.env(ENV_BASE_URL)) : undefined);
+  const stored = credential?.key
+    ? resolveConfigValue(credential.key, { executeCommands: executeHelpers })?.trim()
+    : undefined;
+  let creds: ResolvedCredentials;
+  if (stored) {
+    creds = {
+      baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : undefined,
+      apiKey: stored,
+      apiKeyFingerprint: fingerprint(stored),
+    };
+  } else {
+    creds = await resolveCredentials({ ...definition, useSavedAuth: false }, { executeHelpers });
+    if (!creds.baseUrl && baseUrl) creds.baseUrl = normalizeBaseUrl(baseUrl);
+  }
+  if (!creds.apiKey) return undefined;
+  return {
+    auth: {
+      apiKey: creds.apiKey,
+      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
+      headers: resolveHeaders(definition),
+    },
+    env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
+    source: stored ? "stored credential" : (creds.apiKeyConfig ?? ENV_API_KEY),
+  };
+}
+
+function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
+  return {
+    apiKey: {
+      name: `${definition.displayName} API key`,
+      login: definition.name === PROVIDER_NAME ? loginApiKey : undefined,
+      check: async ({ ctx, credential }) => {
+        const baseUrl =
+          credential?.env?.[ENV_BASE_URL] ??
+          definition.baseUrl ??
+          (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
+        if (!cleanConfig(baseUrl)) return undefined;
+        if (credential?.key) return { type: "api_key", source: "stored credential" };
+        if (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+          return { type: "api_key", source: "gcloud ADC" };
+        if (definition.apiKeyConfig) return { type: "api_key", source: definition.apiKeyConfig };
+        if (definition.useDefaultEnv && getApiKeyHelperCommand())
+          return { type: "api_key", source: ENV_API_KEY_HELPER };
+        return definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))
+          ? { type: "api_key", source: ENV_API_KEY }
+          : undefined;
+      },
+      resolve: ({ ctx, credential }) => resolveApiKeyAuth(definition, ctx, credential),
+    },
+    oauth: definition.enableOAuth
+      ? {
+          name: "LiteLLM SSO",
+          loginLabel: "Sign in with LiteLLM SSO",
+          login: loginOAuth,
+          refresh: async (credential, signal) => ({
+            ...(await refreshLiteLLM(credential, signal)),
+            type: "oauth" as const,
+          }),
+          toAuth: async (credential) => ({
+            apiKey: resolveOAuthApiKey(credential),
+            baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
+            headers: resolveHeaders(definition),
+          }),
+        }
+      : undefined,
+  };
 }
 
 function isReasoningItem(item: unknown): boolean {
@@ -870,79 +896,40 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const providerStates = await Promise.all(definitions.map(loadProviderState));
   const defaultState = providerStates.find((state) => state.definition.name === PROVIDER_NAME) ?? providerStates[0];
 
-  function defaultApiKeyConfig(definition: ProviderDefinition): string | undefined {
-    if (definition.useDefaultEnv) {
-      return definition.apiKeyConfig ?? getApiKeyHelperCommand() ?? `$${ENV_API_KEY}`;
-    }
-    // An alias must never inherit the default provider's env key; leaving the
-    // key unset makes requests fail loudly instead of leaking credentials.
-    return definition.apiKeyConfig;
-  }
-
-  function registerProvider(
-    state: ProviderState,
-    models = state.models,
-    apiKeyConfig = state.creds.apiKeyConfig,
-  ): void {
+  function registerProvider(state: ProviderState, models = state.models): void {
     const definition = state.definition;
-    pi.registerProvider(definition.name, {
+    state.models = models;
+    const controller = createLiteLLMProvider({
+      id: definition.name,
       name: definition.displayName,
       baseUrl: state.creds.baseUrl ? `${state.creds.baseUrl}/v1` : "https://litellm.example.com/v1",
-      apiKey: apiKeyConfig ?? defaultApiKeyConfig(definition),
-      api: "openai-completions",
-      headers: escapeHeaderConfig(state.headers),
-      models,
+      auth: createProviderAuth(definition),
+      discover: async (credential, signal) => {
+        const result = await runRefresh(state, undefined, credential, signal);
+        return { models: result.models as DiscoveredModel[], source: result.source as DiscoveryResult["source"] };
+      },
+    });
+    pi.registerProvider({
+      ...controller.provider,
+      headers: state.headers,
+      getModels: () => state.models as Model<Api>[],
       refreshModels: async ({ allowNetwork, force, credential, signal }) => {
         const cacheIsFresh = state.cacheFetchedAt > 0 && Date.now() - state.cacheFetchedAt <= CACHE_STALE_MS;
         const supplied = credential ? await credentialsFromRefresh(state, credential) : undefined;
         const credentialChanged =
           supplied !== undefined &&
           (supplied.baseUrl !== state.creds.baseUrl || supplied.apiKeyFingerprint !== state.creds.apiKeyFingerprint);
-        if (!allowNetwork || discoveryDisabledReason()) return Promise.resolve(state.models);
+        if (!allowNetwork || discoveryDisabledReason()) return;
         if (!state.refreshOnStart && cacheIsFresh && !state.refreshInProgress && !force && !credentialChanged) {
-          const registerTools =
-            state.definition.name === PROVIDER_NAME && !state.mcpRegistered
-              ? registerMcpTools(state, undefined, signal, supplied?.apiKey)
-              : Promise.resolve();
-          return registerTools.then(() => state.models);
+          await (state.definition.name === PROVIDER_NAME && !state.mcpRegistered
+            ? registerMcpTools(state, undefined, signal, supplied?.apiKey)
+            : Promise.resolve());
+          return;
         }
-        return runRefresh(state, undefined, credential, signal).then((result) => result.models);
+        await runRefresh(state, undefined, credential, signal);
       },
-      oauth: definition.enableOAuth ? oauth : undefined,
     });
   }
-
-  function defaultLoginOptions(): Parameters<typeof loginLiteLLM>[1] {
-    return {
-      cachePath: getCachePath(PROVIDER_NAME),
-      headers: defaultState.headers,
-      onCacheWrite: async (next) => {
-        if (
-          next.baseUrl !== defaultState.creds.baseUrl ||
-          next.apiKeyFingerprint !== defaultState.creds.apiKeyFingerprint
-        ) {
-          defaultState.mcpRegistered = false;
-          defaultState.liveDiscoveryApiKey = undefined;
-        }
-        defaultState.cacheFetchedAt = next.fetchedAt;
-        defaultState.models = next.models;
-        defaultState.creds = {
-          ...defaultState.creds,
-          baseUrl: next.baseUrl,
-          apiKeyFingerprint: next.apiKeyFingerprint,
-        };
-        registerProvider(defaultState, next.models);
-      },
-    };
-  }
-
-  const oauth = {
-    name: "LiteLLM",
-    login: (callbacks: OAuthLoginCallbacks) => loginLiteLLM(callbacks, defaultLoginOptions()),
-    refreshToken: refreshLiteLLM,
-    getApiKey: getLiteLLMApiKey,
-    modifyModels: modifyLiteLLMModels,
-  };
 
   for (const state of providerStates) registerProvider(state);
 
@@ -1060,7 +1047,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     state.liveDiscoveryApiKey = fresh.apiKey;
     state.cacheFetchedAt = now;
     state.refreshOnStart = false;
-    registerProvider(state, result.models, fresh.apiKeyConfig);
+    registerProvider(state, result.models);
     if (state.definition.name === PROVIDER_NAME) await registerMcpTools(state, onProgress, signal);
     return { providerName: state.definition.name, models: result.models, source: result.source };
   }
