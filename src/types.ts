@@ -8,15 +8,6 @@ export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "ap
   api?: LiteLLMApi;
 };
 
-export interface CacheFile {
-  baseUrl: string;
-  apiKeyFingerprint: string;
-  headersFingerprint?: string;
-  fetchedAt: number;
-  source: DiscoverySource;
-  models: DiscoveredModel[];
-}
-
 export interface DiscoveryResult {
   models: DiscoveredModel[];
   source: DiscoverySource;

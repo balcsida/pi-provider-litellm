@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fingerprint } from "../src/cache.js";
 import { createPi, loadExtension } from "./test-helpers.js";
 
 const ENV_KEYS = ["LITELLM_BASE_URL", "LITELLM_API_KEY"];
@@ -41,13 +40,25 @@ describe("Pi core model overrides", () => {
     process.env.LITELLM_API_KEY = "env-key";
     await writeModelsConfig(agentDir, "cached-model", "Cached override");
     await writeFile(
-      join(agentDir, "litellm-models.json"),
+      join(agentDir, "models-store.json"),
       JSON.stringify({
-        baseUrl: "https://litellm.example.com",
-        apiKeyFingerprint: fingerprint("env-key"),
-        fetchedAt: Date.now(),
-        source: "model_info",
-        models: [{ id: "cached-model", name: "cached-model" }],
+        litellm: {
+          checkedAt: Date.now(),
+          models: [
+            {
+              id: "cached-model",
+              name: "cached-model",
+              provider: "litellm",
+              api: "openai-completions",
+              baseUrl: "https://litellm.example.com/v1",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 128_000,
+              maxTokens: 4096,
+            },
+          ],
+        },
       }),
       "utf8",
     );
@@ -70,6 +81,7 @@ describe("Pi core model overrides", () => {
     const pi = createPi();
     pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
     await (await loadExtension(agentDir))(pi);
+    await runtime.refresh({ allowNetwork: false });
 
     expect(runtime.getModel("litellm", "cached-model")).toMatchObject({ name: "Cached override", contextWindow: 321 });
 
