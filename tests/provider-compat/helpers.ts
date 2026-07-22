@@ -7,11 +7,11 @@ export const RED_CIRCLE_PNG =
 export const SECOND_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-type Chunk = { data: unknown; delay: number };
+type Chunk = { data: unknown; waitForAbort: boolean };
 type RequestBody = { messages: Array<{ role: string; content: unknown }>; [key: string]: unknown };
 
-export function sseChunk(data: unknown, delay = 0): Chunk {
-  return { data, delay };
+export function sseChunk(data: unknown, waitForAbort = false): Chunk {
+  return { data, waitForAbort };
 }
 
 export async function createCompatibilityHarness(): Promise<{
@@ -61,7 +61,9 @@ export async function createCompatibilityHarness(): Promise<{
       async start(controller) {
         const encoder = new TextEncoder();
         for (const chunk of chunks) {
-          if (chunk.delay) await new Promise((resolve) => setTimeout(resolve, chunk.delay));
+          if (chunk.waitForAbort && signal && !signal.aborted) {
+            await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+          }
           if (signal?.aborted) return controller.error(signal.reason);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk.data)}\n\n`));
         }
