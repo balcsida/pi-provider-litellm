@@ -1,6 +1,6 @@
 # pi-provider-litellm
 
-LiteLLM proxy provider extension for [Pi](https://pi.dev).
+LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.81.0+ is required.
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, `/litellm-refresh`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
@@ -40,7 +40,7 @@ Inside pi:
 /login litellm
 ```
 
-You can also run `/login`, select `Use a subscription`, then select `LiteLLM`.
+To configure an API key, run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`. With `/login litellm`, choose `Sign in with an API key` directly.
 
 You'll be prompted for the base URL and API key. Credentials are persisted to `~/.pi/agent/auth.json`.
 
@@ -48,12 +48,11 @@ You'll be prompted for the base URL and API key. Credentials are persisted to `~
 
 If your LiteLLM proxy requires SSO/OAuth authentication (enterprise deployments), you can authenticate via a browser SSO flow and optionally pair the resulting JWT with a stable virtual key:
 
-1. Run `/login litellm` inside pi
+1. Run `/login litellm` inside pi and select `Sign in with LiteLLM SSO`
 2. Enter the proxy URL
-3. At the login method prompt, enter `2` for SSO / Enterprise JWT
-4. Your default browser opens the LiteLLM SSO login URL (e.g. `https://litellm.your-domain.com/sso/key/generate`) automatically — the URL is also displayed in case it can't be opened. Authenticate via SSO
-5. Copy your token from the LiteLLM UI and paste it at the prompt (copying a full `Bearer ...` header value is fine — the prefix is stripped automatically)
-6. When prompted to generate a virtual key, press Enter to accept (recommended) or enter `n` to use the JWT directly
+3. Your default browser opens the LiteLLM SSO login URL (e.g. `https://litellm.your-domain.com/sso/key/generate`) automatically — the URL is also displayed in case it can't be opened. Authenticate via SSO
+4. Copy your token from the LiteLLM UI and paste it at the prompt (copying a full `Bearer ...` header value is fine — the prefix is stripped automatically)
+5. When prompted to generate a virtual key, press Enter to accept (recommended) or enter `n` to use the JWT directly
 
 When you generate a virtual key, the resulting `sk-...` key is stored as your credential and used for all API requests. If the proxy's key policy attaches an expiry to the generated key, Pi will prompt you to re-authenticate when it nears expiry; otherwise the key is treated as permanent until revoked in LiteLLM.
 
@@ -228,11 +227,11 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 - `/litellm-refresh` — force re-fetch the model list for all configured LiteLLM providers, ignoring cache
 - `/litellm-refresh <provider>` — refresh one configured provider alias, for example `/litellm-refresh litellm-anthropic`
 
-## Cache
+## Model catalog
 
-The default provider model list is cached at `~/.pi/agent/litellm-models.json` with a keyed fingerprint of the base URL + API key. Alias provider caches use `~/.pi/agent/litellm-models-<provider>.json`. Changing the base URL or key invalidates that provider's cache automatically.
+Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models*.json` files are ignored and are not deleted.
 
-When the cache is missing, invalid, or older than 24 hours, the extension starts without waiting for discovery and refreshes models in the background on session start. Existing cached models remain available while an invalid or stale cache refreshes. Failures are silent; run `/litellm-refresh` to force an immediate refresh and see its result.
+`/model` performs a background refresh. `pi update --models` forces a Pi-wide refresh. `/litellm-refresh` remains the LiteLLM-only forced refresh command.
 
 ## Troubleshooting
 

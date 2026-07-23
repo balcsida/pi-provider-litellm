@@ -1,9 +1,9 @@
-import { scryptSync } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLoadedPi, type TestPi } from "./test-helpers.js";
+import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -14,12 +14,22 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-async function startSession(pi: TestPi): Promise<void> {
-  const providerCount = pi.providers.length;
-  for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-  }
-  await vi.waitFor(() => expect(pi.providers.length).toBeGreaterThan(providerCount));
+async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
+  const store: ProviderModelsStore = {
+    read: async () => undefined,
+    write: async () => undefined,
+    delete: async () => undefined,
+  };
+  await pi.providers[0]?.refreshModels?.({
+    allowNetwork,
+    store,
+    credential: {
+      type: "api_key",
+      key: process.env.LITELLM_API_KEY ?? "sk-test",
+      env: { LITELLM_BASE_URL: process.env.LITELLM_BASE_URL ?? "https://litellm.example.com" },
+    },
+    signal,
+  });
 }
 
 afterEach(() => {
@@ -27,6 +37,7 @@ afterEach(() => {
   vi.resetModules();
   delete process.env.LITELLM_BASE_URL;
   delete process.env.LITELLM_API_KEY;
+  delete process.env.LITELLM_HEADERS;
   delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
   delete process.env.LITELLM_GCLOUD_TOKEN_AUTH;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -51,9 +62,15 @@ describe("feature parity", () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
-    expect(pi.providers[0]?.config.apiKey).toMatch(/^!.*gcloud-token-cli\.js/);
+    await expect(
+      pi.providers[0]?.auth.apiKey?.check?.({
+        ctx: { env: async (name) => process.env[name], fileExists: async () => false },
+      }),
+    ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
   });
 
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {
@@ -83,10 +100,301 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
-    await startSession(pi);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
 
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
+  });
+
+  it("refreshes the MCP catalog when default-provider auth changes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://first.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "first",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "first" },
+            },
+          ],
+        });
+      }
+      if (url === "https://second.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "second",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "second" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://first.example.com";
+    process.env.LITELLM_API_KEY = "first-token";
+    process.env.LITELLM_HEADERS = '{"x-tenant":"first"}';
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+
+    process.env.LITELLM_BASE_URL = "https://second.example.com";
+    process.env.LITELLM_API_KEY = "second-token";
+    process.env.LITELLM_HEADERS = '{"x-tenant":"second"}';
+    await refreshProvider(pi);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://first.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer first-token", "x-tenant": "first" }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://second.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer second-token", "x-tenant": "second" }),
+      }),
+    );
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second");
+  });
+
+  it("shares in-flight MCP discovery between default-provider refreshes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    let resolveCatalog: (response: Response) => void = () => {};
+    const catalog = new Promise<Response>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let resolveSecondModel: (response: Response) => void = () => {};
+    const secondModel = new Promise<Response>((resolve) => {
+      resolveSecondModel = resolve;
+    });
+    let modelInfoRequests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        modelInfoRequests++;
+        return modelInfoRequests === 1 ? jsonResponse(200, { data: [] }) : secondModel;
+      }
+      if (url === "https://litellm.example.com/mcp-rest/tools/list") return catalog;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const firstRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://litellm.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+    const secondRefresh = refreshProvider(pi);
+    await vi.waitFor(() => expect(modelInfoRequests).toBe(2));
+    resolveSecondModel(jsonResponse(200, { data: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "https://litellm.example.com/mcp-rest/tools/list"),
+    ).toHaveLength(1);
+    resolveCatalog(jsonResponse(200, []));
+    await Promise.all([firstRefresh, secondRefresh]);
+  });
+
+  it("lets a live different-identity refresh continue after the active refresh aborts", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const firstAbort = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://first.example.com/mcp-rest/tools/list") {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      if (url === "https://second.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "second",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "second" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://first.example.com";
+    process.env.LITELLM_API_KEY = "first-token";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const firstRefresh = refreshProvider(pi, true, firstAbort.signal);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://first.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+
+    process.env.LITELLM_BASE_URL = "https://second.example.com";
+    process.env.LITELLM_API_KEY = "second-token";
+    const secondRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://second.example.com/model/info", expect.anything()),
+    );
+    firstAbort.abort(new Error("first refresh cancelled"));
+
+    await expect(firstRefresh).rejects.toThrow("first refresh cancelled");
+    await expect(secondRefresh).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("https://second.example.com/mcp-rest/tools/list", expect.anything());
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second");
+  });
+
+  it("rejects an aborted same-identity MCP waiter with its own reason", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const secondAbort = new AbortController();
+    let resolveCatalog: (response: Response) => void = () => {};
+    const catalog = new Promise<Response>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let modelInfoRequests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        modelInfoRequests++;
+        return jsonResponse(200, { data: [] });
+      }
+      if (url === "https://litellm.example.com/mcp-rest/tools/list") return catalog;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const firstRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://litellm.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+    const secondRefresh = refreshProvider(pi, true, secondAbort.signal);
+    await vi.waitFor(() => expect(modelInfoRequests).toBe(2));
+
+    const reason = new Error("second refresh cancelled");
+    secondAbort.abort(reason);
+    try {
+      const outcome = await Promise.race([
+        secondRefresh.then(
+          () => "resolved",
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 50)),
+      ]);
+      expect(outcome).toBe(reason);
+    } finally {
+      resolveCatalog(jsonResponse(200, []));
+      await firstRefresh;
+      await secondRefresh.catch(() => undefined);
+    }
+  });
+
+  it("uses fresh Pi auth when a discovered MCP tool executes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://cached.example.com";
+    process.env.LITELLM_API_KEY = "cached-token";
+
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://cached.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        });
+      }
+      if (url === "https://fresh.example.com/mcp-rest/tools/call") return jsonResponse(200, { result: "fresh" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "mcp_brave_search");
+
+    await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: {
+            apiKey: "fresh-token",
+            baseUrl: "https://fresh.example.com/v1",
+            headers: { "x-tenant": "fresh" },
+          },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "https://fresh.example.com/mcp-rest/tools/call",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+      }),
+    );
+  });
+
+  it("uses fresh Pi auth when a registered Skills tool executes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://cached.example.com";
+    process.env.LITELLM_API_KEY = "cached-token";
+
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://cached.example.com/mcp-rest/tools/list") return jsonResponse(200, []);
+      if (url.startsWith("https://fresh.example.com/")) return jsonResponse(200, []);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "litellm_skill_list");
+
+    await tool?.execute?.("call-1", {}, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: {
+            apiKey: "fresh-token",
+            baseUrl: "https://fresh.example.com/v1",
+            headers: { "x-tenant": "fresh" },
+          },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://fresh.example.com/claude-code/marketplace.json",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+      }),
+    );
   });
 
   it("injects enabled LiteLLM skills into the system prompt", async () => {
@@ -107,14 +415,63 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
-    const result = await beforeAgentStart?.({ systemPrompt: "Base prompt" }, {});
+    const result = await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "sk-test", baseUrl: "https://litellm.example.com/v1" },
+          }),
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
 
     expect(result.systemPrompt).toContain("Base prompt");
     expect(result.systemPrompt).toContain("<litellm_skills>");
     expect(result.systemPrompt).toContain("Terraform conventions");
+  });
+
+  it("clears cached Skills auth when Pi reports revoked credentials", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => ({
+            auth: { apiKey: "active-key", baseUrl: "https://active.example.com/v1" },
+          }),
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+    vi.mocked(globalThis.fetch).mockClear();
+    await beforeAgentStart?.(
+      { systemPrompt: "Base prompt" },
+      {
+        modelRegistry: {
+          getProviderAuth: async () => undefined,
+          getProvider: () => pi.providers[0],
+        },
+      },
+    );
+
+    const listTool = pi.tools.find((tool) => tool.name === "litellm_skill_list");
+    await expect(listTool?.execute?.("call-1", {}, undefined, undefined, {})).rejects.toThrow(
+      "no credentials for litellm",
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("disables LiteLLM skills through settings", async () => {
@@ -128,7 +485,9 @@ describe("feature parity", () => {
     process.env.LITELLM_API_KEY = "sk-test";
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     expect(pi.tools.map((tool) => tool.name)).not.toContain("litellm_skill_list");
     const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
@@ -150,8 +509,10 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
-    await startSession(pi);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
 
     expect(requestedUrls).toEqual(["https://litellm.example.com/model/info"]);
     expect(pi.tools.map((tool) => tool.name)).toContain("litellm_skill_list");
@@ -184,7 +545,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     expect(pi.handlers.has("before_provider_request")).toBe(true);
     expect(pi.handlers.has("after_provider_response")).toBe(true);
@@ -217,7 +580,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -265,7 +630,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -311,7 +678,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
@@ -331,7 +700,9 @@ describe("feature parity", () => {
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -362,7 +733,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -411,7 +784,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -434,7 +809,9 @@ describe("feature parity", () => {
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -472,7 +849,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     for (const id of ["gpt-5.5", "openai/gpt-5.5", "gpt-5.5-20260504143601"]) {
@@ -513,7 +892,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     let message: any = {
       role: "assistant",
@@ -553,7 +934,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     let message: any = {
       role: "assistant",
@@ -596,7 +979,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -654,7 +1039,9 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
 
     // Same model id discovered through LiteLLM, but the message came from
     // a direct provider — LiteLLM pricing must not overwrite its cost.
@@ -697,8 +1084,10 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
-    await startSession(pi);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
     responseHandler?.(
@@ -732,18 +1121,6 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    const fp = scryptSync("sk-test", "pi-provider-litellm-cache-fingerprint-v1", 32).toString("hex");
-    await writeFile(
-      join(agentDir, "litellm-models.json"),
-      JSON.stringify({
-        baseUrl: "https://litellm.example.com",
-        apiKeyFingerprint: fp,
-        fetchedAt: Date.now(),
-        source: "model_info",
-        models: [{ id: "test-model", name: "test-model", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }],
-      }),
-    );
-
     let releaseFetch!: () => void;
     const fetchGate = new Promise<void>((resolve) => {
       releaseFetch = resolve;
@@ -771,7 +1148,10 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const pi = await createLoadedPi(agentDir);
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi, false);
 
     const refreshCmd = pi.commands.get("litellm-refresh");
     const notifications: Array<{ message: string; type: string }> = [];
@@ -794,135 +1174,5 @@ describe("feature parity", () => {
       { message: "LiteLLM: 1 models refreshed (source: model_info)", type: "info" },
       { message: "LiteLLM: 1 models refreshed (source: model_info)", type: "info" },
     ]);
-  });
-
-  it("auto-refreshes stale cache on session_start", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "sk-test";
-
-    const fp = scryptSync("sk-test", "pi-provider-litellm-cache-fingerprint-v1", 32).toString("hex");
-    await writeFile(
-      join(agentDir, "litellm-models.json"),
-      JSON.stringify({
-        baseUrl: "https://litellm.example.com",
-        apiKeyFingerprint: fp,
-        fetchedAt: Date.now() - 25 * 60 * 60 * 1000,
-        source: "model_info",
-        models: [{ id: "test-model", name: "test-model", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }],
-      }),
-    );
-
-    let callCount = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        callCount++;
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "test-model",
-              model_info: {
-                mode: "chat",
-                input_cost_per_token: 0.000006,
-                output_cost_per_token: 0.00003,
-              },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const pi = await createLoadedPi(agentDir);
-
-    // Extension used stale cache, no fetch during init
-    expect(callCount).toBe(0);
-
-    // Fire session_start to trigger stale auto-refresh (fire-and-forget)
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-    }
-    await vi.waitFor(() => expect(callCount).toBe(1));
-    const endHandler = pi.handlers.get("message_end")?.[0];
-    const usage = {
-      input: 1000,
-      output: 1000,
-      cost: { input: 0.006, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.036 },
-    };
-    const result = await endHandler?.({
-      message: {
-        role: "assistant",
-        provider: "litellm",
-        model: "test-model",
-        usage,
-      },
-    });
-    expect(result).toBeUndefined();
-    expect(usage.cost.total).toBeCloseTo(0.036, 6);
-  });
-
-  it("handles stale refresh failure silently on session_start", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "sk-test";
-
-    const fp = scryptSync("sk-test", "pi-provider-litellm-cache-fingerprint-v1", 32).toString("hex");
-    await writeFile(
-      join(agentDir, "litellm-models.json"),
-      JSON.stringify({
-        baseUrl: "https://litellm.example.com",
-        apiKeyFingerprint: fp,
-        fetchedAt: Date.now() - 25 * 60 * 60 * 1000,
-        source: "model_info",
-        models: [
-          {
-            id: "test-model",
-            name: "test-model",
-            cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
-          },
-        ],
-      }),
-    );
-
-    let callCount = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        callCount++;
-        throw new Error("network error");
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const pi = await createLoadedPi(agentDir);
-
-    // Fire session_start — fire-and-forget refresh kicks off
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-    }
-
-    // Wait for background refresh to attempt the fetch (and fail silently)
-    await vi.waitFor(() => expect(callCount).toBe(1));
-
-    // Existing cached costs still work after the refresh failure
-    const endHandler = pi.handlers.get("message_end")?.[0];
-    const usage = {
-      input: 1000,
-      output: 1000,
-      cost: { input: 0.003, output: 0.015, cacheRead: 0, cacheWrite: 0, total: 0.018 },
-    };
-    const result = await endHandler?.({
-      message: {
-        role: "assistant",
-        provider: "litellm",
-        model: "test-model",
-        usage,
-      },
-    });
-    expect(result).toBeUndefined();
-    expect(usage.cost.total).toBeCloseTo(0.018, 6);
   });
 });

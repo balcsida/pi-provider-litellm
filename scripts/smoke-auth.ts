@@ -5,6 +5,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Provider } from "@earendil-works/pi-ai";
 import { normalizeBaseUrl } from "../src/discover.js";
 import { smokeChatCompletion } from "./smoke-runner.js";
 
@@ -28,24 +29,9 @@ type KeyGenerateResponse = {
   key?: unknown;
 };
 
-type SmokeOAuthCredential = {
-  access: string;
-};
-
-type SmokeProviderConfig = {
-  oauth?: {
-    login: (callbacks: {
-      onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
-      onAuth?: (info: { url: string; instructions?: string }) => void;
-      onProgress?: (message: string) => void;
-      signal?: AbortSignal;
-    }) => Promise<SmokeOAuthCredential>;
-  };
-};
-
 type SmokePi = {
-  providers: Array<{ name: string; config: SmokeProviderConfig }>;
-  registerProvider: (name: string, config: SmokeProviderConfig) => void;
+  providers: Provider[];
+  registerProvider: (provider: Provider) => void;
   registerCommand: () => void;
   registerTool: () => void;
   on: () => void;
@@ -149,8 +135,8 @@ async function expectAdminOnlyKeyGenerate(
 function createSmokePi(): SmokePi {
   return {
     providers: [],
-    registerProvider(name, config) {
-      this.providers.push({ name, config });
+    registerProvider(provider) {
+      this.providers.push(provider);
     },
     registerCommand: () => undefined,
     registerTool: () => undefined,
@@ -175,18 +161,20 @@ export async function runSsoLoginSmoke(
     const pi = createSmokePi();
     await extension(pi);
 
-    const oauth = pi.providers.find((provider) => provider.name === "litellm")?.config.oauth;
+    const oauth = pi.providers.find((provider) => provider.id === "litellm")?.auth.oauth;
     if (!oauth) throw new Error("LiteLLM provider did not expose OAuth login");
 
     const authInfos: Array<{ url: string; instructions?: string }> = [];
     const credential = await oauth.login({
-      onAuth: (info) => authInfos.push(info),
-      onPrompt: async ({ message, placeholder }) => {
-        if (placeholder) return baseUrl;
-        if (message.includes("Select login method")) return "2";
+      prompt: async (prompt) => {
+        const { message } = prompt;
+        if ("placeholder" in prompt && prompt.placeholder) return baseUrl;
         if (message.includes("SSO token")) return `Bearer ${options.masterKey}`;
         if (message.includes("Generate a LiteLLM virtual key")) return "y";
         return "";
+      },
+      notify: (event) => {
+        if (event.type === "auth_url") authInfos.push(event);
       },
       signal: new AbortController().signal,
     });
@@ -194,7 +182,7 @@ export async function runSsoLoginSmoke(
     if (!authInfos.some((info) => info.url === `${baseUrl}/sso/key/generate`)) {
       throw new Error("SSO login did not request /sso/key/generate");
     }
-    if (!credential.access || credential.access === options.masterKey) {
+    if (credential.type !== "oauth" || !credential.access || credential.access === options.masterKey) {
       throw new Error("SSO login did not return a generated virtual key");
     }
 

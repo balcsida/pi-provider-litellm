@@ -1,18 +1,21 @@
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
-export interface CacheFile {
+export type LiteLLMApi = "openai-completions" | "openai-responses";
+
+export type LiteLLMRuntimeAuth = {
   baseUrl: string;
-  apiKeyFingerprint: string;
-  headersFingerprint?: string;
-  fetchedAt: number;
-  source: DiscoverySource;
-  models: ProviderModelConfig[];
-}
+  apiKey: string;
+  headers?: Record<string, string>;
+};
+
+export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
+  api?: LiteLLMApi;
+};
 
 export interface DiscoveryResult {
-  models: ProviderModelConfig[];
+  models: DiscoveredModel[];
   source: DiscoverySource;
 }
 

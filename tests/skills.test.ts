@@ -229,7 +229,10 @@ describe("skill helpers", () => {
 
 describe("createSkillToolDefinitions", () => {
   it("creates Pi tools for listing, creating, and deleting LiteLLM skills", async () => {
-    const definitions = createSkillToolDefinitions("https://litellm.example.com", async () => "sk-test");
+    const definitions = createSkillToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
 
     expect(definitions.map((definition) => definition.name)).toEqual([
       "litellm_skill_list",
@@ -242,20 +245,31 @@ describe("createSkillToolDefinitions", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [{ id: "skill-1", name: "terraform", description: "Terraform conventions" }]),
     );
-    const getApiKey = vi.fn().mockResolvedValue("fresh-token");
-    const [listTool] = createSkillToolDefinitions("https://litellm.example.com", getApiKey);
+    const getAuth = vi.fn().mockResolvedValue({
+      baseUrl: "https://new.example.com",
+      apiKey: "fresh-token",
+      headers: { "x-tenant": "new" },
+    });
+    const [listTool] = createSkillToolDefinitions(getAuth);
     type Params = Static<TSchema>;
 
     const result = await listTool?.execute("call-1", {} as Params, undefined, undefined, {} as never);
 
     expect(result?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("terraform") });
-    expect(getApiKey).toHaveBeenCalledOnce();
+    expect(getAuth).toHaveBeenCalledOnce();
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[0]).toBe("https://new.example.com/claude-code/marketplace.json");
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "new" }),
+    });
   });
 
   it("executes the create tool with Skill Hub source metadata", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { name: "terraform" }));
-    const getApiKey = vi.fn().mockResolvedValue("fresh-token");
-    const [, createTool] = createSkillToolDefinitions("https://litellm.example.com", getApiKey);
+    const getAuth = vi.fn().mockResolvedValue({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "fresh-token",
+    });
+    const [, createTool] = createSkillToolDefinitions(getAuth);
     type Params = Static<TSchema>;
 
     const result = await createTool?.execute(
@@ -271,7 +285,7 @@ describe("createSkillToolDefinitions", () => {
     );
 
     expect(result?.content).toEqual([{ type: "text", text: "LiteLLM skill created." }]);
-    expect(getApiKey).toHaveBeenCalledOnce();
+    expect(getAuth).toHaveBeenCalledOnce();
     const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
     expect(body).toEqual({
       name: "terraform",

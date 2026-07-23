@@ -1,36 +1,6 @@
 import { readFileSync } from "node:fs";
+import type { Provider } from "@earendil-works/pi-ai";
 import { vi } from "vitest";
-
-type TestProviderConfig = {
-  baseUrl?: string;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  api?: string;
-  models?: unknown[];
-  refreshModels?: (context: {
-    allowNetwork: boolean;
-    force?: boolean;
-    signal?: AbortSignal;
-    credential?:
-      | { type: "api_key"; key?: string }
-      | { type: "oauth"; access: string; refresh: string; expires: number; baseUrl?: string };
-  }) => Promise<unknown[]>;
-  oauth?: {
-    login: (callbacks: {
-      onPrompt: (options: { message: string; placeholder?: string }) => Promise<string>;
-      onAuth?: (info: { url: string; instructions?: string }) => void;
-      onProgress?: (message: string) => void;
-      signal?: AbortSignal;
-    }) => Promise<{ access: string; refresh: string; expires: number; baseUrl?: string }>;
-    refreshToken: (credential: { access: string; refresh: string; expires: number; baseUrl?: string }) => Promise<{
-      access: string;
-      refresh: string;
-      expires: number;
-      baseUrl?: string;
-    }>;
-    getApiKey: (credential: { access: string; refresh: string; expires: number; baseUrl?: string }) => string;
-  };
-};
 
 type TestCommandContext = {
   ui: {
@@ -51,11 +21,11 @@ type TestCommand = {
 };
 
 export type TestPi = {
-  providers: Array<{ name: string; config: TestProviderConfig }>;
+  providers: Provider[];
   commands: Map<string, TestCommand>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   tools: Array<{ name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }>;
-  registerProvider(name: string, config: TestProviderConfig): void;
+  registerProvider(provider: Provider): void;
   registerCommand(name: string, command: TestCommand): void;
   registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }): void;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
@@ -84,8 +54,8 @@ export function createPi(): TestPi {
     commands: new Map(),
     handlers: new Map(),
     tools: [],
-    registerProvider(name, config) {
-      this.providers.push({ name, config });
+    registerProvider(provider) {
+      this.providers.push(provider);
     },
     registerCommand(name, command) {
       this.commands.set(name, command);

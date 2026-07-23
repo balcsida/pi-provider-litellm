@@ -202,6 +202,18 @@ jobs:
           LITELLM_SMOKE_TIMEOUT_MS: '60000'
         run: npx tsx scripts/smoke-auth.ts
 
+      - name: Initialize shared Pi agent directory
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
+        run: mkdir -p "$PI_CODING_AGENT_DIR"
+
+      - name: Run interactive Pi terminal smoke
+        env:
+          LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
+          LITELLM_TERMINAL_SMOKE: '1'
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
+        run: npm test -- tests/terminal-smoke.test.ts
+
       - name: Run Pi CLI smoke
         env:
           LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
@@ -209,7 +221,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf "$PI_CODING_AGENT_DIR"
           ./node_modules/.bin/pi -e ./dist/index.js --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
@@ -233,12 +244,6 @@ jobs:
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
-
-      - name: Run interactive Pi terminal smoke
-        env:
-          LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
-          LITELLM_TERMINAL_SMOKE: '1'
-        run: npm test -- tests/terminal-smoke.test.ts
 
       - name: Dump LiteLLM logs
         if: failure()

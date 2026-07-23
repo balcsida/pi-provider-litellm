@@ -118,6 +118,7 @@ describe("supply-chain guard", () => {
         "index",
         "litellm",
         "mcp-tools",
+        "provider",
         "skills",
         "types",
       ]) {

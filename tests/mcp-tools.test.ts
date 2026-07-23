@@ -173,7 +173,10 @@ describe("createMcpToolDefinitions", () => {
       ] satisfies LiteLLMMcpTool[]),
     );
 
-    const definitions = await createMcpToolDefinitions("https://litellm.example.com", async () => "sk-test");
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
 
     expect(definitions.map((tool) => tool.name)).toEqual(["mcp_brave_api_web_search"]);
     expect(definitions[0]?.executionMode).toBe("parallel");
@@ -199,7 +202,10 @@ describe("createMcpToolDefinitions", () => {
       ] satisfies LiteLLMMcpTool[]),
     );
 
-    const definitions = await createMcpToolDefinitions("https://litellm.example.com", async () => "sk-test");
+    const definitions = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
 
     expect(definitions[0]?.parameters).toMatchObject({
       properties: { nested: { type: "object", properties: { value: { type: "string" } } } },
@@ -226,9 +232,16 @@ describe("createMcpToolDefinitions", () => {
         }),
       )
       .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
-    const getApiKey = vi.fn().mockResolvedValueOnce("discovery-token").mockResolvedValueOnce("execution-token");
+    const getAuth = vi
+      .fn()
+      .mockResolvedValueOnce({ baseUrl: "https://old.example.com", apiKey: "discovery-token" })
+      .mockResolvedValueOnce({
+        baseUrl: "https://new.example.com",
+        apiKey: "execution-token",
+        headers: { "x-tenant": "new" },
+      });
 
-    const definitions = await createMcpToolDefinitions("https://litellm.example.com", getApiKey);
+    const definitions = await createMcpToolDefinitions(getAuth);
     type Params = Static<TSchema>;
     const result = await definitions[0]?.execute(
       "call-1",
@@ -239,9 +252,10 @@ describe("createMcpToolDefinitions", () => {
     );
 
     expect(result?.content).toEqual([{ type: "text", text: JSON.stringify("ok", null, 2) }]);
-    expect(getApiKey).toHaveBeenCalledTimes(2);
+    expect(getAuth).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[0]).toBe("https://new.example.com/mcp-rest/tools/call");
     expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]).toMatchObject({
-      headers: expect.objectContaining({ Authorization: "Bearer execution-token" }),
+      headers: expect.objectContaining({ Authorization: "Bearer execution-token", "x-tenant": "new" }),
       body: JSON.stringify({ server_id: "brave-api", name: "search", arguments: { query: "pi" } }),
     });
   });

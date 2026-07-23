@@ -1,41 +1,25 @@
-import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { type Session, TerminalControl } from "@kitlangton/terminal-control";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const piPath = resolve(repoRoot, "node_modules/.bin/pi");
 const extensionPath = resolve(repoRoot, "dist/index.js");
-const execFileAsync = promisify(execFile);
 const enabled = process.env.LITELLM_TERMINAL_SMOKE === "1";
 const waitTimeoutMs = 90_000;
 const testTimeoutMs = 6 * waitTimeoutMs;
 let terminal: TerminalControl | undefined;
 
 async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
-  const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-terminal-"));
+  const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim();
+  const agentDir = configuredAgentDir || (await mkdtemp(join(tmpdir(), "pi-litellm-terminal-")));
   try {
     const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
-    await execFileAsync(piPath, ["-e", extensionPath, "--list-models", "litellm"], {
-      cwd: repoRoot,
-      env,
-    });
     await using session = await terminal?.launch({
-      command: [
-        piPath,
-        "-e",
-        extensionPath,
-        "--provider",
-        "litellm",
-        "--model",
-        process.env.LITELLM_CLI_SMOKE_MODEL ?? "vidaimock-openai",
-        "--no-tools",
-        "--no-session",
-      ],
+      command: [piPath, "-e", extensionPath, "--no-tools", "--no-session"],
       cwd: repoRoot,
       env,
       inheritEnv: true,
@@ -44,7 +28,7 @@ async function withPi(run: (session: Session) => Promise<void>): Promise<void> {
     if (!session) throw new Error("Terminal control is not initialized");
     await run(session);
   } finally {
-    await rm(agentDir, { force: true, recursive: true });
+    if (!configuredAgentDir) await rm(agentDir, { force: true, recursive: true });
   }
 }
 
@@ -58,6 +42,13 @@ async function submit(session: Session, text: string, autocompleteText?: string)
     await session.keyboard.press("Escape");
     await session.screen.waitForIdle({ timeoutMs: waitTimeoutMs });
   }
+  await session.keyboard.press("Enter");
+}
+
+async function selectApiKeyAuthMethod(session: Session): Promise<void> {
+  await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
+  await session.screen.waitForText("Sign in with an API key", { timeoutMs: waitTimeoutMs });
+  await session.keyboard.press("ArrowDown");
   await session.keyboard.press("Enter");
 }
 
@@ -90,14 +81,27 @@ it("dismisses command autocomplete without inspecting form values", async () => 
   ]);
 });
 
-async function waitForInitialModel(session: Session): Promise<void> {
-  try {
-    await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
-  } catch (error) {
-    const logs = await session.logs.text();
-    throw new Error(`Pi exited before showing the smoke model:\n${logs}`, { cause: error });
-  }
-}
+it("selects Pi's native API-key authentication method", async () => {
+  const calls: unknown[] = [];
+  const session = {
+    keyboard: {
+      press: async (key: string) => void calls.push(key),
+    },
+    screen: {
+      waitForText: async (text: string | RegExp, options?: { timeoutMs?: number }) =>
+        void calls.push(["waitForText", text, options]),
+    },
+  } as unknown as Session;
+
+  await selectApiKeyAuthMethod(session);
+
+  expect(calls).toEqual([
+    ["waitForText", "Select authentication method for LiteLLM", { timeoutMs: 90_000 }],
+    ["waitForText", "Sign in with an API key", { timeoutMs: 90_000 }],
+    "ArrowDown",
+    "Enter",
+  ]);
+});
 
 describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
   beforeAll(async () => {
@@ -109,51 +113,29 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
   });
 
   it(
-    "logs in to LiteLLM",
+    "logs in, refreshes, and selects LiteLLM models",
     async () => {
       await withPi(async (session) => {
-        await waitForInitialModel(session);
-
+        await session.screen.waitForText("Warning: No models available", { timeoutMs: waitTimeoutMs });
         await submit(session, "/login litellm", "LiteLLM · subscription/API key");
-        await session.screen.waitForText("Select authentication method for LiteLLM", { timeoutMs: waitTimeoutMs });
-        await session.keyboard.press("Enter");
+        await selectApiKeyAuthMethod(session);
         await session.screen.waitForText("Enter LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_BASE_URL ?? "http://127.0.0.1:4000");
-        await session.screen.waitForText("Select login method", { timeoutMs: waitTimeoutMs });
-        await submit(session, "1");
         await session.screen.waitForText("Enter API key", { timeoutMs: waitTimeoutMs });
         await submit(session, process.env.LITELLM_API_KEY ?? "sk-ci-litellm-smoke");
 
-        await session.screen.waitForText("Logged in to LiteLLM", { timeoutMs: waitTimeoutMs });
-      });
-    },
-    testTimeoutMs,
-  );
-
-  it(
-    "refreshes LiteLLM models",
-    async () => {
-      await withPi(async (session) => {
-        await waitForInitialModel(session);
+        await session.screen.waitUntil((snapshot) => !snapshot.text.includes("Enter API key"), {
+          timeoutMs: waitTimeoutMs,
+        });
 
         await submit(session, "/litellm-refresh");
-
         await session.screen.waitForText("LiteLLM: 2 models refreshed (source: model_info)", {
           timeoutMs: waitTimeoutMs,
         });
-      });
-    },
-    testTimeoutMs,
-  );
-
-  it(
-    "shows LiteLLM models in the model picker",
-    async () => {
-      await withPi(async (session) => {
-        await waitForInitialModel(session);
 
         await submit(session, "/model");
         await session.screen.waitForText("Only showing models from configured providers", { timeoutMs: waitTimeoutMs });
+        await session.screen.waitForText("vidaimock-openai", { timeoutMs: waitTimeoutMs });
         await session.screen.waitForText("anthropic/vidaimock-claude", { timeoutMs: waitTimeoutMs });
       });
     },

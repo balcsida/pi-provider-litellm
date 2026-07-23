@@ -1,8 +1,8 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { normalizeBaseUrl } from "./discover.js";
-import type { LiteLLMMcpTool } from "./types.js";
+import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
 
 const LIST_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
@@ -200,14 +200,18 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
 }
 
 export async function createMcpToolDefinitions(
-  baseUrl: string,
-  getApiKey: () => Promise<string>,
-  headers?: Record<string, string>,
+  getAuth: (ctx?: ExtensionContext) => Promise<LiteLLMRuntimeAuth>,
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
 ): Promise<ToolDefinition[]> {
-  const discoveryApiKey = await getApiKey();
-  const tools = await discoverMcpTools(baseUrl, discoveryApiKey, headers, onProgress, signal);
+  const discoveryAuth = await getAuth();
+  const tools = await discoverMcpTools(
+    discoveryAuth.baseUrl,
+    discoveryAuth.apiKey,
+    discoveryAuth.headers,
+    onProgress,
+    signal,
+  );
 
   return tools.map((mcpTool) => {
     const safeServer = sanitizeName(mcpTool.server_name);
@@ -221,20 +225,20 @@ export async function createMcpToolDefinitions(
       promptSnippet: `${mcpTool.description} via ${mcpTool.server_name} MCP server`,
       executionMode: "parallel",
       parameters,
-      async execute(_toolCallId, params: Static<typeof parameters>) {
-        const apiKey = await getApiKey();
+      async execute(_toolCallId, params: Static<typeof parameters>, _signal, _onUpdate, ctx) {
+        const auth = await getAuth(ctx);
         const rawParams = params as Record<string, unknown>;
         const args =
           Object.keys(rawParams).length === 1 && rawParams.args && typeof rawParams.args === "object"
             ? (rawParams.args as Record<string, unknown>)
             : rawParams;
         const text = await executeMcpTool(
-          baseUrl,
-          apiKey,
+          auth.baseUrl,
+          auth.apiKey,
           mcpTool.server_id ?? mcpTool.server_name,
           mcpTool.name,
           args,
-          headers,
+          auth.headers,
         );
         return {
           content: [{ type: "text", text }],
