@@ -515,6 +515,39 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
+  it("resolves shell expressions in helper commands", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    process.env.CUSTOM_LITELLM_KEY = "shell-expanded-key";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      resolveApiKeyWithEnv(pi.providers[0]!, {
+        LITELLM_BASE_URL: "https://context.example.com",
+        LITELLM_API_KEY_HELPER: 'printf %s "$CUSTOM_LITELLM_KEY"',
+        CUSTOM_LITELLM_KEY: "shell-expanded-key",
+      }),
+    ).resolves.toMatchObject({ auth: { apiKey: "shell-expanded-key" } });
+  });
+
+  it("preserves backslashes in helper executable paths", async () => {
+    const agentDir = await makeAgentDir();
+    const helperPath = await writeHelper(agentDir, ["backslash-key"], join(agentDir, "token\\helper.sh"));
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(
+      resolveApiKeyWithEnv(pi.providers[0]!, {
+        LITELLM_BASE_URL: "https://context.example.com",
+        LITELLM_API_KEY_HELPER: `"${helperPath}"`,
+      }),
+    ).resolves.toMatchObject({ auth: { apiKey: "backslash-key" } });
+  });
+
   it("resolves configured key templates from the injected auth context", async () => {
     const agentDir = await makeAgentDir();
     const lowerPriorityHelper = await writeHelper(agentDir, ["unexpected-helper-key"]);

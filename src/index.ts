@@ -106,47 +106,11 @@ function getApiKeyHelperCommand(): string | undefined {
   return normalizeCommand(process.env[ENV_API_KEY_HELPER]);
 }
 
-function parseApiKeyCommand(commandConfig: string): string[] {
-  const command = commandConfig.startsWith("!") ? commandConfig.slice(1) : commandConfig;
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-
-  for (const character of command) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if ((character === "'" || character === '"') && (!quote || quote === character)) {
-      quote = quote ? undefined : character;
-      continue;
-    }
-    if (!quote && /\s/.test(character)) {
-      if (current) {
-        parts.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += character;
-  }
-
-  if (escaped) current += "\\";
-  if (quote) throw new Error(`LiteLLM API key helper command has an unterminated quote: ${command}`);
-  if (current) parts.push(current);
-  if (parts.length === 0) throw new Error("LiteLLM API key helper command is empty");
-  return parts;
-}
-
 function executeApiKeyCommand(commandConfig: string): string {
-  const [command, ...args] = parseApiKeyCommand(commandConfig);
-  const output = execFileSync(command, args, {
+  const command = commandConfig.startsWith("!") ? commandConfig.slice(1) : commandConfig;
+  const shell = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "/bin/sh";
+  const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+  const output = execFileSync(shell, args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 10_000,
