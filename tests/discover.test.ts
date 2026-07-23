@@ -643,6 +643,27 @@ describe("discoverModels fallback to /v1/models", () => {
     expect(result.models[0]?.cost.input).toBe(5);
   });
 
+  it("ignores inherited model keys in a fresh models.dev cache", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1_000, catalog: { openai: { models: {} } } }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(2_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "constructor", owned_by: "openai" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]?.name).toBe("constructor (no metadata)");
+  });
+
   it("returns stale metadata while refreshing it in the background", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     const cachePath = join(dir, "litellm-models-dev.json");

@@ -188,7 +188,8 @@ function findModelsDevModel(
 ): ModelsDevModel | undefined {
   const { provider, modelId } = getFallbackProviderAndModel(id, ownedBy);
   if (!provider) return undefined;
-  return catalog?.[provider]?.models?.[modelId];
+  const models = catalog?.[provider]?.models;
+  return models && Object.hasOwn(models, modelId) ? models[modelId] : undefined;
 }
 
 function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
