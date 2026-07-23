@@ -289,16 +289,21 @@ function refreshModelsDevCatalog(key: string, options: DiscoveryOptions): Promis
 
 async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
   const key = options.modelsDevCachePath ?? MODELS_DEV_URL;
+  const refreshOptions = { ...options, timeoutMs: DEFAULT_TIMEOUT_MS, signal: undefined };
   let cache = modelsDevCaches.get(key);
   if (!cache && options.modelsDevCachePath) {
     cache = await readModelsDevCache(options.modelsDevCachePath);
     if (cache) modelsDevCaches.set(key, cache);
   }
   if (!cache) {
-    return awaitWithSignal(refreshModelsDevCatalog(key, { ...options, signal: undefined }), options.signal);
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    return awaitWithSignal(
+      refreshModelsDevCatalog(key, refreshOptions),
+      options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+    );
   }
   if (Date.now() - cache.fetchedAt < MODELS_DEV_CACHE_TTL_MS) return cache.catalog;
-  void refreshModelsDevCatalog(key, { ...options, signal: undefined });
+  void refreshModelsDevCatalog(key, refreshOptions);
   return cache.catalog;
 }
 
