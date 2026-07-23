@@ -400,10 +400,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   };
 }
 
-function mapFromHealthModelInfo(
-  entry: ModelInfoEntry,
-  fallbackId: string | undefined,
-): DiscoveredModel | undefined {
+function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
   if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
   const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
   if (model) delete model.thinkingLevelMap;
