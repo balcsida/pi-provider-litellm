@@ -20,7 +20,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
-  discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult>;
+  discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
 export function toNativeModels(
@@ -49,7 +49,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): LiteLLMP
       if (!context.credential) throw new Error("LiteLLM model discovery requires a credential");
       const result = await options.discover(context.credential, context.signal);
       lastDiscovery = result;
-      return toNativeModels(options.id, options.baseUrl, result.models);
+      return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models);
     },
     api: {
       "openai-completions": openAICompletionsApi(),

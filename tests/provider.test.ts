@@ -125,6 +125,19 @@ describe("createLiteLLMProvider", () => {
     expect(modelsStore.write).toHaveBeenCalledWith(expect.objectContaining({ models: [native("fresh")] }));
   });
 
+  it("publishes discovered models with the credential URL", async () => {
+    const value = controller({
+      discover: vi.fn(async () => ({
+        ...discovered("fresh"),
+        baseUrl: "https://credential.example/v1",
+      })),
+    });
+
+    await value.provider.refreshModels?.(context(store(), true));
+
+    expect(value.provider.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
+  });
+
   it("retains previous models when discovery rejects", async () => {
     const modelsStore = store([native("old")]);
     const discover = vi.fn(async () => {
