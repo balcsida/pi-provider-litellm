@@ -56,6 +56,7 @@ async function submit(session: Session, text: string, autocompleteText?: string)
   if (autocompleteText) {
     await session.screen.waitForText(autocompleteText, { timeoutMs: waitTimeoutMs });
     await session.keyboard.press("Escape");
+    await session.screen.waitForIdle({ timeoutMs: waitTimeoutMs });
   }
   await session.keyboard.press("Enter");
 }
@@ -68,6 +69,7 @@ it("dismisses command autocomplete without inspecting form values", async () => 
       type: async () => void calls.push("type"),
     },
     screen: {
+      waitForIdle: async (options?: { timeoutMs?: number }) => void calls.push(["waitForIdle", options]),
       waitForText: async (text: string | RegExp, options?: { timeoutMs?: number }) =>
         void calls.push(["waitForText", text, options]),
     },
@@ -81,6 +83,7 @@ it("dismisses command autocomplete without inspecting form values", async () => 
     ["waitForText", "/login litellm", { timeoutMs: 90_000 }],
     ["waitForText", "LiteLLM · subscription/API key", { timeoutMs: 90_000 }],
     "Escape",
+    ["waitForIdle", { timeoutMs: 90_000 }],
     "Enter",
     "type",
     "Enter",
