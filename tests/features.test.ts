@@ -1161,6 +1161,7 @@ describe("feature parity", () => {
           notifications.push({ message, type });
         },
       },
+      modelRegistry: { authStorage: { set: vi.fn() }, refresh: async () => {} },
     };
 
     const firstRefresh = refreshCmd!.handler("", ctx);

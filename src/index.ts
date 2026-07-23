@@ -155,10 +155,6 @@ async function generateVirtualKey(
   return { key: data.key, expiresAt: Number.isNaN(expiresMs) ? undefined : expiresMs };
 }
 
-function resolveOAuthApiKey(credentials: OAuthCredentials): string {
-  return credentials.refresh.startsWith("!") ? executeApiKeyCommand(credentials.refresh) : credentials.access;
-}
-
 function resolveTemplateConfigValue(config: string): string | undefined {
   let resolved = "";
   for (let index = 0; index < config.length; ) {
@@ -289,6 +285,15 @@ function parseCustomHeaders(raw: string | undefined): Record<string, string> | u
 
 function resolveHeaders(definition: ProviderDefinition): Record<string, string> | undefined {
   if (typeof definition.headers === "string") return parseCustomHeaders(resolveTemplateConfigValue(definition.headers));
+  return parseHeaderRecord(definition.headers);
+}
+
+async function resolveHeadersFromContext(
+  definition: ProviderDefinition,
+  env: (name: string) => Promise<string | undefined>,
+): Promise<Record<string, string> | undefined> {
+  if (typeof definition.headers === "string")
+    return parseCustomHeaders(await resolveTemplateConfigValueFromContext(definition.headers, env));
   return parseHeaderRecord(definition.headers);
 }
 
@@ -534,7 +539,7 @@ async function resolveApiKeyAuth(
     auth: {
       apiKey: creds.apiKey,
       baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
-      headers: resolveHeaders(definition),
+      headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
     source: source ?? creds.apiKeyConfig ?? ENV_API_KEY,
@@ -759,7 +764,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         typeof credential.baseUrl === "string"
           ? normalizeBaseUrl(credential.baseUrl)
           : normalizeBaseUrl(requestBaseUrl(definition));
-      return { baseUrl, apiKey: resolveOAuthApiKey(credential), headers: resolveHeaders(definition) };
+      return { baseUrl, apiKey: credential.access, headers: resolveHeaders(definition) };
     }
     const resolved = await resolveApiKeyAuth(definition, { env: async (name) => process.env[name] }, credential);
     if (!resolved?.auth.apiKey) {
@@ -887,7 +892,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
           });
           signal?.throwIfAborted();
-          return result;
+          return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
         },
       });
       Object.assign(controller.provider, { headers: resolveHeaders(definition) });
@@ -938,6 +943,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return;
       }
 
+      await ctx.modelRegistry.refresh();
       const settled = await Promise.allSettled(
         entries.map(async ([providerName, controller]) => {
           const result = await controller.forceRefresh(ctx.signal);
