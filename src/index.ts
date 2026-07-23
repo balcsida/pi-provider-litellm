@@ -872,120 +872,56 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  const controllers = new Map(
-    definitions.map((definition) => {
-      const controller = createLiteLLMProvider({
-        id: definition.name,
-        name: definition.displayName,
-        baseUrl: requestBaseUrl(definition),
-        auth: createProviderAuth(definition),
-        discover: async (credential, signal) => {
-          const disabledReason = discoveryDisabledReason();
-          if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
-          const auth = await authForCredential(definition, credential);
-          const result = await discoverModels(auth.baseUrl, auth.apiKey, {
-            ...getModelsDevDiscoveryOptions(),
-            timeoutMs: getDiscoveryTimeoutMs(),
-            signal,
-            headers: auth.headers,
-            silent: !isVerboseDiscovery(),
-            onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
-          });
-          signal?.throwIfAborted();
-          return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
-        },
-      });
-      Object.assign(controller.provider, { headers: resolveHeaders(definition) });
-      const refreshModels = controller.provider.refreshModels!;
-      controller.provider.refreshModels = async (context) => {
-        try {
-          await refreshModels(context);
-        } finally {
-          if (
-            definition.name === PROVIDER_NAME &&
-            context.allowNetwork &&
-            !discoveryDisabledReason() &&
-            context.credential
-          ) {
-            const auth = await authForCredential(definition, context.credential);
-            defaultRuntimeAuth = auth;
-            await registerMcpTools(auth, context.signal);
-          }
+  for (const definition of definitions) {
+    const provider = createLiteLLMProvider({
+      id: definition.name,
+      name: definition.displayName,
+      baseUrl: requestBaseUrl(definition),
+      auth: createProviderAuth(definition),
+      discover: async (credential, signal) => {
+        const disabledReason = discoveryDisabledReason();
+        if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
+        const auth = await authForCredential(definition, credential);
+        const result = await discoverModels(auth.baseUrl, auth.apiKey, {
+          ...getModelsDevDiscoveryOptions(),
+          timeoutMs: getDiscoveryTimeoutMs(),
+          signal,
+          headers: auth.headers,
+          silent: !isVerboseDiscovery(),
+          onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
+        });
+        signal?.throwIfAborted();
+        return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl)}/v1` };
+      },
+    });
+    Object.assign(provider, { headers: resolveHeaders(definition) });
+    const refreshModels = provider.refreshModels!;
+    provider.refreshModels = async (context) => {
+      try {
+        await refreshModels(context);
+      } finally {
+        if (
+          definition.name === PROVIDER_NAME &&
+          context.allowNetwork &&
+          !discoveryDisabledReason() &&
+          context.credential
+        ) {
+          const auth = await authForCredential(definition, context.credential);
+          defaultRuntimeAuth = auth;
+          await registerMcpTools(auth, context.signal);
         }
-      };
-      pi.registerProvider(controller.provider);
-      return [definition.name, controller] as const;
-    }),
-  );
+      }
+    };
+    pi.registerProvider(provider);
+  }
 
-  setupLiteLLMCostTracking(pi, [...controllers.keys()]);
+  setupLiteLLMCostTracking(pi, [...providerNames]);
 
   if (skillsEnabled) {
     for (const tool of createSkillToolDefinitions(resolveDefaultRuntimeAuth)) {
       pi.registerTool(tool);
     }
   }
-
-  pi.registerCommand("litellm-refresh", {
-    description: "Re-discover models from the LiteLLM proxy.",
-    handler: async (args, ctx) => {
-      const disabledReason = discoveryDisabledReason();
-      if (disabledReason) {
-        ctx.ui.notify(`LiteLLM refresh disabled (${disabledReason})`, "warning");
-        return;
-      }
-      const requestedProvider = args.trim();
-      const entries = requestedProvider
-        ? [...controllers].filter(([name]) => name === requestedProvider)
-        : [...controllers];
-      if (entries.length === 0) {
-        ctx.ui.notify(`LiteLLM refresh failed: unknown provider ${requestedProvider}`, "error");
-        return;
-      }
-
-      await ctx.modelRegistry.refresh();
-      const settled = await Promise.allSettled(
-        entries.map(async ([providerName, controller]) => {
-          const result = await controller.forceRefresh(ctx.signal);
-          return { providerName, models: controller.provider.getModels(), source: result.source };
-        }),
-      );
-      const succeeded = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
-      const failed = settled
-        .map((result, index) => ({ result, name: entries[index][0] }))
-        .filter(({ result }) => result.status === "rejected")
-        .map(({ result, name }) => {
-          const reason = (result as PromiseRejectedResult).reason;
-          return { name, message: reason instanceof Error ? reason.message : String(reason) };
-        });
-
-      if (failed.length === 0) {
-        if (succeeded.length === 1) {
-          const result = succeeded[0];
-          ctx.ui.notify(`LiteLLM: ${result.models.length} models refreshed (source: ${result.source})`, "info");
-          return;
-        }
-        ctx.ui.notify(
-          `LiteLLM: ${succeeded.length} providers refreshed (${succeeded
-            .map((result) => `${result.providerName}: ${result.models.length} models`)
-            .join(", ")})`,
-          "info",
-        );
-        return;
-      }
-      const failures = failed.map(({ name, message }) => (settled.length === 1 ? message : `${name}: ${message}`));
-      if (succeeded.length === 0) {
-        ctx.ui.notify(`LiteLLM refresh failed: ${failures.join("; ")}`, "error");
-        return;
-      }
-      ctx.ui.notify(
-        `LiteLLM: refreshed ${succeeded
-          .map((result) => `${result.providerName}: ${result.models.length} models`)
-          .join(", ")}; failed ${failures.join("; ")}`,
-        "warning",
-      );
-    },
-  });
 
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {

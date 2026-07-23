@@ -113,7 +113,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
   });
 
   it(
-    "logs in, refreshes, and selects LiteLLM models",
+    "logs in and selects LiteLLM models",
     async () => {
       await withPi(async (session) => {
         await session.screen.waitForText("Warning: No models available", { timeoutMs: waitTimeoutMs });
@@ -125,11 +125,6 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
         await submit(session, process.env.LITELLM_API_KEY ?? "sk-ci-litellm-smoke");
 
         await session.screen.waitUntil((snapshot) => !snapshot.text.includes("Enter API key"), {
-          timeoutMs: waitTimeoutMs,
-        });
-
-        await submit(session, "/litellm-refresh");
-        await session.screen.waitForText("LiteLLM: 2 models refreshed (source: model_info)", {
           timeoutMs: waitTimeoutMs,
         });
 

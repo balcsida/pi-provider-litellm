@@ -166,6 +166,7 @@ describe("extension startup", () => {
       }),
     );
     expect(pi.handlers.get("session_start")).toHaveLength(1);
+    expect(pi.commands.has("litellm-refresh")).toBe(false);
   });
 
   it("disables models.dev enrichment with LITELLM_MODELS_DEV=0", async () => {
@@ -416,27 +417,6 @@ describe("extension startup", () => {
       merge_reasoning_content_in_choices: true,
       thinking: { type: "disabled" },
     });
-  });
-
-  it("does not fetch on refresh when discovery timeout is zero", async () => {
-    const agentDir = await makeAgentDir();
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "env-key";
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(200, {
-        data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
-      }),
-    );
-    const notify = vi.fn();
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-    await pi.commands.get("litellm-refresh")?.handler("", { ui: { notify } });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledWith("LiteLLM refresh disabled (LITELLM_DISCOVERY_TIMEOUT_MS=0)", "warning");
   });
 
   it("returns a native API-key credential without discovery side effects", async () => {
@@ -717,11 +697,12 @@ describe("extension startup", () => {
     const agentDir = await makeAgentDir();
     const helperPath = await writeHelper(agentDir, ["unexpected-helper-run"]);
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] }),
-      );
+    process.env.LITELLM_HEADERS = '{"x-tenant":"tenant-a"}';
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info"))
+        return jsonResponse(200, { data: [{ model_name: "claude-opus-4-8", model_info: { mode: "chat" } }] });
+      return jsonResponse(200, { tools: [] });
+    });
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
@@ -734,51 +715,14 @@ describe("extension startup", () => {
         access: "already-refreshed",
         refresh: `!${helperPath}`,
         expires: Date.now() + 60_000,
-        baseUrl: "https://litellm.example.com",
+        baseUrl: "https://current.example.com",
       },
     });
 
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://current.example.com/model/info");
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer already-refreshed");
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("x-tenant")).toBe("tenant-a");
     expect(await readHelperCount(agentDir)).toBe(0);
-  });
-
-  it("initializes current credentials before a forced command refresh", async () => {
-    const agentDir = await makeAgentDir();
-    process.env.LITELLM_BASE_URL = "https://startup.example.com";
-    process.env.LITELLM_API_KEY = "startup-key";
-    const seen: Array<{ url: string; authorization: string }> = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      seen.push({
-        url: String(input),
-        authorization: new Headers(init?.headers).get("authorization") ?? "",
-      });
-      return jsonResponse(200, { data: [{ model_name: "model", model_info: { mode: "chat" } }] });
-    });
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-    const notify = vi.fn();
-    const currentCredential: Credential = {
-      type: "api_key",
-      key: "current-key",
-      env: { LITELLM_BASE_URL: "https://current.example.com" },
-    };
-
-    await pi.commands.get("litellm-refresh")?.handler("", {
-      ui: { notify },
-      modelRegistry: {
-        authStorage: { set: vi.fn() },
-        refresh: async () => {
-          await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential: currentCredential });
-        },
-      },
-    });
-
-    expect(seen.at(-1)).toEqual({
-      url: "https://current.example.com/model/info",
-      authorization: "Bearer current-key",
-    });
-    expect(notify).toHaveBeenCalledWith("LiteLLM: 1 models refreshed (source: model_info)", "info");
   });
 
   it("enterprise SSO login generates a virtual key and uses it as the access token", async () => {
