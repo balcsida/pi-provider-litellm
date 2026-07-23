@@ -436,6 +436,54 @@ describe("discoverModels fallback to /v1/models", () => {
     });
   });
 
+  it("normalizes models.dev network metadata before caching it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        return new Response(
+          '{"openai":{"models":{"gpt-5.5":{"name":"Remote GPT","reasoning":"yes","modalities":{"input":["text",7,"image"]},"limit":{"context":1050000,"input":"many","output":1e400},"cost":{"input":5,"output":"expensive","cache_read":0.5,"cache_write":1e400}}}}}',
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({
+      name: "Remote GPT",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_050_000,
+      maxTokens: 128_000,
+    });
+    expect(result.models[0]?.cost).toEqual({ input: 5, output: 0, cacheRead: 0.5, cacheWrite: 0 });
+    expect(JSON.parse(await readFile(cachePath, "utf8"))).toEqual({
+      fetchedAt: 1_000,
+      catalog: {
+        openai: {
+          models: {
+            "gpt-5.5": {
+              name: "Remote GPT",
+              modalities: { input: ["text", "image"] },
+              limit: { context: 1_050_000 },
+              cost: { input: 5, cache_read: 0.5 },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("lets initial cache-miss callers abort independently", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
     const cachePath = join(dir, "litellm-models-dev.json");
@@ -543,6 +591,56 @@ describe("discoverModels fallback to /v1/models", () => {
 
     expect(urls).not.toContain("https://models.dev/api.json");
     expect(result.models[0]?.contextWindow).toBe(1_050_000);
+  });
+
+  it("ignores malformed nested metadata in a fresh models.dev cache", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1_000,
+        catalog: {
+          openai: {
+            models: {
+              "gpt-5.5": {
+                name: "Cached GPT",
+                reasoning: "yes",
+                modalities: { input: 42 },
+                limit: { context: "many", output: {} },
+                cost: { input: "expensive" },
+              },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    vi.spyOn(Date, "now").mockReturnValue(2_000);
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect(result.models[0]).toMatchObject({
+      name: "Cached GPT",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+    });
+    expect(result.models[0]?.cost.input).toBe(5);
   });
 
   it("returns stale metadata while refreshing it in the background", async () => {

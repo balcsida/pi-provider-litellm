@@ -246,6 +246,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeModelsDevCatalog(value: unknown): ModelsDevResponse | undefined {
+  if (!isRecord(value)) return undefined;
+  const catalog: ModelsDevResponse = {};
+  for (const [providerId, providerValue] of Object.entries(value)) {
+    if (!isRecord(providerValue) || !isRecord(providerValue.models)) continue;
+    const models: Record<string, ModelsDevModel> = {};
+    for (const [modelId, modelValue] of Object.entries(providerValue.models)) {
+      if (!isRecord(modelValue)) continue;
+      const model: ModelsDevModel = {};
+      if (typeof modelValue.name === "string") model.name = modelValue.name;
+      if (typeof modelValue.reasoning === "boolean") model.reasoning = modelValue.reasoning;
+      if (isRecord(modelValue.modalities) && Array.isArray(modelValue.modalities.input)) {
+        const input = modelValue.modalities.input.filter((entry): entry is string => typeof entry === "string");
+        if (input.length > 0) model.modalities = { input };
+      }
+      if (isRecord(modelValue.limit)) {
+        const limit: NonNullable<ModelsDevModel["limit"]> = {};
+        const context = finiteNumber(modelValue.limit.context);
+        const input = finiteNumber(modelValue.limit.input);
+        const output = finiteNumber(modelValue.limit.output);
+        if (context !== undefined) limit.context = context;
+        if (input !== undefined) limit.input = input;
+        if (output !== undefined) limit.output = output;
+        if (Object.keys(limit).length > 0) model.limit = limit;
+      }
+      if (isRecord(modelValue.cost)) {
+        const cost: NonNullable<ModelsDevModel["cost"]> = {};
+        const input = finiteNumber(modelValue.cost.input);
+        const output = finiteNumber(modelValue.cost.output);
+        const cacheRead = finiteNumber(modelValue.cost.cache_read);
+        const cacheWrite = finiteNumber(modelValue.cost.cache_write);
+        if (input !== undefined) cost.input = input;
+        if (output !== undefined) cost.output = output;
+        if (cacheRead !== undefined) cost.cache_read = cacheRead;
+        if (cacheWrite !== undefined) cost.cache_write = cacheWrite;
+        if (Object.keys(cost).length > 0) model.cost = cost;
+      }
+      models[modelId] = model;
+    }
+    catalog[providerId] = { models };
+  }
+  return catalog;
+}
+
 async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | undefined> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
@@ -254,12 +302,12 @@ async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | un
       typeof parsed.fetchedAt !== "number" ||
       !Number.isFinite(parsed.fetchedAt) ||
       parsed.fetchedAt < 0 ||
-      parsed.fetchedAt > Date.now() ||
-      !isRecord(parsed.catalog)
+      parsed.fetchedAt > Date.now()
     ) {
       return undefined;
     }
-    return { fetchedAt: parsed.fetchedAt, catalog: parsed.catalog as ModelsDevResponse };
+    const catalog = normalizeModelsDevCatalog(parsed.catalog);
+    return catalog ? { fetchedAt: parsed.fetchedAt, catalog } : undefined;
   } catch {
     return undefined;
   }
@@ -270,7 +318,8 @@ function refreshModelsDevCatalog(key: string, options: DiscoveryOptions): Promis
   if (active) return active;
   const refresh = (async () => {
     try {
-      const catalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
+      const catalog = normalizeModelsDevCatalog(await fetchPublicJson<unknown>(MODELS_DEV_URL, options));
+      if (!catalog) return undefined;
       const cache = { fetchedAt: Date.now(), catalog };
       modelsDevCaches.set(key, cache);
       if (options.modelsDevCachePath) {
