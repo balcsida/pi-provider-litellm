@@ -515,10 +515,9 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(1);
   });
 
-  it("resolves shell expressions in helper commands", async () => {
+  it("rejects shell expressions in helper commands", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-    process.env.CUSTOM_LITELLM_KEY = "shell-expanded-key";
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
@@ -526,10 +525,9 @@ describe("extension startup", () => {
     await expect(
       resolveApiKeyWithEnv(pi.providers[0]!, {
         LITELLM_BASE_URL: "https://context.example.com",
-        LITELLM_API_KEY_HELPER: 'printf %s "$CUSTOM_LITELLM_KEY"',
-        CUSTOM_LITELLM_KEY: "shell-expanded-key",
+        LITELLM_API_KEY_HELPER: "printf safe-key; printf injected-key",
       }),
-    ).resolves.toMatchObject({ auth: { apiKey: "shell-expanded-key" } });
+    ).rejects.toThrow("shell syntax is not supported");
   });
 
   it("preserves backslashes in helper executable paths", async () => {
