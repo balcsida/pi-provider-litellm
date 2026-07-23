@@ -697,21 +697,21 @@ describe("extension startup", () => {
     const pi = await createLoadedPi(agentDir);
     await writeFile(
       join(agentDir, "auth.json"),
-      JSON.stringify({ litellm: { type: "api_key", key: "new-key" } }),
+      JSON.stringify({ litellm: { type: "api_key", key: "stored-key" } }),
       "utf8",
     );
 
     await pi.providers[0]?.config.refreshModels?.({
       allowNetwork: true,
-      credential: { type: "api_key", key: "new-key" },
+      credential: { type: "api_key", key: "callback-key" },
     });
 
-    expect(seenAuthHeaders).toEqual(["Bearer new-key", "Bearer new-key"]);
+    expect(seenAuthHeaders).toEqual(["Bearer callback-key", "Bearer callback-key"]);
     expect(await readHelperCount(agentDir)).toBe(0);
     const cache = JSON.parse(await readFile(join(agentDir, "litellm-models.json"), "utf8")) as {
       apiKeyFingerprint: string;
     };
-    expect(cache.apiKeyFingerprint).toBe(fingerprint("new-key"));
+    expect(cache.apiKeyFingerprint).toBe(fingerprint("callback-key"));
   });
 
   it("cancels provider refresh with Pi's signal", async () => {
