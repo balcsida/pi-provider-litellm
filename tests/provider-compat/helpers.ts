@@ -76,6 +76,7 @@ export async function createCompatibilityHarness(): Promise<{
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = input instanceof Request ? input : undefined;
     const url = request?.url ?? String(input);
+    const isForeignRequest = new URL(url).origin === "https://foreign.example.com";
     if (url.endsWith("/model/info")) {
       return Response.json({
         data: [
@@ -100,7 +101,7 @@ export async function createCompatibilityHarness(): Promise<{
     if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
-    (url.startsWith("https://foreign.example.com") ? foreignRequests : requests).push(requestBody);
+    (isForeignRequest ? foreignRequests : requests).push(requestBody);
     const history = JSON.stringify(requestBody.messages);
     if (history.includes("Overflow the context")) {
       return Response.json(
@@ -117,7 +118,7 @@ export async function createCompatibilityHarness(): Promise<{
     }
     const chunks =
       responses.shift() ??
-      (url.startsWith("https://foreign.example.com") && history.includes("Continue elsewhere")
+      (isForeignRequest && history.includes("Continue elsewhere")
         ? successfulResponse("foreign continued")
         : history.includes("Continue in LiteLLM")
           ? successfulResponse("LiteLLM continued")

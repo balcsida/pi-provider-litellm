@@ -91,4 +91,14 @@ describe("native cross-provider handoff compatibility", () => {
       { role: "user", content: "Continue elsewhere" },
     ]);
   });
+
+  it("does not treat a lookalike foreign origin as a foreign request", async () => {
+    const { models, foreignModel, requests, foreignRequests } = await createCompatibilityHarness();
+    foreignModel.baseUrl = "https://foreign.example.com.attacker.invalid";
+
+    await models.streamSimple(foreignModel, { messages: [user("Continue elsewhere")] }).result();
+
+    expect(requests).toHaveLength(1);
+    expect(foreignRequests).toHaveLength(0);
+  });
 });
