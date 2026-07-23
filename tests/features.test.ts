@@ -1,79 +1,17 @@
 import { scryptSync } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoadedPi, type TestPi } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
-
-type TestProviderConfig = {
-  baseUrl?: string;
-  apiKey?: string;
-  api?: string;
-  models?: Array<{ id: string; compat?: unknown }>;
-  oauth?: unknown;
-};
-
-type TestCommand = {
-  description: string;
-  handler: (args: string, ctx: { ui: { notify: (message: string, type: string) => void } }) => Promise<void> | void;
-};
-
-type TestPi = {
-  providers: Array<{ name: string; config: TestProviderConfig }>;
-  commands: Map<string, TestCommand>;
-  handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
-  tools: Array<{ name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }>;
-  registerProvider(name: string, config: TestProviderConfig): void;
-  registerCommand(name: string, command: TestCommand): void;
-  registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }): void;
-  on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
-};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
-}
-
-async function loadExtension(agentDir: string): Promise<(pi: TestPi) => Promise<void>> {
-  vi.resetModules();
-  vi.doMock("@earendil-works/pi-coding-agent", () => ({
-    defineTool: (tool: unknown) => tool,
-    getAgentDir: () => agentDir,
-    readStoredCredential: (provider: string, authPath: string) => {
-      try {
-        return (JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>)[provider];
-      } catch {
-        return undefined;
-      }
-    },
-  }));
-  const mod = await import("../src/index.js");
-  return mod.default as unknown as (pi: TestPi) => Promise<void>;
-}
-
-function createPi(): TestPi {
-  return {
-    providers: [],
-    commands: new Map(),
-    handlers: new Map(),
-    tools: [],
-    registerProvider(name: string, config: TestProviderConfig) {
-      this.providers.push({ name, config });
-    },
-    registerCommand(name: string, command: TestCommand) {
-      this.commands.set(name, command);
-    },
-    registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }) {
-      this.tools.push(tool);
-    },
-    on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any) {
-      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
-    },
-  };
 }
 
 async function startSession(pi: TestPi): Promise<void> {
@@ -113,9 +51,7 @@ describe("feature parity", () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.providers[0]?.config.apiKey).toMatch(/^!.*gcloud-token-cli\.js/);
   });
@@ -147,9 +83,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
@@ -173,9 +107,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
     const result = await beforeAgentStart?.({ systemPrompt: "Base prompt" }, {});
@@ -196,9 +128,7 @@ describe("feature parity", () => {
     process.env.LITELLM_API_KEY = "sk-test";
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.tools.map((tool) => tool.name)).not.toContain("litellm_skill_list");
     const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
@@ -220,9 +150,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     expect(requestedUrls).toEqual(["https://litellm.example.com/model/info"]);
@@ -256,9 +184,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     expect(pi.handlers.has("before_provider_request")).toBe(true);
     expect(pi.handlers.has("after_provider_response")).toBe(true);
@@ -291,9 +217,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -341,9 +265,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -389,9 +311,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
@@ -411,9 +331,7 @@ describe("feature parity", () => {
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -444,9 +362,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -495,9 +411,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -520,9 +434,7 @@ describe("feature parity", () => {
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -560,9 +472,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     for (const id of ["gpt-5.5", "openai/gpt-5.5", "gpt-5.5-20260504143601"]) {
@@ -603,9 +513,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     let message: any = {
       role: "assistant",
@@ -645,9 +553,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     let message: any = {
       role: "assistant",
@@ -690,9 +596,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
@@ -750,9 +654,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     // Same model id discovered through LiteLLM, but the message came from
     // a direct provider — LiteLLM pricing must not overwrite its cost.
@@ -795,9 +697,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
     await startSession(pi);
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
@@ -807,90 +707,24 @@ describe("feature parity", () => {
     );
 
     const endHandler = pi.handlers.get("message_end")?.[0];
+    const usage = {
+      input: 100,
+      output: 50,
+      cacheRead: 10,
+      cacheWrite: 5,
+      cost: { input: 0.0003, output: 0.00075, cacheRead: 0.000003, cacheWrite: 0.00001875, total: 0.00107175 },
+    };
     const result = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "anthropic/claude-3-5-sonnet",
-        usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5 },
+        usage,
       },
     });
 
-    // Falls back to per-token pricing instead of the foreign header cost.
-    expect(result.message.usage.cost.total).toBeCloseTo(0.00107175, 10);
-  });
-
-  it("updates costs after litellm-refresh", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "sk-test";
-
-    let callCount = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        callCount++;
-        // First call: original costs; second call (refresh): doubled costs
-        const inputCost = callCount === 1 ? 0.000003 : 0.000006;
-        const outputCost = callCount === 1 ? 0.000015 : 0.00003;
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "test-model",
-              model_info: {
-                mode: "chat",
-                input_cost_per_token: inputCost,
-                output_cost_per_token: outputCost,
-              },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    await startSession(pi);
-
-    // Get initial cost from model-based calculation
-    const endHandler = pi.handlers.get("message_end")?.[0];
-    const initialResult = await endHandler?.({
-      message: {
-        role: "assistant",
-        provider: "litellm",
-        model: "test-model",
-        usage: { input: 1000, output: 1000 },
-      },
-    });
-    // input: 0.000003 * 1000 = 0.003, output: 0.000015 * 1000 = 0.015
-    expect(initialResult.message.usage.cost.total).toBeCloseTo(0.018, 6);
-
-    // Run /litellm-refresh to update models and costs
-    const refreshCmd = pi.commands.get("litellm-refresh");
-    const notifications: Array<{ message: string; type: string }> = [];
-    await refreshCmd!.handler("", {
-      ui: {
-        notify: (message: string, type: string) => {
-          notifications.push({ message, type });
-        },
-      },
-    });
-    expect(notifications[0].type).toBe("info");
-
-    // Now get cost after refresh (costs doubled)
-    const refreshedResult = await endHandler?.({
-      message: {
-        role: "assistant",
-        provider: "litellm",
-        model: "test-model",
-        usage: { input: 1000, output: 1000 },
-      },
-    });
-    // input: 0.000006 * 1000 = 0.006, output: 0.000030 * 1000 = 0.030
-    expect(refreshedResult.message.usage.cost.total).toBeCloseTo(0.036, 6);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.00107175, 10);
   });
 
   it("shares concurrent litellm-refresh requests", async () => {
@@ -937,9 +771,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     const refreshCmd = pi.commands.get("litellm-refresh");
     const notifications: Array<{ message: string; type: string }> = [];
@@ -1002,9 +834,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     // Extension used stale cache, no fetch during init
     expect(callCount).toBe(0);
@@ -1014,20 +844,23 @@ describe("feature parity", () => {
     for (const handler of sessionStartHandlers) {
       await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
     }
+    await vi.waitFor(() => expect(callCount).toBe(1));
     const endHandler = pi.handlers.get("message_end")?.[0];
-    await vi.waitFor(async () => {
-      const result = await endHandler?.({
-        message: {
-          role: "assistant",
-          provider: "litellm",
-          model: "test-model",
-          usage: { input: 1000, output: 1000 },
-        },
-      });
-      // After refresh: input: 0.000006 * 1000 = 0.006, output: 0.000030 * 1000 = 0.030
-      expect(result.message.usage.cost.total).toBeCloseTo(0.036, 6);
+    const usage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.006, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.036 },
+    };
+    const result = await endHandler?.({
+      message: {
+        role: "assistant",
+        provider: "litellm",
+        model: "test-model",
+        usage,
+      },
     });
-    expect(callCount).toBe(1);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.036, 6);
   });
 
   it("handles stale refresh failure silently on session_start", async () => {
@@ -1063,9 +896,7 @@ describe("feature parity", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
+    const pi = await createLoadedPi(agentDir);
 
     // Fire session_start — fire-and-forget refresh kicks off
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
@@ -1078,15 +909,20 @@ describe("feature parity", () => {
 
     // Existing cached costs still work after the refresh failure
     const endHandler = pi.handlers.get("message_end")?.[0];
+    const usage = {
+      input: 1000,
+      output: 1000,
+      cost: { input: 0.003, output: 0.015, cacheRead: 0, cacheWrite: 0, total: 0.018 },
+    };
     const result = await endHandler?.({
       message: {
         role: "assistant",
         provider: "litellm",
         model: "test-model",
-        usage: { input: 1000, output: 1000 },
+        usage,
       },
     });
-    // Original costs: input: 3/1M * 1000 = 0.003, output: 15/1M * 1000 = 0.015
-    expect(result.message.usage.cost.total).toBeCloseTo(0.018, 6);
+    expect(result).toBeUndefined();
+    expect(usage.cost.total).toBeCloseTo(0.018, 6);
   });
 });

@@ -6,7 +6,7 @@
 - Source is TypeScript ESM under `src/`; tests are Vitest specs under `tests/`.
 - Build output is `dist/`; do not edit generated output by hand.
 - The package entrypoint is `./dist/index.js`, and the Pi extension registration comes from `package.json` `pi.extensions`.
-- Node support starts at `>=22.19.0`; GitHub workflows currently run Node `24.16.0`.
+- Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 
 ## Commands
 
@@ -41,10 +41,10 @@
 
 ## Smoke And CI
 
-- CI runs `npm ci`, `npm run check`, `npm run clean`, `npm run build`, and `npm pack --dry-run`.
+- CI runs `npm ci` and `npm run prepublishOnly`.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
-- `scripts/smoke.ts` and `scripts/smoke-runner.ts` exercise discovery and `/v1/chat/completions` through the proxy.
+- `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
 - The non-interactive Pi CLI smoke uses `./dist/index.js`, so runtime changes need a fresh build before running it.
 
 ## Release And Packaging

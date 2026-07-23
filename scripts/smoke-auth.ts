@@ -5,12 +5,11 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { normalizeBaseUrl } from "../src/discover.js";
+import { smokeChatCompletion } from "./smoke-runner.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const BAD_SMOKE_KEY = "bad-smoke-key";
-const SMOKE_PROMPT = "Reply with one short word.";
 
 export type AuthSmokeResult = {
   enterprise: boolean;
@@ -23,14 +22,6 @@ export type AuthSmokeOptions = {
   modelId: string;
   timeoutMs?: number;
   enterprise?: boolean;
-};
-
-type ChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: unknown;
-    };
-  }>;
 };
 
 type KeyGenerateResponse = {
@@ -60,15 +51,6 @@ type SmokePi = {
   on: () => void;
 };
 
-function withTimeout(timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
-  return {
-    signal: controller.signal,
-    cancel: () => clearTimeout(timer),
-  };
-}
-
 async function readErrorBody(response: Response): Promise<string> {
   try {
     const body = await response.text();
@@ -79,12 +61,7 @@ async function readErrorBody(response: Response): Promise<string> {
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const { signal, cancel } = withTimeout(timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal });
-  } finally {
-    cancel();
-  }
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
 }
 
 function authHeaders(apiKey?: string): Record<string, string> {
@@ -125,30 +102,6 @@ async function fetchModels(baseUrl: string, apiKey: string | undefined, timeoutM
     },
     timeoutMs,
   );
-}
-
-async function smokeChat(baseUrl: string, apiKey: string, modelId: string, timeoutMs: number): Promise<void> {
-  const response = await fetchWithTimeout(
-    `${baseUrl}/v1/chat/completions`,
-    {
-      method: "POST",
-      headers: jsonHeaders(apiKey),
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: "user", content: SMOKE_PROMPT }],
-        max_tokens: 16,
-        temperature: 0,
-      }),
-    },
-    timeoutMs,
-  );
-  await expectOk(`/v1/chat/completions for ${modelId}`, response);
-
-  const data = (await response.json()) as ChatCompletionResponse;
-  const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error(`/v1/chat/completions for ${modelId} returned no assistant text`);
-  }
 }
 
 async function generateVirtualKey(
@@ -245,7 +198,7 @@ export async function runSsoLoginSmoke(
       throw new Error("SSO login did not return a generated virtual key");
     }
 
-    await smokeChat(baseUrl, credential.access, options.modelId, options.timeoutMs);
+    await smokeChatCompletion(baseUrl, credential.access, options.modelId, options.timeoutMs);
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -276,7 +229,7 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
   await expectOk("master-key /v1/models", await fetchModels(baseUrl, options.masterKey, timeoutMs));
   checks.push("master-key-models");
 
-  await smokeChat(baseUrl, options.masterKey, options.modelId, timeoutMs);
+  await smokeChatCompletion(baseUrl, options.masterKey, options.modelId, timeoutMs);
   checks.push("master-key-chat");
 
   if (options.enterprise) {
@@ -284,7 +237,7 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
     checks.push("bad-token");
 
     const virtualKey = await generateVirtualKey(baseUrl, options.masterKey, options.modelId, timeoutMs);
-    await smokeChat(baseUrl, virtualKey, options.modelId, timeoutMs);
+    await smokeChatCompletion(baseUrl, virtualKey, options.modelId, timeoutMs);
     checks.push("virtual-key-chat");
 
     await expectAdminOnlyKeyGenerate(baseUrl, virtualKey, options.modelId, timeoutMs);
@@ -334,7 +287,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);

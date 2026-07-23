@@ -18,7 +18,4 @@ jobs:
           node-version: '26.5.0'
           cache: 'npm'
       - run: npm ci
-      - run: npm run check
-      - run: npm run clean
-      - run: npm run build
-      - run: npm pack --dry-run
+      - run: npm run prepublishOnly

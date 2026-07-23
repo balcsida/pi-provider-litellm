@@ -28,21 +28,6 @@ interface RawLiteLLMMcpTool {
   };
 }
 
-function withTimeout(timeoutMs: number, parentSignal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
-  const abort = () => controller.abort(parentSignal?.reason);
-  if (parentSignal?.aborted) abort();
-  else parentSignal?.addEventListener("abort", abort, { once: true });
-  return {
-    signal: controller.signal,
-    cancel: () => {
-      clearTimeout(timer);
-      parentSignal?.removeEventListener("abort", abort);
-    },
-  };
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
@@ -97,7 +82,6 @@ export async function discoverMcpTools(
   parentSignal?: AbortSignal,
 ): Promise<LiteLLMMcpTool[]> {
   onProgress?.("Discovering MCP tools from server...");
-  const { signal, cancel } = withTimeout(LIST_TIMEOUT_MS, parentSignal);
   try {
     onProgress?.("Querying MCP tools/list endpoint...");
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/mcp-rest/tools/list`, {
@@ -106,7 +90,9 @@ export async function discoverMcpTools(
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      signal,
+      signal: parentSignal
+        ? AbortSignal.any([parentSignal, AbortSignal.timeout(LIST_TIMEOUT_MS)])
+        : AbortSignal.timeout(LIST_TIMEOUT_MS),
     });
     if (!response.ok) {
       onProgress?.(`MCP tools discovery failed with status ${response.status}`);
@@ -122,8 +108,6 @@ export async function discoverMcpTools(
   } catch (error) {
     onProgress?.("MCP tools discovery encountered an error");
     throw error;
-  } finally {
-    cancel();
   }
 }
 
@@ -154,7 +138,6 @@ async function executeMcpToolOnce(
   args: Record<string, unknown>,
   headers?: Record<string, string>,
 ): Promise<McpExecutionResult> {
-  const { signal, cancel } = withTimeout(CALL_TIMEOUT_MS);
   try {
     let response: Response;
     try {
@@ -166,7 +149,7 @@ async function executeMcpToolOnce(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ server_id: serverId, name: toolName, arguments: args }),
-        signal,
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
       });
     } catch (error) {
       return {
@@ -194,8 +177,6 @@ async function executeMcpToolOnce(
     }
   } catch (error) {
     return { text: formatMcpToolError(toolName, serverId, error), retryable: false };
-  } finally {
-    cancel();
   }
 }
 

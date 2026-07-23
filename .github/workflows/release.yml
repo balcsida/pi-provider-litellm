@@ -20,10 +20,6 @@ jobs:
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
-      - run: npm run check
-      - run: npm run clean
-      - run: npm run build
-      - run: npm pack --dry-run
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:

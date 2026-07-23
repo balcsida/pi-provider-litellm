@@ -9,6 +9,14 @@ function readWorkflow(): string {
   return readFileSync(resolve(repoRoot, ".github/workflows/litellm-smoke.yml"), "utf8");
 }
 
+function readCiWorkflow(): string {
+  return readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
+}
+
+function readReleaseWorkflow(): string {
+  return readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8");
+}
+
 function readReadme(): string {
   return readFileSync(resolve(repoRoot, "README.md"), "utf8");
 }
@@ -46,6 +54,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('admin_only_routes: ["/key/generate"]');
     expect(workflow).toContain("Run community auth smoke");
     expect(workflow).toContain("Run Enterprise auth smoke");
+    expect(workflow).toContain("npx tsx scripts/smoke-runner.ts");
     expect(workflow).toContain("npx tsx scripts/smoke-auth.ts");
     expect(workflow.match(/curl -fsS --connect-timeout 1 --max-time 3/g)).toHaveLength(2);
     expect(workflow).toContain("Run Pi CLI smoke");
@@ -66,6 +75,14 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).not.toContain("GEMINI_API_KEY");
     expect(workflow).not.toContain("require_vendors");
     expect(workflow).not.toContain("model_name: kimi-vidaimock");
+  });
+
+  it("reuses the package publish gate in CI and release", () => {
+    expect(readCiWorkflow()).toContain("run: npm run prepublishOnly");
+    expect(readCiWorkflow()).not.toContain("run: npm pack --dry-run");
+    expect(readReleaseWorkflow()).not.toContain("run: npm run check");
+    expect(readReleaseWorkflow()).not.toContain("run: npm pack --dry-run");
+    expect(readReleaseWorkflow()).toContain("run: npm publish --access public --provenance");
   });
 
   it("runs for path-filtered pull requests", () => {
