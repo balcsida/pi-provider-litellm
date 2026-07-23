@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -106,9 +106,47 @@ function getApiKeyHelperCommand(): string | undefined {
   return normalizeCommand(process.env[ENV_API_KEY_HELPER]);
 }
 
-function executeApiKeyCommand(commandConfig: string): string {
+function parseApiKeyCommand(commandConfig: string): string[] {
   const command = commandConfig.startsWith("!") ? commandConfig.slice(1) : commandConfig;
-  const output = execSync(command, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }).trim();
+  if (/[\n\r;&|<>`$(){}*?~%^!]|\[|\]/.test(command))
+    throw new Error("LiteLLM API key helper shell syntax is not supported");
+
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    const next = command[index + 1];
+    if (character === "\\" && quote !== "'" && next && (next === "\\" || next === quote || /\s/.test(next))) {
+      current += next;
+      index += 1;
+    } else if ((character === "'" || character === '"') && (!quote || quote === character)) {
+      quote = quote ? undefined : character;
+    } else if (!quote && /\s/.test(character)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+
+  if (quote) throw new Error(`LiteLLM API key helper command has an unterminated quote: ${command}`);
+  if (current) parts.push(current);
+  if (parts.length === 0) throw new Error("LiteLLM API key helper command is empty");
+  if (/\.(?:cmd|bat)$/i.test(parts[0]!))
+    throw new Error("LiteLLM API key helper shell scripts are not supported; use an executable");
+  return parts;
+}
+
+function executeApiKeyCommand(commandConfig: string): string {
+  const [command, ...args] = parseApiKeyCommand(commandConfig);
+  const output = execFileSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 10_000,
+  }).trim();
   if (!output) throw new Error(`LiteLLM API key helper produced no output: ${command}`);
   return output;
 }
