@@ -1427,15 +1427,24 @@ describe("extension startup", () => {
     expect(credential?.expires).toBe(keyExpiresAt.getTime() - 5 * 60 * 1000);
   });
 
-  it("enterprise SSO login falls back to JWT when virtual key generation is aborted", async () => {
+  it("enterprise SSO login falls back to JWT when virtual key generation times out", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
     const progress = vi.fn();
+    const timeoutController = new AbortController();
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout")
+      .mockImplementationOnce(() => timeoutController.signal)
+      .mockImplementation(nativeTimeout);
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url.endsWith("/key/generate"))
         return new Promise<Response>((_, reject) => {
+          if (init?.signal?.aborted) {
+            reject(init.signal.reason);
+            return;
+          }
           init?.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")), {
             once: true,
           });
@@ -1460,11 +1469,53 @@ describe("extension startup", () => {
     await vi.waitFor(() =>
       expect(fetchSpy.mock.calls.some(([input]) => String(input).endsWith("/key/generate"))).toBe(true),
     );
-    controller.abort(new Error("test abort"));
+    timeoutController.abort(new Error("test timeout"));
 
     const credential = await loginPromise;
     expect(credential).toMatchObject({ access: jwt, refresh: "" });
     expect(progress).toHaveBeenCalledWith(expect.stringContaining("virtual key generation failed"));
+  });
+
+  it("enterprise SSO login rejects when the caller cancels virtual key generation", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const jwt = makeJwt(Math.floor(Date.now() / 1000) + 3600);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      return new Promise<Response>((resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(init.signal.reason);
+          return;
+        }
+        if (url.endsWith("/key/generate")) {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+          return;
+        }
+        if (url.endsWith("/model/info")) {
+          resolve(jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }));
+          return;
+        }
+        reject(new Error(`unexpected URL: ${url}`));
+      });
+    });
+    const pi = await createLoadedPi(agentDir);
+    const controller = new AbortController();
+    const reason = new Error("caller cancelled login");
+    const loginPromise = pi.providers[0]?.config.oauth?.login({
+      onPrompt: async (options) => {
+        if (options.placeholder) return "https://litellm.example.com";
+        if (options.message.includes("Select login method")) return "2";
+        if (options.message.includes("SSO token")) return jwt;
+        return "y";
+      },
+      signal: controller.signal,
+    });
+    await vi.waitFor(() =>
+      expect(fetchSpy.mock.calls.some(([input]) => String(input).endsWith("/key/generate"))).toBe(true),
+    );
+    controller.abort(reason);
+
+    await expect(loginPromise).rejects.toBe(reason);
   });
 
   it("enterprise SSO login uses JWT directly when user answers no to virtual key generation", async () => {
