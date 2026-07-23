@@ -772,8 +772,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     };
   }
 
-  let mcpRegistered = false;
+  let registeredMcpIdentity: string | undefined;
+  let mcpRegistration: Promise<void> | undefined;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
+
+  function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
+    return JSON.stringify({
+      baseUrl: normalizeBaseUrl(auth.baseUrl),
+      apiKey: auth.apiKey,
+      headers: Object.entries(auth.headers ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    });
+  }
 
   async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
@@ -804,23 +813,57 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return defaultRuntimeAuth;
   }
 
-  async function registerMcpTools(signal?: AbortSignal): Promise<void> {
-    if (!mcpEnabled || mcpRegistered || discoveryDisabledReason()) return;
+  function waitForMcpRegistration(registration: Promise<void>, signal?: AbortSignal): Promise<void> {
+    if (!signal) return registration.catch(() => undefined);
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        reject(signal.reason);
+      };
+      const onComplete = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      else registration.then(onComplete, onComplete);
+    });
+  }
+
+  async function registerMcpTools(auth: LiteLLMRuntimeAuth, signal?: AbortSignal): Promise<void> {
+    if (!mcpEnabled || discoveryDisabledReason()) return;
+    const identity = mcpCatalogIdentity(auth);
+    while (mcpRegistration) {
+      await waitForMcpRegistration(mcpRegistration, signal);
+      signal?.throwIfAborted();
+      if (registeredMcpIdentity === identity) return;
+    }
+    if (registeredMcpIdentity === identity) return;
+
+    const registration = (async () => {
+      try {
+        signal?.throwIfAborted();
+        const tools = await createMcpToolDefinitions(
+          (ctx) => (ctx?.modelRegistry ? resolveDefaultRuntimeAuth(ctx) : Promise.resolve(auth)),
+          isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
+          signal,
+        );
+        signal?.throwIfAborted();
+        for (const tool of tools) pi.registerTool(tool);
+        registeredMcpIdentity = identity;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        process.stderr.write(
+          `LiteLLM (${PROVIDER_NAME}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
+        );
+      }
+    })();
+    mcpRegistration = registration;
     try {
-      signal?.throwIfAborted();
-      const tools = await createMcpToolDefinitions(
-        resolveDefaultRuntimeAuth,
-        isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
-        signal,
-      );
-      signal?.throwIfAborted();
-      for (const tool of tools) pi.registerTool(tool);
-      mcpRegistered = true;
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason;
-      process.stderr.write(
-        `LiteLLM (${PROVIDER_NAME}): MCP tool discovery failed (${error instanceof Error ? error.message : String(error)}).\n`,
-      );
+      await registration;
+    } finally {
+      if (mcpRegistration === registration) mcpRegistration = undefined;
     }
   }
 
@@ -859,8 +902,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             !discoveryDisabledReason() &&
             context.credential
           ) {
-            defaultRuntimeAuth = await authForCredential(definition, context.credential);
-            await registerMcpTools(context.signal);
+            const auth = await authForCredential(definition, context.credential);
+            defaultRuntimeAuth = auth;
+            await registerMcpTools(auth, context.signal);
           }
         }
       };

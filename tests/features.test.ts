@@ -14,7 +14,7 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-async function refreshProvider(pi: TestPi, allowNetwork = true): Promise<void> {
+async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
   const store: ProviderModelsStore = {
     read: async () => undefined,
     write: async () => undefined,
@@ -28,6 +28,7 @@ async function refreshProvider(pi: TestPi, allowNetwork = true): Promise<void> {
       key: process.env.LITELLM_API_KEY ?? "sk-test",
       env: { LITELLM_BASE_URL: process.env.LITELLM_BASE_URL ?? "https://litellm.example.com" },
     },
+    signal,
   });
 }
 
@@ -36,6 +37,7 @@ afterEach(() => {
   vi.resetModules();
   delete process.env.LITELLM_BASE_URL;
   delete process.env.LITELLM_API_KEY;
+  delete process.env.LITELLM_HEADERS;
   delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
   delete process.env.LITELLM_GCLOUD_TOKEN_AUTH;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -104,6 +106,204 @@ describe("feature parity", () => {
     await refreshProvider(pi);
 
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
+  });
+
+  it("refreshes the MCP catalog when default-provider auth changes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://first.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "first",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "first" },
+            },
+          ],
+        });
+      }
+      if (url === "https://second.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "second",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "second" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://first.example.com";
+    process.env.LITELLM_API_KEY = "first-token";
+    process.env.LITELLM_HEADERS = '{"x-tenant":"first"}';
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+
+    process.env.LITELLM_BASE_URL = "https://second.example.com";
+    process.env.LITELLM_API_KEY = "second-token";
+    process.env.LITELLM_HEADERS = '{"x-tenant":"second"}';
+    await refreshProvider(pi);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://first.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer first-token", "x-tenant": "first" }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://second.example.com/mcp-rest/tools/list",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer second-token", "x-tenant": "second" }),
+      }),
+    );
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second");
+  });
+
+  it("shares in-flight MCP discovery between default-provider refreshes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    let resolveCatalog: (response: Response) => void = () => {};
+    const catalog = new Promise<Response>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let resolveSecondModel: (response: Response) => void = () => {};
+    const secondModel = new Promise<Response>((resolve) => {
+      resolveSecondModel = resolve;
+    });
+    let modelInfoRequests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        modelInfoRequests++;
+        return modelInfoRequests === 1 ? jsonResponse(200, { data: [] }) : secondModel;
+      }
+      if (url === "https://litellm.example.com/mcp-rest/tools/list") return catalog;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const firstRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://litellm.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+    const secondRefresh = refreshProvider(pi);
+    await vi.waitFor(() => expect(modelInfoRequests).toBe(2));
+    resolveSecondModel(jsonResponse(200, { data: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "https://litellm.example.com/mcp-rest/tools/list"),
+    ).toHaveLength(1);
+    resolveCatalog(jsonResponse(200, []));
+    await Promise.all([firstRefresh, secondRefresh]);
+  });
+
+  it("lets a live different-identity refresh continue after the active refresh aborts", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const firstAbort = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://first.example.com/mcp-rest/tools/list") {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      if (url === "https://second.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "second",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "second" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://first.example.com";
+    process.env.LITELLM_API_KEY = "first-token";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const firstRefresh = refreshProvider(pi, true, firstAbort.signal);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://first.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+
+    process.env.LITELLM_BASE_URL = "https://second.example.com";
+    process.env.LITELLM_API_KEY = "second-token";
+    const secondRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://second.example.com/model/info", expect.anything()),
+    );
+    firstAbort.abort(new Error("first refresh cancelled"));
+
+    await expect(firstRefresh).rejects.toThrow("first refresh cancelled");
+    await expect(secondRefresh).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("https://second.example.com/mcp-rest/tools/list", expect.anything());
+    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second");
+  });
+
+  it("rejects an aborted same-identity MCP waiter with its own reason", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    const secondAbort = new AbortController();
+    let resolveCatalog: (response: Response) => void = () => {};
+    const catalog = new Promise<Response>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let modelInfoRequests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        modelInfoRequests++;
+        return jsonResponse(200, { data: [] });
+      }
+      if (url === "https://litellm.example.com/mcp-rest/tools/list") return catalog;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const firstRefresh = refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("https://litellm.example.com/mcp-rest/tools/list", expect.anything()),
+    );
+    const secondRefresh = refreshProvider(pi, true, secondAbort.signal);
+    await vi.waitFor(() => expect(modelInfoRequests).toBe(2));
+
+    const reason = new Error("second refresh cancelled");
+    secondAbort.abort(reason);
+    try {
+      const outcome = await Promise.race([
+        secondRefresh.then(
+          () => "resolved",
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 50)),
+      ]);
+      expect(outcome).toBe(reason);
+    } finally {
+      resolveCatalog(jsonResponse(200, []));
+      await firstRefresh;
+      await secondRefresh.catch(() => undefined);
+    }
   });
 
   it("uses fresh Pi auth when a discovered MCP tool executes", async () => {
