@@ -154,15 +154,22 @@ describe("LiteLLM smoke workflow", () => {
 
   it("shares terminal login state with the later Pi CLI smoke", () => {
     const workflow = readWorkflow();
+    const agentDir = "PI_CODING_AGENT_DIR: $" + "{{ runner.temp }}/pi-cli-smoke";
+    const stepsStart = workflow.indexOf("    steps:");
     const initializeStart = workflow.indexOf("- name: Initialize shared Pi agent directory");
     const terminalStart = workflow.indexOf("- name: Run interactive Pi terminal smoke");
     const cliStart = workflow.indexOf("- name: Run Pi CLI smoke");
+    const dumpLogsStart = workflow.indexOf("- name: Dump LiteLLM logs");
 
-    expect(workflow).toContain("PI_CODING_AGENT_DIR: $" + "{{ runner.temp }}/pi-cli-smoke");
+    expect(workflow.slice(0, stepsStart)).not.toContain(agentDir);
     expect(initializeStart).toBeGreaterThan(-1);
     expect(terminalStart).toBeGreaterThan(initializeStart);
     expect(cliStart).toBeGreaterThan(terminalStart);
+    expect(dumpLogsStart).toBeGreaterThan(cliStart);
+    expect(workflow.slice(initializeStart, terminalStart)).toContain(agentDir);
     expect(workflow.slice(initializeStart, terminalStart)).toContain('mkdir -p "$PI_CODING_AGENT_DIR"');
+    expect(workflow.slice(terminalStart, cliStart)).toContain(agentDir);
+    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(agentDir);
     expect(workflow.slice(cliStart)).not.toContain('rm -rf "$PI_CODING_AGENT_DIR"');
   });
 

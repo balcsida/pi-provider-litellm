@@ -40,7 +40,6 @@ jobs:
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
-      PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
       VIDAIMOCK_VERSION: v0.2.7
 
@@ -204,17 +203,21 @@ jobs:
         run: npx tsx scripts/smoke-auth.ts
 
       - name: Initialize shared Pi agent directory
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: mkdir -p "$PI_CODING_AGENT_DIR"
 
       - name: Run interactive Pi terminal smoke
         env:
           LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
           LITELLM_TERMINAL_SMOKE: '1'
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: npm test -- tests/terminal-smoke.test.ts
 
       - name: Run Pi CLI smoke
         env:
           LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: |
           set -euo pipefail
 
