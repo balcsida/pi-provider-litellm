@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCompat, discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "../src/discover.js";
 
@@ -7,6 +10,27 @@ function jsonResponse(status: number, body: unknown): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const MODELS_DEV_CATALOG = {
+  openai: {
+    models: {
+      "gpt-5.5": {
+        name: "Models.dev GPT-5.5",
+        reasoning: true,
+        limit: { context: 1_050_000, output: 128_000 },
+        cost: { input: 5, output: 30, cache_read: 0.5 },
+      },
+    },
+  },
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -360,6 +384,422 @@ describe("discoverModels fallback to /v1/models", () => {
       expect(anthropic.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
     });
   }
+
+  it("skips models.dev enrichment when disabled", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [{ id: "gpt-5.5", object: "model", owned_by: "openai" }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+    });
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      contextWindow: 272000,
+    });
+  });
+
+  it("persists models.dev metadata after an initial cache miss", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_CATALOG);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]?.contextWindow).toBe(1_050_000);
+    expect(JSON.parse(await readFile(cachePath, "utf8"))).toEqual({
+      fetchedAt: 1_000,
+      catalog: MODELS_DEV_CATALOG,
+    });
+  });
+
+  it("normalizes models.dev network metadata before caching it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        return new Response(
+          '{"openai":{"models":{"gpt-5.5":{"name":"Remote GPT","reasoning":"yes","modalities":{"input":["text",7,"image"]},"limit":{"context":1050000,"input":"many","output":1e400},"cost":{"input":5,"output":"expensive","cache_read":0.5,"cache_write":1e400}}}}}',
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({
+      name: "Remote GPT",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_050_000,
+      maxTokens: 128_000,
+    });
+    expect(result.models[0]?.cost).toEqual({ input: 5, output: 0, cacheRead: 0.5, cacheWrite: 0 });
+    expect(JSON.parse(await readFile(cachePath, "utf8"))).toEqual({
+      fetchedAt: 1_000,
+      catalog: {
+        openai: {
+          models: {
+            "gpt-5.5": {
+              name: "Remote GPT",
+              modalities: { input: ["text", "image"] },
+              limit: { context: 1_050_000 },
+              cost: { input: 5, cache_read: 0.5 },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("lets initial cache-miss callers abort independently", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const first = new AbortController();
+    const later = new AbortController();
+    const third = new AbortController();
+    let modelsDevRequests = 0;
+    let resolveModelsDev!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests++;
+        return new Promise<Response>((resolve, reject) => {
+          resolveModelsDev = resolve;
+          const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const discover = (signal: AbortSignal) =>
+      discoverModels("https://litellm.example.com", "sk-test", { modelsDevCachePath: cachePath, signal });
+    const firstResult = discover(first.signal);
+    const laterResult = discover(later.signal);
+    const thirdResult = discover(third.signal);
+
+    await vi.waitFor(() => expect(modelsDevRequests).toBe(1));
+    first.abort(new Error("first aborted"));
+    later.abort(new Error("later aborted"));
+    await expect(firstResult).rejects.toThrow("first aborted");
+    await expect(laterResult).rejects.toThrow("later aborted");
+    resolveModelsDev(jsonResponse(200, MODELS_DEV_CATALOG));
+
+    await expect(thirdResult).resolves.toMatchObject({
+      models: [{ id: "gpt-5.5", contextWindow: 1_050_000 }],
+    });
+    expect(modelsDevRequests).toBe(1);
+  });
+
+  it("lets initial cache-miss callers time out independently", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    let modelsDevRequests = 0;
+    let resolveModelsDev!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests++;
+        return new Promise<Response>((resolve, reject) => {
+          resolveModelsDev = resolve;
+          const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const short = discoverModels("https://short.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+      timeoutMs: 30,
+    });
+    const shortTimeout = expect(short).rejects.toBeDefined();
+    const long = discoverModels("https://long.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+      timeoutMs: 1_000,
+    });
+
+    await vi.waitFor(() => expect(modelsDevRequests).toBe(1));
+    await shortTimeout;
+    resolveModelsDev(jsonResponse(200, MODELS_DEV_CATALOG));
+    await expect(long).resolves.toMatchObject({
+      models: [{ id: "gpt-5.5", contextWindow: 1_050_000 }],
+    });
+    expect(modelsDevRequests).toBe(1);
+  });
+
+  it("uses a fresh persistent models.dev cache without fetching", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1_000, catalog: MODELS_DEV_CATALOG }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(2_000);
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect(result.models[0]?.contextWindow).toBe(1_050_000);
+  });
+
+  it("ignores malformed nested metadata in a fresh models.dev cache", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1_000,
+        catalog: {
+          openai: {
+            models: {
+              "gpt-5.5": {
+                name: "Cached GPT",
+                reasoning: "yes",
+                modalities: { input: 42 },
+                limit: { context: "many", output: {} },
+                cost: { input: "expensive" },
+              },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    vi.spyOn(Date, "now").mockReturnValue(2_000);
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect(result.models[0]).toMatchObject({
+      name: "Cached GPT",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+    });
+    expect(result.models[0]?.cost.input).toBe(5);
+  });
+
+  it("ignores inherited model keys in a fresh models.dev cache", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1_000, catalog: { openai: { models: {} } } }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(2_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "constructor", owned_by: "openai" }] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]?.name).toBe("constructor (no metadata)");
+  });
+
+  it("returns stale metadata while refreshing it in the background", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const staleCatalog = {
+      openai: { models: { "gpt-5.5": { name: "Stale GPT", limit: { context: 200_000 } } } },
+    };
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1, catalog: staleCatalog }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const refresh = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") return refresh.promise;
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({ name: "Stale GPT", contextWindow: 200_000 });
+    refresh.resolve(jsonResponse(200, MODELS_DEV_CATALOG));
+    await vi.waitFor(async () => {
+      const cache = JSON.parse(await readFile(cachePath, "utf8"));
+      expect(cache.catalog).toEqual(MODELS_DEV_CATALOG);
+    });
+  });
+
+  it("keeps stale metadata when background refresh fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    const stale = { fetchedAt: 1, catalog: MODELS_DEV_CATALOG };
+    await writeFile(cachePath, JSON.stringify(stale), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const modelsDevRequests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests.push(url);
+        return new Response(null, { status: 503 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]?.contextWindow).toBe(1_050_000);
+    await vi.waitFor(() => expect(modelsDevRequests).toHaveLength(1));
+    expect(JSON.parse(await readFile(cachePath, "utf8"))).toEqual(stale);
+  });
+
+  it("deduplicates concurrent stale cache refreshes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 1, catalog: MODELS_DEV_CATALOG }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(28 * 24 * 60 * 60 * 1000 + 2);
+    const refresh = deferred<Response>();
+    let refreshes = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        refreshes++;
+        return refresh.promise;
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await Promise.all([
+      discoverModels("https://one.example.com", "sk-test", { modelsDevCachePath: cachePath }),
+      discoverModels("https://two.example.com", "sk-test", { modelsDevCachePath: cachePath }),
+    ]);
+
+    expect(refreshes).toBe(1);
+    refresh.resolve(jsonResponse(200, MODELS_DEV_CATALOG));
+    await vi.waitFor(async () => {
+      expect(JSON.parse(await readFile(cachePath, "utf8")).fetchedAt).toBe(Date.now());
+    });
+  });
+
+  it("replaces a malformed models.dev cache from the network", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: "invalid", catalog: [] }), "utf8");
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_CATALOG);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDevCachePath: cachePath });
+
+    expect(urls).toContain("https://models.dev/api.json");
+    expect(JSON.parse(await readFile(cachePath, "utf8")).catalog).toEqual(MODELS_DEV_CATALOG);
+  });
+
+  it("replaces a future-dated models.dev cache from the network", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    const cachePath = join(dir, "litellm-models-dev.json");
+    await writeFile(cachePath, JSON.stringify({ fetchedAt: 2_000, catalog: MODELS_DEV_CATALOG }), "utf8");
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") return jsonResponse(200, MODELS_DEV_CATALOG);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDevCachePath: cachePath });
+
+    expect(urls).toContain("https://models.dev/api.json");
+    expect(JSON.parse(await readFile(cachePath, "utf8")).fetchedAt).toBe(1_000);
+  });
 
   it("uses Pi catalog metadata when models.dev is unavailable", async () => {
     const urls: string[] = [];

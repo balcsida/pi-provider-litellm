@@ -34,9 +34,11 @@ const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
 const ENV_VERBOSE_DISCOVERY = "LITELLM_VERBOSE_DISCOVERY";
+const ENV_MODELS_DEV = "LITELLM_MODELS_DEV";
 const DEFAULT_TIMEOUT_MS = 5000;
 const LOGIN_TIMEOUT_MS = 10_000;
 const CACHE_FILENAME = "litellm-models.json";
+const MODELS_DEV_CACHE_FILENAME = "litellm-models-dev.json";
 const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
@@ -114,6 +116,12 @@ function getCachePath(providerName = PROVIDER_NAME): string {
   return join(getAgentDir(), `litellm-models-${sanitizeCacheSegment(providerName)}.json`);
 }
 
+function getModelsDevDiscoveryOptions(): Pick<DiscoveryOptions, "modelsDev" | "modelsDevCachePath"> {
+  return {
+    modelsDev: process.env[ENV_MODELS_DEV] !== "0",
+    modelsDevCachePath: join(getAgentDir(), MODELS_DEV_CACHE_FILENAME),
+  };
+}
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -566,6 +574,7 @@ async function loginLiteLLM(
   }
 
   const { models, source } = await discoverModels(baseUrl, apiKey, {
+    ...getModelsDevDiscoveryOptions(),
     timeoutMs: LOGIN_TIMEOUT_MS,
     signal: callbacks.signal,
     headers: options.headers,
@@ -808,6 +817,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (shouldFetch && !credentialWarning && creds.baseUrl && creds.apiKey && fp) {
       const timeoutMs = getDiscoveryTimeoutMs();
       const { result, warning } = await discoverWithFallback(creds.baseUrl, creds.apiKey, {
+        ...getModelsDevDiscoveryOptions(),
         timeoutMs,
         headers,
         silent: !isVerboseDiscovery(),
@@ -1028,6 +1038,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ? (message: string) => onProgress(`LiteLLM: ${message}`)
       : (message: string) => process.stderr.write(`LiteLLM: ${message}\n`);
     const result = await discoverModels(fresh.baseUrl, fresh.apiKey, {
+      ...getModelsDevDiscoveryOptions(),
       timeoutMs: getDiscoveryTimeoutMs(),
       signal,
       headers: state.headers,

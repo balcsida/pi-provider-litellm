@@ -1,7 +1,9 @@
+import { readFile } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { writeJsonAtomic } from "./cache.js";
 import type {
   DiscoveryOptions,
   DiscoveryResult,
@@ -17,7 +19,7 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 const MODELS_DEV_URL = "https://models.dev/api.json";
-let modelsDevCatalog: ModelsDevResponse | undefined;
+const MODELS_DEV_CACHE_TTL_MS = 28 * 24 * 60 * 60 * 1000;
 
 interface ModelsDevModel {
   name?: string;
@@ -39,6 +41,14 @@ interface ModelsDevModel {
 }
 
 type ModelsDevResponse = Record<string, { models?: Record<string, ModelsDevModel> }>;
+
+interface ModelsDevCacheFile {
+  fetchedAt: number;
+  catalog: ModelsDevResponse;
+}
+
+const modelsDevCaches = new Map<string, ModelsDevCacheFile>();
+const modelsDevRefreshes = new Map<string, Promise<ModelsDevResponse | undefined>>();
 
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
@@ -178,9 +188,32 @@ function findModelsDevModel(
 ): ModelsDevModel | undefined {
   const { provider, modelId } = getFallbackProviderAndModel(id, ownedBy);
   if (!provider) return undefined;
-  return catalog?.[provider]?.models?.[modelId];
+  const models = catalog?.[provider]?.models;
+  return models && Object.hasOwn(models, modelId) ? models[modelId] : undefined;
 }
 
+function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
 async function fetchJson<T>(
   url: string,
   apiKey: string,
@@ -210,14 +243,118 @@ async function fetchPublicJson<T>(url: string, options: DiscoveryOptions): Promi
   return (await response.json()) as T;
 }
 
-async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
-  if (modelsDevCatalog) return modelsDevCatalog;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeModelsDevCatalog(value: unknown): ModelsDevResponse | undefined {
+  if (!isRecord(value)) return undefined;
+  const catalog: ModelsDevResponse = {};
+  for (const [providerId, providerValue] of Object.entries(value)) {
+    if (!isRecord(providerValue) || !isRecord(providerValue.models)) continue;
+    const models: Record<string, ModelsDevModel> = {};
+    for (const [modelId, modelValue] of Object.entries(providerValue.models)) {
+      if (!isRecord(modelValue)) continue;
+      const model: ModelsDevModel = {};
+      if (typeof modelValue.name === "string") model.name = modelValue.name;
+      if (typeof modelValue.reasoning === "boolean") model.reasoning = modelValue.reasoning;
+      if (isRecord(modelValue.modalities) && Array.isArray(modelValue.modalities.input)) {
+        const input = modelValue.modalities.input.filter((entry): entry is string => typeof entry === "string");
+        if (input.length > 0) model.modalities = { input };
+      }
+      if (isRecord(modelValue.limit)) {
+        const limit: NonNullable<ModelsDevModel["limit"]> = {};
+        const context = finiteNumber(modelValue.limit.context);
+        const input = finiteNumber(modelValue.limit.input);
+        const output = finiteNumber(modelValue.limit.output);
+        if (context !== undefined) limit.context = context;
+        if (input !== undefined) limit.input = input;
+        if (output !== undefined) limit.output = output;
+        if (Object.keys(limit).length > 0) model.limit = limit;
+      }
+      if (isRecord(modelValue.cost)) {
+        const cost: NonNullable<ModelsDevModel["cost"]> = {};
+        const input = finiteNumber(modelValue.cost.input);
+        const output = finiteNumber(modelValue.cost.output);
+        const cacheRead = finiteNumber(modelValue.cost.cache_read);
+        const cacheWrite = finiteNumber(modelValue.cost.cache_write);
+        if (input !== undefined) cost.input = input;
+        if (output !== undefined) cost.output = output;
+        if (cacheRead !== undefined) cost.cache_read = cacheRead;
+        if (cacheWrite !== undefined) cost.cache_write = cacheWrite;
+        if (Object.keys(cost).length > 0) model.cost = cost;
+      }
+      models[modelId] = model;
+    }
+    catalog[providerId] = { models };
+  }
+  return catalog;
+}
+
+async function readModelsDevCache(path: string): Promise<ModelsDevCacheFile | undefined> {
   try {
-    modelsDevCatalog = await fetchPublicJson<ModelsDevResponse>(MODELS_DEV_URL, options);
-    return modelsDevCatalog;
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      !isRecord(parsed) ||
+      typeof parsed.fetchedAt !== "number" ||
+      !Number.isFinite(parsed.fetchedAt) ||
+      parsed.fetchedAt < 0 ||
+      parsed.fetchedAt > Date.now()
+    ) {
+      return undefined;
+    }
+    const catalog = normalizeModelsDevCatalog(parsed.catalog);
+    return catalog ? { fetchedAt: parsed.fetchedAt, catalog } : undefined;
   } catch {
     return undefined;
   }
+}
+
+function refreshModelsDevCatalog(key: string, options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
+  const active = modelsDevRefreshes.get(key);
+  if (active) return active;
+  const refresh = (async () => {
+    try {
+      const catalog = normalizeModelsDevCatalog(await fetchPublicJson<unknown>(MODELS_DEV_URL, options));
+      if (!catalog) return undefined;
+      const cache = { fetchedAt: Date.now(), catalog };
+      modelsDevCaches.set(key, cache);
+      if (options.modelsDevCachePath) {
+        await writeJsonAtomic(options.modelsDevCachePath, cache).catch(() => undefined);
+      }
+      return catalog;
+    } catch {
+      return undefined;
+    } finally {
+      modelsDevRefreshes.delete(key);
+    }
+  })();
+  modelsDevRefreshes.set(key, refresh);
+  return refresh;
+}
+
+async function getModelsDevCatalog(options: DiscoveryOptions): Promise<ModelsDevResponse | undefined> {
+  const key = options.modelsDevCachePath ?? MODELS_DEV_URL;
+  const refreshOptions = { ...options, timeoutMs: DEFAULT_TIMEOUT_MS, signal: undefined };
+  let cache = modelsDevCaches.get(key);
+  if (!cache && options.modelsDevCachePath) {
+    cache = await readModelsDevCache(options.modelsDevCachePath);
+    if (cache) modelsDevCaches.set(key, cache);
+  }
+  if (!cache) {
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    return awaitWithSignal(
+      refreshModelsDevCatalog(key, refreshOptions),
+      options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+    );
+  }
+  if (Date.now() - cache.fetchedAt < MODELS_DEV_CACHE_TTL_MS) return cache.catalog;
+  void refreshModelsDevCatalog(key, refreshOptions);
+  return cache.catalog;
 }
 
 function mapModelsDevMetadata(model: ModelsDevModel | undefined): Partial<ProviderModelConfig> {
@@ -390,8 +527,11 @@ export async function discoverModels(
     }
     throw new Error(`/v1/models returned ${listResult.status}`);
   }
-  progress?.("Fetching models.dev catalog for metadata enrichment...");
-  const modelsDev = await getModelsDevCatalog(options);
+  let modelsDev: ModelsDevResponse | undefined;
+  if (options.modelsDev !== false) {
+    progress?.("Loading models.dev catalog for metadata enrichment...");
+    modelsDev = await getModelsDevCatalog(options);
+  }
   const models = (listResult.data.data ?? [])
     .map((entry) => mapFromModelsList(entry, modelsDev))
     .filter((m): m is ProviderModelConfig => m !== undefined);

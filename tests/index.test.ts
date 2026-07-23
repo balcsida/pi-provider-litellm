@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "LITELLM_ANTHROPIC_API_KEY",
   "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
+  "LITELLM_MODELS_DEV",
   "LITELLM_GCLOUD_TOKEN_AUTH",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "STORED_LITELLM_KEY",
@@ -122,6 +123,32 @@ afterEach(() => {
 });
 
 describe("extension startup", () => {
+  it("disables models.dev enrichment with LITELLM_MODELS_DEV=0", async () => {
+    const agentDir = await makeAgentDir();
+    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    process.env.LITELLM_MODELS_DEV = "0";
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+    await startSession(pi);
+
+    expect(urls).not.toContain("https://models.dev/api.json");
+    expect((pi.providers.at(-1)?.config.models as Array<{ id: string }> | undefined)?.[0]?.id).toBe("gpt-5.5");
+  });
+
   it("uses mismatched cached models until session-start refresh", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
