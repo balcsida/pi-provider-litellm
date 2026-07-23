@@ -1,6 +1,6 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
 
@@ -200,7 +200,7 @@ function buildParameters(inputSchema: Record<string, unknown>): TSchema {
 }
 
 export async function createMcpToolDefinitions(
-  getAuth: () => Promise<LiteLLMRuntimeAuth>,
+  getAuth: (ctx?: ExtensionContext) => Promise<LiteLLMRuntimeAuth>,
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
 ): Promise<ToolDefinition[]> {
@@ -225,8 +225,8 @@ export async function createMcpToolDefinitions(
       promptSnippet: `${mcpTool.description} via ${mcpTool.server_name} MCP server`,
       executionMode: "parallel",
       parameters,
-      async execute(_toolCallId, params: Static<typeof parameters>) {
-        const auth = await getAuth();
+      async execute(_toolCallId, params: Static<typeof parameters>, _signal, _onUpdate, ctx) {
+        const auth = await getAuth(ctx);
         const rawParams = params as Record<string, unknown>;
         const args =
           Object.keys(rawParams).length === 1 && rawParams.args && typeof rawParams.args === "object"

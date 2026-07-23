@@ -106,6 +106,97 @@ describe("feature parity", () => {
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
   });
 
+  it("uses fresh Pi auth when a discovered MCP tool executes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://cached.example.com";
+    process.env.LITELLM_API_KEY = "cached-token";
+
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://cached.example.com/mcp-rest/tools/list") {
+        return jsonResponse(200, {
+          tools: [
+            {
+              name: "search",
+              description: "Search the web",
+              inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+              mcp_info: { server_name: "brave", server_id: "brave-api" },
+            },
+          ],
+        });
+      }
+      if (url === "https://fresh.example.com/mcp-rest/tools/call") return jsonResponse(200, { result: "fresh" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "mcp_brave_search");
+
+    await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: {
+            apiKey: "fresh-token",
+            baseUrl: "https://fresh.example.com/v1",
+            headers: { "x-tenant": "fresh" },
+          },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "https://fresh.example.com/mcp-rest/tools/call",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+      }),
+    );
+  });
+
+  it("uses fresh Pi auth when a registered Skills tool executes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://cached.example.com";
+    process.env.LITELLM_API_KEY = "cached-token";
+
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url === "https://cached.example.com/mcp-rest/tools/list") return jsonResponse(200, []);
+      if (url.startsWith("https://fresh.example.com/")) return jsonResponse(200, []);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+    const tool = pi.tools.find((candidate) => candidate.name === "litellm_skill_list");
+
+    await tool?.execute?.("call-1", {}, undefined, undefined, {
+      modelRegistry: {
+        getProviderAuth: async () => ({
+          auth: {
+            apiKey: "fresh-token",
+            baseUrl: "https://fresh.example.com/v1",
+            headers: { "x-tenant": "fresh" },
+          },
+        }),
+        getProvider: () => pi.providers[0],
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://fresh.example.com/claude-code/marketplace.json",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fresh-token", "x-tenant": "fresh" }),
+      }),
+    );
+  });
+
   it("injects enabled LiteLLM skills into the system prompt", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";

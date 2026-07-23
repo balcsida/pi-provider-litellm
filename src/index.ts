@@ -11,7 +11,7 @@ import type {
   OAuthCredentials,
   ProviderAuth,
 } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt55Model, normalizeBaseUrl, shouldSuppressReasoningContent } from "./discover.js";
@@ -775,7 +775,31 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let mcpRegistered = false;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
-  async function resolveDefaultRuntimeAuth(): Promise<LiteLLMRuntimeAuth> {
+  async function getRuntimeAuth(ctx: ExtensionContext): Promise<LiteLLMRuntimeAuth | undefined> {
+    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
+    if (!auth) return undefined;
+    const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
+    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
+    const apiKey = auth.auth.apiKey;
+    if (!baseUrl || !apiKey) return undefined;
+    const headers = Object.fromEntries(
+      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+    return {
+      baseUrl: normalizeBaseUrl(baseUrl),
+      apiKey,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+    };
+  }
+
+  async function resolveDefaultRuntimeAuth(ctx?: ExtensionContext): Promise<LiteLLMRuntimeAuth> {
+    if (ctx?.modelRegistry) {
+      const auth = await getRuntimeAuth(ctx);
+      if (auth) return auth;
+      throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
+    }
     if (!defaultRuntimeAuth) throw new Error("no credentials for litellm. Run /login litellm or set env vars.");
     return defaultRuntimeAuth;
   }
@@ -932,21 +956,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("before_agent_start", async (event, ctx) => {
     defaultRuntimeAuth = undefined;
     if (!skillsEnabled || discoveryDisabledReason()) return;
-    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
-    const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth?.auth.baseUrl ?? provider?.baseUrl;
-    const apiKey = auth?.auth.apiKey;
-    if (!baseUrl || !apiKey) return;
-    const headers = Object.fromEntries(
-      Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-    defaultRuntimeAuth = {
-      baseUrl: normalizeBaseUrl(baseUrl),
-      apiKey,
-      headers: Object.keys(headers).length > 0 ? headers : undefined,
-    };
+    const auth = await getRuntimeAuth(ctx);
+    if (!auth) return;
+    defaultRuntimeAuth = auth;
     const skills = await listSkills(defaultRuntimeAuth.baseUrl, defaultRuntimeAuth.apiKey, defaultRuntimeAuth.headers);
     const section = createSkillsPromptSection(skills);
     if (!section) return;
