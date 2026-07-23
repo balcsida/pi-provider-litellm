@@ -99,7 +99,7 @@ describe("createLiteLLMProvider", () => {
     const modelsStore = store([native("stored")]);
     const value = controller();
 
-    await value.provider.refreshModels?.(context(modelsStore, false));
+    await value.refreshModels?.(context(modelsStore, false));
 
     expect(modelsStore.read).toHaveBeenCalledOnce();
   });
@@ -108,9 +108,9 @@ describe("createLiteLLMProvider", () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const value = controller({ discover });
 
-    await value.provider.refreshModels?.(context(store([native("stored")]), false));
+    await value.refreshModels?.(context(store([native("stored")]), false));
 
-    expect(value.provider.getModels()).toEqual([native("stored")]);
+    expect(value.getModels()).toEqual([native("stored")]);
     expect(discover).not.toHaveBeenCalled();
   });
 
@@ -118,11 +118,24 @@ describe("createLiteLLMProvider", () => {
     const modelsStore = store([native("old")]);
     const value = controller({ discover: vi.fn(async () => discovered("fresh")) });
 
-    await value.provider.refreshModels?.(context(modelsStore, true));
+    await value.refreshModels?.(context(modelsStore, true));
 
-    expect(value.provider.getModels()).toEqual([native("fresh")]);
+    expect(value.getModels()).toEqual([native("fresh")]);
     expect(modelsStore.write).toHaveBeenCalledOnce();
     expect(modelsStore.write).toHaveBeenCalledWith(expect.objectContaining({ models: [native("fresh")] }));
+  });
+
+  it("publishes discovered models with the credential URL", async () => {
+    const value = controller({
+      discover: vi.fn(async () => ({
+        ...discovered("fresh"),
+        baseUrl: "https://credential.example/v1",
+      })),
+    });
+
+    await value.refreshModels?.(context(store(), true));
+
+    expect(value.getModels()[0]?.baseUrl).toBe("https://credential.example/v1");
   });
 
   it("retains previous models when discovery rejects", async () => {
@@ -132,9 +145,9 @@ describe("createLiteLLMProvider", () => {
     });
     const value = controller({ discover });
 
-    await expect(value.provider.refreshModels?.(context(modelsStore, true))).rejects.toThrow("rejected");
+    await expect(value.refreshModels?.(context(modelsStore, true))).rejects.toThrow("rejected");
 
-    expect(value.provider.getModels()).toEqual([native("old")]);
+    expect(value.getModels()).toEqual([native("old")]);
     expect(modelsStore.write).not.toHaveBeenCalled();
   });
 
@@ -147,9 +160,9 @@ describe("createLiteLLMProvider", () => {
     });
     const value = controller({ discover });
 
-    await value.provider.refreshModels?.({ ...context(modelsStore, true), signal: abort.signal });
+    await value.refreshModels?.({ ...context(modelsStore, true), signal: abort.signal });
 
-    expect(value.provider.getModels()).toEqual([native("old")]);
+    expect(value.getModels()).toEqual([native("old")]);
     expect(modelsStore.write).not.toHaveBeenCalled();
   });
 
@@ -162,8 +175,8 @@ describe("createLiteLLMProvider", () => {
     const modelsStore = store([native("old")]);
     const value = controller({ discover });
 
-    const first = value.provider.refreshModels?.(context(modelsStore, true));
-    const second = value.provider.refreshModels?.(context(modelsStore, true));
+    const first = value.refreshModels?.(context(modelsStore, true));
+    const second = value.refreshModels?.(context(modelsStore, true));
     release(discovered("fresh"));
     await Promise.all([first, second]);
 
@@ -177,45 +190,9 @@ describe("createLiteLLMProvider", () => {
     ])[0];
     const value = controller();
 
-    value.provider.stream(responseModel, { messages: [] });
+    value.stream(responseModel, { messages: [] });
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
-  });
-
-  it("force refreshes with the last Pi context and supplied signal", async () => {
-    const discover = vi.fn(async () => discovered("fresh"));
-    const modelsStore = store([native("old")]);
-    const value = controller({ discover });
-    await value.provider.refreshModels?.(context(modelsStore, false));
-    const abort = new AbortController();
-
-    await expect(value.forceRefresh(abort.signal)).resolves.toEqual(discovered("fresh"));
-
-    expect(discover).toHaveBeenCalledWith(credential, abort.signal);
-    expect(modelsStore.write).toHaveBeenCalledOnce();
-  });
-
-  it("does not return a stale discovery when force refresh is already aborted", async () => {
-    const modelsStore = store([native("old")]);
-    const value = controller();
-    await value.provider.refreshModels?.(context(modelsStore, true));
-    const abort = new AbortController();
-    abort.abort();
-
-    await expect(value.forceRefresh(abort.signal)).rejects.toThrow(/aborted/i);
-  });
-
-  it("does not return an unpublished discovery when force refresh is aborted during discovery", async () => {
-    const abort = new AbortController();
-    const value = controller({
-      discover: vi.fn(async () => {
-        abort.abort();
-        return discovered("unpublished");
-      }),
-    });
-    await value.provider.refreshModels?.(context(store([native("old")]), false));
-
-    await expect(value.forceRefresh(abort.signal)).rejects.toThrow(/aborted/i);
   });
 });

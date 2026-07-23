@@ -142,7 +142,7 @@ describe("LiteLLM smoke workflow", () => {
   it("runs one cold terminal lifecycle without preselecting an unavailable model", () => {
     const terminalSmoke = readTerminalSmoke();
 
-    expect(terminalSmoke).toContain('it(\n    "logs in, refreshes, and selects LiteLLM models"');
+    expect(terminalSmoke).toContain('it(\n    "logs in and selects LiteLLM models"');
     expect(terminalSmoke).toContain("process.env.PI_CODING_AGENT_DIR?.trim()");
     expect(terminalSmoke).toContain("if (!configuredAgentDir) await rm(agentDir, { force: true, recursive: true });");
     expect(terminalSmoke).toContain('waitForText("Warning: No models available"');
