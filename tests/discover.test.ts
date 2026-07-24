@@ -320,6 +320,30 @@ describe("discoverModels API selection", () => {
     expect(responses?.api).toBe("openai-responses");
   });
 
+  it("normalizes Azure and Codex catalog APIs to the LiteLLM Responses transport", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [
+            { id: "gpt-4", owned_by: "azure-openai-responses" },
+            { id: "gpt-5.6-sol", owned_by: "openai-codex" },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models).toHaveLength(2);
+    expect(result.models.map((model) => [model.id, model.api])).toEqual([
+      ["gpt-4", "openai-responses"],
+      ["gpt-5.6-sol", "openai-responses"],
+    ]);
+  });
+
   it("keeps response-mode models on Responses without a catalog match", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
