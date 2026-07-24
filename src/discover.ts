@@ -64,6 +64,11 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
   return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
+function selectApi(mode: string | null | undefined, catalogApi: Api | undefined): DiscoveredModel["api"] {
+  if (isResponsesMode(mode) || catalogApi?.endsWith("responses")) return "openai-responses";
+  return undefined;
+}
+
 // Matches both the conventional `anthropic/...` prefix and aliases that
 // LiteLLM deployments commonly assign to Anthropic-backed routes (e.g.
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
@@ -384,19 +389,20 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
-  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
+  const thinkingLevelMap = catalogModel?.thinkingLevelMap;
+  const api = selectApi(info.mode, catalogModel?.api);
   return {
     id,
     name: id,
     reasoning: info.supports_reasoning ?? false,
-    ...(catalogModel?.thinkingLevelMap ? { thinkingLevelMap: catalogModel.thinkingLevelMap } : {}),
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input: info.supports_vision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
+    ...(api ? { api } : {}),
   };
 }
 
@@ -411,6 +417,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
+  const api = selectApi(undefined, catalogModel?.api);
   return {
     id,
     name: catalogModel?.name ?? id,
@@ -421,6 +428,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
+    ...(api ? { api } : {}),
   };
 }
 
@@ -432,6 +440,7 @@ function mapFromModelsList(
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
   const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
+  const api = selectApi(undefined, catalogModel?.api);
   return {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
@@ -442,6 +451,7 @@ function mapFromModelsList(
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     compat: buildCompat(id),
+    ...(api ? { api } : {}),
   };
 }
 

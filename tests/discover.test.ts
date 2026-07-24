@@ -257,7 +257,10 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: "none", xhigh: "xhigh", max: "max" });
+    expect(result.models[0]).toMatchObject({
+      api: "openai-responses",
+      thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
+    });
   });
 
   it("preserves richer metadata from later duplicate model ids", async () => {
@@ -293,6 +296,53 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 8192,
       cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
+  });
+});
+
+describe("discoverModels API selection", () => {
+  it("uses the catalog API instead of inferring transport from max reasoning", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "deepseek/deepseek-v4-flash", model_info: { mode: "chat", supports_reasoning: true } },
+          { model_name: "openai/gpt-4o", model_info: { mode: "chat" } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const completions = result.models.find((model) => model.id === "deepseek/deepseek-v4-flash");
+    const responses = result.models.find((model) => model.id === "openai/gpt-4o");
+
+    expect(completions?.thinkingLevelMap?.max).toBe("max");
+    expect(completions?.api).toBeUndefined();
+    expect(responses?.thinkingLevelMap?.max).toBeUndefined();
+    expect(responses?.api).toBe("openai-responses");
+  });
+
+  it("keeps response-mode models on Responses without a catalog match", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-responses-model", model_info: { mode: "responses" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "custom-responses-model", api: "openai-responses" });
+  });
+
+  it("leaves unknown chat models on the default Chat Completions API", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-chat-model", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "custom-chat-model" });
+    expect(result.models[0]?.api).toBeUndefined();
   });
 });
 
@@ -379,8 +429,11 @@ describe("discoverModels fallback to /v1/models", () => {
       const result = await discoverModels("https://litellm.example.com", "sk-test", {});
       expect(result.source).toBe("models_list");
       expect(result.models.map((m) => m.id).sort()).toEqual(["anthropic/claude-3-5-sonnet", "openai/gpt-4o"]);
+      const openai = result.models.find((m) => m.id === "openai/gpt-4o")!;
+      expect(openai.api).toBe("openai-responses");
       const anthropic = result.models.find((m) => m.id === "anthropic/claude-3-5-sonnet")!;
       expect(anthropic.name).toBe("anthropic/claude-3-5-sonnet (no metadata)");
+      expect(anthropic.api).toBeUndefined();
       expect(anthropic.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
     });
   }
@@ -975,11 +1028,13 @@ describe("discoverModels fallback to /health", () => {
     ]);
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["vertex/claude-sonnet", "openai/gpt-4o-mini"]);
+    expect(result.models[0]?.api).toBeUndefined();
     expect(result.models[0]).toMatchObject({
       input: ["text", "image"],
       contextWindow: 200000,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
+    expect(result.models[1]?.api).toBe("openai-responses");
   });
 
   it("uses healthy endpoint model names when /health entries do not include model ids", async () => {
@@ -1009,6 +1064,8 @@ describe("discoverModels fallback to /health", () => {
     ]);
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
+    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[1]?.api).toBeUndefined();
     expect(result.models[1]).toMatchObject({
       name: "anthropic/claude-3-5-sonnet",
       contextWindow: 128000,
