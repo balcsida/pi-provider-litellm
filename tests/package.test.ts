@@ -1,5 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("package gallery metadata", () => {
   it("uses the gallery image URL expected by pi.dev", async () => {
@@ -20,6 +25,26 @@ describe("package gallery metadata", () => {
 });
 
 describe("pi package compatibility", () => {
+  it("loads outside the repository without Pi peer dependencies", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "pi-provider-litellm-package-"));
+    try {
+      const source = join(fixture, "src");
+      await cp(join(repoRoot, "src"), source, { recursive: true });
+      const loaderUrl = pathToFileURL(
+        resolve(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
+      ).href;
+      const { loadExtensions } = (await import(loaderUrl)) as {
+        loadExtensions(paths: string[], cwd: string): Promise<{ errors: unknown[] }>;
+      };
+
+      const result = await loadExtensions([join(source, "index.ts")], fixture);
+
+      expect(result.errors).toEqual([]);
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  }, 15_000);
+
   it("requires the native Provider extension API", async () => {
     const { default: manifest } = await import("../package.json", {
       with: { type: "json" },

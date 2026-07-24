@@ -1,6 +1,5 @@
 import { type Credential, createProvider, type Model, type Provider, type ProviderAuth } from "@earendil-works/pi-ai";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
+import { openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
