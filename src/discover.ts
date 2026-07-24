@@ -64,8 +64,22 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
   return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
+// The Pi catalog can tag a model with any responses-family api
+// (`openai-responses`, `azure-openai-responses`, `openai-codex-responses`).
+// LiteLLM proxies all of them through the OpenAI-shaped `/responses` endpoint,
+// so any responses-family backend routes through `openai-responses` here.
+// `DiscoveredModel["api"]` only permits `openai-completions | openai-responses`,
+// which is why the specific responses api is not preserved.
+const RESPONSES_FAMILY_APIS: ReadonlySet<Api> = new Set<Api>([
+  "openai-responses",
+  "azure-openai-responses",
+  "openai-codex-responses",
+]);
+
 function selectApi(mode: string | null | undefined, catalogApi: Api | undefined): DiscoveredModel["api"] {
-  if (isResponsesMode(mode) || catalogApi?.endsWith("responses")) return "openai-responses";
+  if (isResponsesMode(mode) || (catalogApi != null && RESPONSES_FAMILY_APIS.has(catalogApi))) {
+    return "openai-responses";
+  }
   return undefined;
 }
 
