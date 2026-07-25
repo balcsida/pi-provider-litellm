@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk } from "./helpers.js";
+import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -115,6 +115,39 @@ describe("native provider stream compatibility", () => {
 
     expect(second.content).toContainEqual({ type: "text", text: "887" });
     expect(requests.at(-1)?.messages).toContainEqual(expect.objectContaining({ role: "tool", content: "887" }));
+  });
+
+  it("serializes boolean Kimi reasoning selections as LiteLLM thinking objects", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({ model_name: "kimi-k2.6" });
+    respond(...successfulResponse("enabled"));
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({
+      thinking: { type: "enabled" },
+    });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+
+    respond(...successfulResponse("disabled"));
+    await models.streamSimple(model, { messages: [user("Do not think")] }).result();
+
+    expect(requests[1]).toMatchObject({
+      thinking: { type: "disabled" },
+    });
+    expect(requests[1]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("serializes granular DeepSeek reasoning selections through LiteLLM-safe fields", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "deepseek/deepseek-v4-flash",
+    });
+    respond(...successfulResponse("deepseek"));
+
+    await models.streamSimple(model, { messages: [user("Think deeply")] }, { reasoning: "max" }).result();
+
+    expect(requests[0]).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
+    });
   });
 
   it("serializes image input", async () => {
