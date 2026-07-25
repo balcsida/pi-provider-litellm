@@ -142,6 +142,7 @@ describe("shouldSuppressReasoningContent", () => {
   it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
     expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
     expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+    expect(shouldSuppressReasoningContent("llm-gateway/kimi-k2.6")).toBe(true);
   });
 
   it("does not suppress explicit forced-thinking models", () => {

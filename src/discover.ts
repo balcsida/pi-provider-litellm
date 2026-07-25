@@ -104,7 +104,11 @@ export function isGpt55Model(modelId: string): boolean {
 }
 
 export function shouldSuppressReasoningContent(modelId: string): boolean {
-  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
+  const catalogModel = findCatalogModel(modelId);
+  const forcedThinking =
+    FORCED_THINKING_MODEL_PATTERN.test(modelId) ||
+    (catalogModel != null && FORCED_THINKING_MODEL_PATTERN.test(catalogModel.id));
+  return isMoonshotRoute(modelId, catalogModel) && !forcedThinking;
 }
 
 function isMoonshotRoute(modelId: string, catalogModel?: Model<Api>): boolean {
