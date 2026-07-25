@@ -736,6 +736,10 @@ describe("feature parity", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
+    await refreshProvider(pi);
+
+    const discoveredModel = pi.providers[0]?.getModels().find((model) => model.id === "llm-gateway/gpt-5.5");
+    expect(discoveredModel?.api).toBe("openai-completions");
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
@@ -755,7 +759,7 @@ describe("feature parity", () => {
           thinking: { type: "enabled" },
         },
       },
-      { model: { provider: "litellm", id: "llm-gateway/gpt-5.5" } },
+      { model: discoveredModel },
     );
     expect(updated).toEqual({
       input: [{ type: "message", role: "user", content: "hi" }],

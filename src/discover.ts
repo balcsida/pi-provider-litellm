@@ -77,10 +77,9 @@ const RESPONSES_FAMILY_APIS: ReadonlySet<Api> = new Set<Api>([
 ]);
 
 function selectApi(mode: string | null | undefined, catalogApi: Api | undefined): DiscoveredModel["api"] {
-  if (isResponsesMode(mode) || (catalogApi != null && RESPONSES_FAMILY_APIS.has(catalogApi))) {
-    return "openai-responses";
-  }
-  return undefined;
+  if (isResponsesMode(mode)) return "openai-responses";
+  if (mode === "chat") return undefined;
+  return catalogApi != null && RESPONSES_FAMILY_APIS.has(catalogApi) ? "openai-responses" : undefined;
 }
 
 // Matches both the conventional `anthropic/...` prefix and aliases that

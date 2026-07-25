@@ -271,9 +271,9 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      api: "openai-responses",
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     });
+    expect(result.models[0]?.api).toBeUndefined();
     expect(supportedThinkingLevels(result.models[0]!)).toEqual([
       "off",
       "minimal",
@@ -294,10 +294,8 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]).toMatchObject({
-      reasoning: false,
-      api: "openai-responses",
-    });
+    expect(result.models[0]).toMatchObject({ reasoning: false });
+    expect(result.models[0]?.api).toBeUndefined();
     expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
@@ -406,7 +404,7 @@ describe("discoverModels via /model/info", () => {
 });
 
 describe("discoverModels API selection", () => {
-  it("uses the catalog API instead of inferring transport from max reasoning", async () => {
+  it("respects explicit chat mode instead of inferring transport from the catalog", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
@@ -418,12 +416,12 @@ describe("discoverModels API selection", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
     const completions = result.models.find((model) => model.id === "deepseek/deepseek-v4-flash");
-    const responses = result.models.find((model) => model.id === "openai/gpt-4o");
+    const catalogResponses = result.models.find((model) => model.id === "openai/gpt-4o");
 
     expect(completions?.thinkingLevelMap?.max).toBe("max");
     expect(completions?.api).toBeUndefined();
-    expect(responses?.thinkingLevelMap?.max).toBeUndefined();
-    expect(responses?.api).toBe("openai-responses");
+    expect(catalogResponses?.thinkingLevelMap?.max).toBeUndefined();
+    expect(catalogResponses?.api).toBeUndefined();
   });
 
   it("normalizes Azure and Codex catalog APIs to the LiteLLM Responses transport", async () => {
@@ -448,6 +446,18 @@ describe("discoverModels API selection", () => {
       ["gpt-4", "openai-responses"],
       ["gpt-5.6-sol", "openai-responses"],
     ]);
+  });
+
+  it("keeps catalog Responses transport when route mode is absent", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: {} }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "openai/gpt-4o", api: "openai-responses" });
   });
 
   it("keeps response-mode models on Responses without a catalog match", async () => {
@@ -1240,7 +1250,7 @@ describe("discoverModels fallback to /health", () => {
       contextWindow: 200000,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
-    expect(result.models[1]?.api).toBe("openai-responses");
+    expect(result.models[1]?.api).toBeUndefined();
     expect(supportedThinkingLevels(result.models[2]!)).toEqual(["off", "high"]);
   });
 
