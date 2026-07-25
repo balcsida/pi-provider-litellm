@@ -1064,6 +1064,25 @@ describe("discoverModels fallback to /v1/models", () => {
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 });
   });
 
+  it("keeps catalog reasoning enabled when models.dev says it is false", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, { openai: { models: { "gpt-5.5": { reasoning: false } } } });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "gpt-5.5", reasoning: true });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "low", "medium", "high", "xhigh"]);
+  });
+
   it("normalizes boolean Kimi reasoning from the /v1/models fallback", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);

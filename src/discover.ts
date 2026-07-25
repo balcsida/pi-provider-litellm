@@ -262,7 +262,7 @@ function applyReasoningPolicy(
   model: Pick<DiscoveredModel, "api" | "compat" | "id"> &
     Partial<Pick<DiscoveredModel, "reasoning" | "thinkingLevelMap">>,
   catalogModel: Model<Api> | undefined,
-  routeSignal?: ReasoningSignal,
+  routeSignal: ReasoningSignal = catalogModel?.reasoning,
 ): void {
   model.reasoning = routeSupportsReasoning(routeSignal, catalogModel);
   if (!model.reasoning) {
@@ -532,7 +532,7 @@ function mapFromModelsList(
     compat: buildCompat(id),
     ...(api ? { api } : {}),
   };
-  applyReasoningPolicy(model, catalogModel, modelsDevMetadata.reasoning);
+  applyReasoningPolicy(model, catalogModel, catalogModel?.reasoning ?? modelsDevMetadata.reasoning);
   return model;
 }
 
