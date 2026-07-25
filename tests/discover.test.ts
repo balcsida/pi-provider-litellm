@@ -147,10 +147,13 @@ describe("shouldSuppressReasoningContent", () => {
 
   it("does not suppress explicit forced-thinking models", () => {
     expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
+    expect(shouldSuppressReasoningContent("llm-gateway/kimi-k2-thinking")).toBe(false);
   });
 
-  it("does not suppress unrelated models", () => {
+  it("does not suppress unrelated or unresolved routed models", () => {
     expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
+    expect(shouldSuppressReasoningContent("llm-gateway/gpt-4o")).toBe(false);
+    expect(shouldSuppressReasoningContent("llm-gateway/kimi-unknown-model")).toBe(false);
   });
 });
 

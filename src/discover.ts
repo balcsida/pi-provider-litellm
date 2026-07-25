@@ -104,11 +104,17 @@ export function isGpt55Model(modelId: string): boolean {
 }
 
 export function shouldSuppressReasoningContent(modelId: string): boolean {
+  if (FORCED_THINKING_MODEL_PATTERN.test(modelId)) return false;
+  if (isMoonshotModel(modelId)) return true;
+
+  const separator = modelId.indexOf("/");
+  const unprefixed = separator === -1 ? modelId : modelId.slice(separator + 1);
+  if (unprefixed === modelId || !isMoonshotModel(unprefixed)) return false;
+
   const catalogModel = findCatalogModel(modelId);
-  const forcedThinking =
-    FORCED_THINKING_MODEL_PATTERN.test(modelId) ||
-    (catalogModel != null && FORCED_THINKING_MODEL_PATTERN.test(catalogModel.id));
-  return isMoonshotRoute(modelId, catalogModel) && !forcedThinking;
+  return (
+    catalogModel != null && isMoonshotModel(catalogModel.id) && !FORCED_THINKING_MODEL_PATTERN.test(catalogModel.id)
+  );
 }
 
 function isMoonshotRoute(modelId: string, catalogModel?: Model<Api>): boolean {
