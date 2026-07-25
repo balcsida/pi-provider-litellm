@@ -138,6 +138,20 @@ describe("native provider stream compatibility", () => {
     expect(requests[1]).not.toHaveProperty("reasoning_effort");
   });
 
+  it("serializes catalog-resolved Kimi route aliases as boolean thinking", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "llm-gateway/kimi-k2.6",
+      model_info: { mode: null },
+    });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+
+    respond(...successfulResponse("enabled"));
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({ thinking: { type: "enabled" } });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+  });
+
   it("serializes granular DeepSeek reasoning selections through LiteLLM-safe fields", async () => {
     const { models, model, requests, respond } = await createCompatibilityHarness({
       model_name: "deepseek/deepseek-v4-flash",

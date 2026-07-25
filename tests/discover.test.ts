@@ -318,6 +318,24 @@ describe("discoverModels via /model/info", () => {
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
   });
 
+  it("normalizes catalog-resolved Kimi route aliases to off and high", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "llm-gateway/kimi-k2.6", model_info: {} }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "llm-gateway/kimi-k2.6",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
   it("normalizes always-thinking Kimi /model/info reasoning to high only", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {

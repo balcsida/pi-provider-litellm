@@ -107,8 +107,12 @@ export function shouldSuppressReasoningContent(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
-  if (isMoonshotModel(modelId)) {
+function isMoonshotRoute(modelId: string, catalogModel?: Model<Api>): boolean {
+  return isMoonshotModel(modelId) || (catalogModel != null && isMoonshotModel(catalogModel.id));
+}
+
+export function buildCompat(modelId: string, catalogModel?: Model<Api>): DiscoveredModel["compat"] {
+  if (isMoonshotRoute(modelId, catalogModel)) {
     return {
       supportsStore: false,
       supportsDeveloperRole: false,
@@ -250,11 +254,11 @@ function routeSupportsReasoning(routeSignal: ReasoningSignal, catalogModel: Mode
 function buildThinkingLevelMap(modelId: string, catalogModel: Model<Api> | undefined): ThinkingLevelMap | undefined {
   if (!catalogModel?.reasoning) return undefined;
   if (catalogModel.thinkingLevelMap) {
-    return isMoonshotModel(modelId) && getReasoningCompat(catalogModel)?.thinkingFormat === "deepseek"
+    return isMoonshotRoute(modelId, catalogModel) && getReasoningCompat(catalogModel)?.thinkingFormat === "deepseek"
       ? { ...ALWAYS_THINKING_LEVEL_MAP, ...catalogModel.thinkingLevelMap }
       : catalogModel.thinkingLevelMap;
   }
-  return isMoonshotModel(modelId) ? BOOLEAN_THINKING_LEVEL_MAP : undefined;
+  return isMoonshotRoute(modelId, catalogModel) ? BOOLEAN_THINKING_LEVEL_MAP : undefined;
 }
 
 function applyReasoningPolicy(
@@ -478,7 +482,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    compat: buildCompat(id, catalogModel),
     ...(api ? { api } : {}),
   };
   applyReasoningPolicy(model, catalogModel, info.supports_reasoning);
@@ -504,7 +508,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    compat: buildCompat(id, catalogModel),
     ...(api ? { api } : {}),
   };
   applyReasoningPolicy(model, catalogModel);
@@ -528,7 +532,7 @@ function mapFromModelsList(
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    compat: buildCompat(id, catalogModel),
     ...(api ? { api } : {}),
   };
   applyReasoningPolicy(model, catalogModel, catalogModel?.reasoning ?? modelsDevMetadata.reasoning);
