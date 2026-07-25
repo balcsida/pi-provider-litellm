@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
@@ -119,6 +119,8 @@ describe("native provider stream compatibility", () => {
 
   it("serializes boolean Kimi reasoning selections as LiteLLM thinking objects", async () => {
     const { models, model, requests, respond } = await createCompatibilityHarness({ model_name: "kimi-k2.6" });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+
     respond(...successfulResponse("enabled"));
     await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
 
@@ -140,6 +142,8 @@ describe("native provider stream compatibility", () => {
     const { models, model, requests, respond } = await createCompatibilityHarness({
       model_name: "deepseek/deepseek-v4-flash",
     });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high", "max"]);
+
     respond(...successfulResponse("deepseek"));
 
     await models.streamSimple(model, { messages: [user("Think deeply")] }, { reasoning: "max" }).result();
@@ -148,6 +152,20 @@ describe("native provider stream compatibility", () => {
       thinking: { type: "enabled" },
       reasoning_effort: "max",
     });
+  });
+
+  it("keeps unknown reasoning routes usable without speculative thinking controls", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "custom-reasoning-smoke",
+    });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off"]);
+
+    respond(...successfulResponse("custom"));
+    await models.streamSimple(model, { messages: [user("Use the custom route")] }).result();
+
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+    expect(requests[0]).not.toHaveProperty("reasoning");
   });
 
   it("serializes image input", async () => {
