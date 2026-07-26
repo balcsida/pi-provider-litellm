@@ -86,7 +86,6 @@ describe("Pi core model overrides", () => {
     expect(runtime.getModel("litellm", "cached-model")).toMatchObject({ name: "Cached override", contextWindow: 321 });
 
     await writeModelsConfig(agentDir, "refreshed-model", "Refreshed override");
-    await runtime.reloadConfig();
     await runtime.refresh({ allowNetwork: true, force: true });
 
     expect(runtime.getModel("litellm", "refreshed-model")).toMatchObject({

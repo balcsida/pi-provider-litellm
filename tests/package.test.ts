@@ -52,8 +52,8 @@ describe("pi package compatibility", () => {
 
     expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.0");
     expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.0");
-    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.81.1");
-    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.81.1");
+    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.82.1");
+    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.82.1");
   });
 
   it("documents native Provider model persistence", async () => {

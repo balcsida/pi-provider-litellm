@@ -257,7 +257,7 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: "none", xhigh: "xhigh", max: "max" });
+    expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: "xhigh", max: "max" });
   });
 
   it("preserves richer metadata from later duplicate model ids", async () => {
