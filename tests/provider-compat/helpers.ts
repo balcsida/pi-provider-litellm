@@ -9,7 +9,11 @@ export const SECOND_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 type Chunk = { data: unknown; waitForAbort: boolean };
-type RequestBody = { messages: Array<{ role: string; content: unknown }>; [key: string]: unknown };
+type RequestBody = {
+  messages: Array<{ role: string; content: unknown }>;
+  input?: unknown[];
+  [key: string]: unknown;
+};
 
 export function sseChunk(data: unknown, waitForAbort = false): Chunk {
   return { data, waitForAbort };
@@ -101,11 +105,13 @@ export async function createCompatibilityHarness(
       });
     }
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
-    if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses")) {
+      throw new Error(`unexpected URL: ${url}`);
+    }
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
-    const history = JSON.stringify(requestBody.messages);
+    const history = JSON.stringify(requestBody.messages ?? requestBody.input);
     if (history.includes("Overflow the context")) {
       return Response.json(
         {

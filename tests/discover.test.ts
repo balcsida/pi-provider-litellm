@@ -142,18 +142,18 @@ describe("shouldSuppressReasoningContent", () => {
   it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
     expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
     expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
-    expect(shouldSuppressReasoningContent("llm-gateway/kimi-k2.6")).toBe(true);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-k2.6")).toBe(true);
   });
 
   it("does not suppress explicit forced-thinking models", () => {
     expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
-    expect(shouldSuppressReasoningContent("llm-gateway/kimi-k2-thinking")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-k2-thinking")).toBe(false);
   });
 
   it("does not suppress unrelated or unresolved routed models", () => {
     expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
-    expect(shouldSuppressReasoningContent("llm-gateway/gpt-4o")).toBe(false);
-    expect(shouldSuppressReasoningContent("llm-gateway/kimi-unknown-model")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/gpt-4o")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-unknown-model")).toBe(false);
   });
 });
 
@@ -325,14 +325,14 @@ describe("discoverModels via /model/info", () => {
   it("normalizes catalog-resolved Kimi route aliases to off and high", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        data: [{ model_name: "llm-gateway/kimi-k2.6", model_info: {} }],
+        data: [{ model_name: "custom-route/kimi-k2.6", model_info: {} }],
       }),
     );
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]).toMatchObject({
-      id: "llm-gateway/kimi-k2.6",
+      id: "custom-route/kimi-k2.6",
       reasoning: true,
       thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
       compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
