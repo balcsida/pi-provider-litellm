@@ -44,9 +44,14 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-export function getGcloudTokenCommand(): string {
-  const cliPath = fileURLToPath(new URL("./gcloud-token-cli.js", import.meta.url));
-  return `!${shellQuote(process.execPath)} ${shellQuote(cliPath)}`;
+export function getGcloudTokenCommand(moduleUrl = import.meta.url): string {
+  if (!moduleUrl.endsWith(".ts")) {
+    const cliPath = fileURLToPath(new URL("./gcloud-token-cli.js", moduleUrl));
+    return `!${shellQuote(process.execPath)} ${shellQuote(cliPath)}`;
+  }
+
+  const script = `import(${JSON.stringify(moduleUrl)}).then(async ({ getGcloudToken }) => { const token = await getGcloudToken(); if (!token) process.exit(1); process.stdout.write(token); })`;
+  return `!${shellQuote(process.execPath)} --input-type=module --eval ${shellQuote(script)}`;
 }
 
 function getAdcPath(): string | null {

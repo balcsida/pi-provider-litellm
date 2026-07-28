@@ -40,11 +40,13 @@ const nonRegistrySpecPrefixes = [
   "./",
 ];
 
+const sourceModules = "cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|provider|skills|types";
 const allowedPackageFiles = [
   /^package\.json$/,
   /^README\.md$/,
   /^LICENSE$/,
-  /^dist\/(?:cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|provider|skills|types)\.(?:js|d\.ts)$/,
+  new RegExp(`^dist/(?:${sourceModules})\\.(?:js|d\\.ts)$`),
+  new RegExp(`^src/(?:${sourceModules})\\.ts$`),
 ];
 
 export interface SupplyChainGuardOptions {

@@ -37,7 +37,7 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("Pi 0.81.0+ is required");
     expect(readme).toContain("native Provider");
     expect(readme).toContain("run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`");
-    expect(readme).toContain("With `/login litellm`, choose `Sign in with an API key` directly");
+    expect(readme).toMatch(/With\s+`\/login litellm`, choose `Sign in with an API key` directly/);
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
     expect(readme).not.toContain("/litellm-refresh");

@@ -11,10 +11,9 @@ import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult } from "../src/types.js";
 
 const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
-vi.mock("@earendil-works/pi-ai/api/openai-completions.lazy", () => ({
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@earendil-works/pi-ai/compat")>()),
   openAICompletionsApi: () => ({ stream: apiSpies.completions, streamSimple: apiSpies.completions }),
-}));
-vi.mock("@earendil-works/pi-ai/api/openai-responses.lazy", () => ({
   openAIResponsesApi: () => ({ stream: apiSpies.responses, streamSimple: apiSpies.responses }),
 }));
 

@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CACHE_TTL_MS, getGcloudToken, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { CACHE_TTL_MS, getGcloudToken, getGcloudTokenCommand, resetGcloudTokenCache } from "../src/gcloud-token.js";
 
 const ORIGINAL_ENV = {
   APPDATA: process.env.APPDATA,
@@ -31,6 +31,18 @@ afterEach(() => {
   }
   resetGcloudTokenCache();
   vi.restoreAllMocks();
+});
+
+describe("getGcloudTokenCommand", () => {
+  it("imports the token module directly when the extension runs from source", () => {
+    expect(getGcloudTokenCommand("file:///plugin/src/gcloud-token.ts")).toContain(
+      'import("file:///plugin/src/gcloud-token.ts")',
+    );
+  });
+
+  it("targets the JavaScript helper when the extension runs from a build", () => {
+    expect(getGcloudTokenCommand("file:///plugin/dist/gcloud-token.js")).toContain("/plugin/dist/gcloud-token-cli.js");
+  });
 });
 
 describe("getGcloudToken", () => {

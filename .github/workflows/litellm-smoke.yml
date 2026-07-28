@@ -52,7 +52,7 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
-      - run: npm run build
+      - run: npm run prepublishOnly
 
       - name: Install VidaiMock
         shell: bash
@@ -221,12 +221,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./node_modules/.bin/pi -e ./dist/index.js --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
+          ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
 
           ./node_modules/.bin/pi \
-            -e ./dist/index.js \
+            -e . \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL" \
             --no-tools \
@@ -237,7 +237,7 @@ jobs:
           # Anthropic-backed route: covers the cacheControlFormat "anthropic"
           # compat path through LiteLLM's Anthropic translation.
           ./node_modules/.bin/pi \
-            -e ./dist/index.js \
+            -e . \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC" \
             --no-tools \

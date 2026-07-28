@@ -7,10 +7,10 @@
   "author": "Dávid Balatoni <balcsida@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/balcsida/pi-provider-litellm.git"
+    "url": "git+https://github.com/penumbral-labs/pi-provider-litellm.git"
   },
-  "homepage": "https://github.com/balcsida/pi-provider-litellm",
-  "bugs": "https://github.com/balcsida/pi-provider-litellm/issues",
+  "homepage": "https://github.com/penumbral-labs/pi-provider-litellm",
+  "bugs": "https://github.com/penumbral-labs/pi-provider-litellm/issues",
   "keywords": [
     "pi-mono",
     "pi-package",
@@ -30,12 +30,13 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./src/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/balcsida/pi-provider-litellm/refs/heads/main/assets/pi_litellm_gallery.png"
   },
