@@ -668,7 +668,9 @@ function prepareLiteLLMRequestPayload(
   };
 
   if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
-    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) update(key, value);
+    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
+      if (key !== "thinking") update(key, value);
+    }
   }
 
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.

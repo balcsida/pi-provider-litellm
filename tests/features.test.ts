@@ -654,12 +654,11 @@ describe("feature parity", () => {
       include_reasoning: false,
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
-      thinking: { type: "disabled" },
       litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
     });
   });
 
-  it("suppresses separate Kimi reasoning streams before session ids are available", async () => {
+  it("does not send thinking for Kimi OpenAI completions requests", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -670,7 +669,7 @@ describe("feature parity", () => {
         return jsonResponse(200, {
           data: [
             {
-              model_name: "kimi-k2.6",
+              model_name: "kimi-k3",
               model_info: { mode: "chat" },
             },
           ],
@@ -684,13 +683,15 @@ describe("feature parity", () => {
     await extension(pi);
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
+    const updated = beforeRequest?.(
+      { payload: { messages: [] } },
+      { model: { provider: "litellm", id: "kimi-k3", api: "openai-completions" } },
+    );
     expect(updated).toEqual({
       messages: [],
       include_reasoning: false,
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
-      thinking: { type: "disabled" },
     });
   });
 
