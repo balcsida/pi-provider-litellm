@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { writeJsonAtomic } from "./cache.js";
@@ -64,6 +64,24 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
   return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
+// The Pi catalog can tag a model with any responses-family api
+// (`openai-responses`, `azure-openai-responses`, `openai-codex-responses`).
+// LiteLLM proxies all of them through the OpenAI-shaped `/responses` endpoint,
+// so any responses-family backend routes through `openai-responses` here.
+// `DiscoveredModel["api"]` only permits `openai-completions | openai-responses`,
+// which is why the specific responses api is not preserved.
+const RESPONSES_FAMILY_APIS: ReadonlySet<Api> = new Set<Api>([
+  "openai-responses",
+  "azure-openai-responses",
+  "openai-codex-responses",
+]);
+
+function selectApi(mode: string | null | undefined, catalogApi: Api | undefined): DiscoveredModel["api"] {
+  if (isResponsesMode(mode)) return "openai-responses";
+  if (mode === "chat") return undefined;
+  return catalogApi != null && RESPONSES_FAMILY_APIS.has(catalogApi) ? "openai-responses" : undefined;
+}
+
 // Matches both the conventional `anthropic/...` prefix and aliases that
 // LiteLLM deployments commonly assign to Anthropic-backed routes (e.g.
 // `google/claude-sonnet-4-6`, `opus-4.7`, `sonnet-4.6`, `haiku-4.5`). Without
@@ -72,31 +90,38 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
 const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
 const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
-// Deployments expose the gpt-5.5 route under varying names (`llm-gateway/gpt-5.5`,
-// bare `gpt-5.5`, dated ids like `gpt-5.5-20260504143601`); match them all so the
-// tool+reasoning workaround survives route renames.
-const GPT55_MODEL_PATTERN = /(?:^|\/)gpt-5\.5(?:$|[-.])/i;
 
 export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
 }
 
-export function isGpt55Model(modelId: string): boolean {
-  return GPT55_MODEL_PATTERN.test(modelId);
-}
-
 export function shouldSuppressReasoningContent(modelId: string): boolean {
-  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
+  if (FORCED_THINKING_MODEL_PATTERN.test(modelId)) return false;
+  if (isMoonshotModel(modelId)) return true;
+
+  const separator = modelId.indexOf("/");
+  const unprefixed = separator === -1 ? modelId : modelId.slice(separator + 1);
+  if (unprefixed === modelId || !isMoonshotModel(unprefixed)) return false;
+
+  const catalogModel = findCatalogModel(modelId);
+  return (
+    catalogModel != null && isMoonshotModel(catalogModel.id) && !FORCED_THINKING_MODEL_PATTERN.test(catalogModel.id)
+  );
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
-  if (isMoonshotModel(modelId)) {
+function isMoonshotRoute(modelId: string, catalogModel?: Model<Api>): boolean {
+  return isMoonshotModel(modelId) || (catalogModel != null && isMoonshotModel(catalogModel.id));
+}
+
+export function buildCompat(modelId: string, catalogModel?: Model<Api>): DiscoveredModel["compat"] {
+  if (isMoonshotRoute(modelId, catalogModel)) {
     return {
       supportsStore: false,
       supportsDeveloperRole: false,
       supportsReasoningEffort: false,
       supportsStrictMode: false,
       maxTokensField: "max_tokens",
+      thinkingFormat: "deepseek",
     };
   }
   if (ANTHROPIC_MODEL_PATTERN.test(modelId)) {
@@ -190,6 +215,71 @@ function findModelsDevModel(
   if (!provider) return undefined;
   const models = catalog?.[provider]?.models;
   return models && Object.hasOwn(models, modelId) ? models[modelId] : undefined;
+}
+
+const BOOLEAN_THINKING_LEVEL_MAP: ThinkingLevelMap = {
+  minimal: null,
+  low: null,
+  medium: null,
+  xhigh: null,
+  max: null,
+};
+
+const ALWAYS_THINKING_LEVEL_MAP: ThinkingLevelMap = {
+  off: null,
+  ...BOOLEAN_THINKING_LEVEL_MAP,
+};
+
+type ReasoningCompat = Pick<
+  NonNullable<Model<"openai-completions">["compat"]>,
+  "thinkingFormat" | "supportsReasoningEffort"
+>;
+
+type ReasoningSignal = boolean | undefined;
+
+function getReasoningCompat(catalogModel: Model<Api> | undefined): ReasoningCompat | undefined {
+  if (catalogModel?.api !== "openai-completions") return undefined;
+  const compat = catalogModel.compat as ReasoningCompat | undefined;
+  const reasoningCompat: ReasoningCompat = {};
+  if (compat?.thinkingFormat !== undefined) reasoningCompat.thinkingFormat = compat.thinkingFormat;
+  if (compat?.supportsReasoningEffort !== undefined) {
+    reasoningCompat.supportsReasoningEffort = compat.supportsReasoningEffort;
+  }
+  return Object.keys(reasoningCompat).length > 0 ? reasoningCompat : undefined;
+}
+
+function routeSupportsReasoning(routeSignal: ReasoningSignal, catalogModel: Model<Api> | undefined): boolean {
+  if (routeSignal === false) return false;
+  return catalogModel?.reasoning === true;
+}
+
+function buildThinkingLevelMap(modelId: string, catalogModel: Model<Api> | undefined): ThinkingLevelMap | undefined {
+  if (!catalogModel?.reasoning) return undefined;
+  if (catalogModel.thinkingLevelMap) {
+    return isMoonshotRoute(modelId, catalogModel) && getReasoningCompat(catalogModel)?.thinkingFormat === "deepseek"
+      ? { ...ALWAYS_THINKING_LEVEL_MAP, ...catalogModel.thinkingLevelMap }
+      : catalogModel.thinkingLevelMap;
+  }
+  return isMoonshotRoute(modelId, catalogModel) ? BOOLEAN_THINKING_LEVEL_MAP : undefined;
+}
+
+function applyReasoningPolicy(
+  model: Pick<DiscoveredModel, "api" | "compat" | "id"> &
+    Partial<Pick<DiscoveredModel, "reasoning" | "thinkingLevelMap">>,
+  catalogModel: Model<Api> | undefined,
+  routeSignal: ReasoningSignal = catalogModel?.reasoning,
+): void {
+  model.reasoning = routeSupportsReasoning(routeSignal, catalogModel);
+  if (!model.reasoning) {
+    delete model.thinkingLevelMap;
+    return;
+  }
+  const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel);
+  if (thinkingLevelMap) model.thinkingLevelMap = thinkingLevelMap;
+  else delete model.thinkingLevelMap;
+
+  const reasoningCompat = model.api !== "openai-responses" ? getReasoningCompat(catalogModel) : undefined;
+  if (reasoningCompat) model.compat = { ...(model.compat ?? {}), ...reasoningCompat };
 }
 
 function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -384,44 +474,47 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
-  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
-  return {
+  const api = selectApi(info.mode, catalogModel?.api);
+  const model: DiscoveredModel = {
     id,
     name: id,
-    reasoning: info.supports_reasoning ?? false,
-    ...(catalogModel?.thinkingLevelMap ? { thinkingLevelMap: catalogModel.thinkingLevelMap } : {}),
+    reasoning: false,
     input: info.supports_vision ? ["text", "image"] : ["text"],
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
+    compat: buildCompat(id, catalogModel),
+    ...(api ? { api } : {}),
   };
+  applyReasoningPolicy(model, catalogModel, info.supports_reasoning);
+  return model;
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
-  if (entry.model_name || !fallbackId) return mapFromModelInfo(entry);
-  const model = mapFromModelInfo({ ...entry, model_name: fallbackId });
-  if (model) delete model.thinkingLevelMap;
-  return model;
+  return entry.model_name || fallbackId
+    ? mapFromModelInfo({ ...entry, model_name: entry.model_name ?? fallbackId })
+    : undefined;
 }
 
 function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | undefined {
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
-  return {
+  const api = selectApi(undefined, catalogModel?.api);
+  const model: DiscoveredModel = {
     id,
     name: catalogModel?.name ?? id,
-    reasoning: catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    reasoning: false,
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    compat: buildCompat(id, catalogModel),
+    ...(api ? { api } : {}),
   };
+  applyReasoningPolicy(model, catalogModel);
+  return model;
 }
 
 function mapFromModelsList(
@@ -432,17 +525,20 @@ function mapFromModelsList(
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
   const modelsDevMetadata = mapModelsDevMetadata(findModelsDevModel(modelsDev, id, entry.owned_by));
-  return {
+  const api = selectApi(undefined, catalogModel?.api);
+  const model: DiscoveredModel = {
     id,
     name: modelsDevMetadata.name ?? catalogModel?.name ?? `${id} (no metadata)`,
-    reasoning: modelsDevMetadata.reasoning ?? catalogModel?.reasoning ?? false,
-    thinkingLevelMap: catalogModel?.thinkingLevelMap,
+    reasoning: false,
     input: modelsDevMetadata.input ?? catalogModel?.input ?? ["text"],
     cost: modelsDevMetadata.cost ?? catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: modelsDevMetadata.contextWindow ?? catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: modelsDevMetadata.maxTokens ?? catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    compat: buildCompat(id, catalogModel),
+    ...(api ? { api } : {}),
   };
+  applyReasoningPolicy(model, catalogModel, catalogModel?.reasoning ?? modelsDevMetadata.reasoning);
+  return model;
 }
 
 async function discoverFromHealth(

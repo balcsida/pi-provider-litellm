@@ -9,7 +9,11 @@ export const SECOND_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 type Chunk = { data: unknown; waitForAbort: boolean };
-type RequestBody = { messages: Array<{ role: string; content: unknown }>; [key: string]: unknown };
+type RequestBody = {
+  messages: Array<{ role: string; content: unknown }>;
+  input?: unknown[];
+  [key: string]: unknown;
+};
 
 export function sseChunk(data: unknown, waitForAbort = false): Chunk {
   return { data, waitForAbort };
@@ -53,7 +57,9 @@ export function successfulResponse(text: string): Chunk[] {
   ];
 }
 
-export async function createCompatibilityHarness(): Promise<{
+export async function createCompatibilityHarness(
+  entry: { model_name?: string; model_info?: Record<string, unknown> } = {},
+): Promise<{
   provider: Provider;
   models: Models;
   model: Model<Api>;
@@ -81,7 +87,7 @@ export async function createCompatibilityHarness(): Promise<{
       return Response.json({
         data: [
           {
-            model_name: "local-model",
+            model_name: entry.model_name ?? "local-model",
             model_info: {
               mode: "chat",
               supports_reasoning: true,
@@ -92,17 +98,20 @@ export async function createCompatibilityHarness(): Promise<{
               output_cost_per_token: 0.000002,
               cache_read_input_token_cost: 0.000003,
               cache_creation_input_token_cost: 0.000004,
+              ...entry.model_info,
             },
           },
         ],
       });
     }
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
-    if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses")) {
+      throw new Error(`unexpected URL: ${url}`);
+    }
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
-    const history = JSON.stringify(requestBody.messages);
+    const history = JSON.stringify(requestBody.messages ?? requestBody.input);
     if (history.includes("Overflow the context")) {
       return Response.json(
         {
@@ -192,7 +201,7 @@ export async function createCompatibilityHarness(): Promise<{
   const refresh = await models.refresh({ allowNetwork: true });
   const refreshError = refresh.errors.get(provider.id);
   if (refreshError) throw refreshError;
-  const model = models.getModel(provider.id, "local-model");
+  const model = models.getModel(provider.id, entry.model_name ?? "local-model");
   if (!model) throw new Error("LiteLLM model was not discovered");
 
   return { provider, models, model, foreignModel, requests, foreignRequests, respond };

@@ -1,8 +1,10 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCompat, discoverModels, normalizeBaseUrl, shouldSuppressReasoningContent } from "../src/discover.js";
+import type { DiscoveredModel, LiteLLMApi } from "../src/types.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -17,6 +19,15 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function supportedThinkingLevels(model: DiscoveredModel): string[] {
+  return getSupportedThinkingLevels({
+    ...model,
+    api: model.api ?? "openai-completions",
+    provider: "litellm",
+    baseUrl: "https://litellm.example.com/v1",
+  } as Model<LiteLLMApi>);
 }
 
 const MODELS_DEV_CATALOG = {
@@ -68,13 +79,14 @@ describe("buildCompat", () => {
     expect(buildCompat("gpt-5.5")).toEqual({ supportsStore: false });
   });
 
-  it("adds Moonshot-compatible tool calling flags for Kimi models", () => {
+  it("adds Moonshot-compatible tool calling and reasoning flags for Kimi models", () => {
     expect(buildCompat("kimi-k2.6")).toEqual({
       supportsStore: false,
       supportsDeveloperRole: false,
       supportsReasoningEffort: false,
       supportsStrictMode: false,
       maxTokensField: "max_tokens",
+      thinkingFormat: "deepseek",
     });
     expect(buildCompat("moonshotai/kimi-k2")).toEqual({
       supportsStore: false,
@@ -82,6 +94,7 @@ describe("buildCompat", () => {
       supportsReasoningEffort: false,
       supportsStrictMode: false,
       maxTokensField: "max_tokens",
+      thinkingFormat: "deepseek",
     });
   });
 
@@ -129,14 +142,18 @@ describe("shouldSuppressReasoningContent", () => {
   it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
     expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
     expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-k2.6")).toBe(true);
   });
 
   it("does not suppress explicit forced-thinking models", () => {
     expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-k2-thinking")).toBe(false);
   });
 
-  it("does not suppress unrelated models", () => {
+  it("does not suppress unrelated or unresolved routed models", () => {
     expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/gpt-4o")).toBe(false);
+    expect(shouldSuppressReasoningContent("custom-route/kimi-unknown-model")).toBe(false);
   });
 });
 
@@ -257,7 +274,119 @@ describe("discoverModels via /model/info", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: "none", xhigh: "xhigh", max: "max" });
+    expect(result.models[0]).toMatchObject({
+      thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
+    });
+    expect(result.models[0]?.api).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
+  it("disables catalog reasoning controls when /model/info says the route does not support reasoning", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-5.6-luna", model_info: { mode: "chat", supports_reasoning: false } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ reasoning: false });
+    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
+  });
+
+  it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "kimi-k2.6", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k2.6",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("normalizes catalog-resolved Kimi route aliases to off and high", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-route/kimi-k2.6", model_info: {} }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "custom-route/kimi-k2.6",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("normalizes always-thinking Kimi /model/info reasoning to high only", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "moonshotai/kimi-k2.7-code", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "moonshotai/kimi-k2.7-code",
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
+  });
+
+  it("keeps explicit granular Moonshot catalog maps instead of treating them as boolean Kimi", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "kimi-k3", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k3",
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["low", "high", "max"]);
+  });
+
+  it("does not advertise speculative thinking levels for unknown /model/info reasoning models", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-reasoning-model", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "custom-reasoning-model", reasoning: false });
+    expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
 
   it("preserves richer metadata from later duplicate model ids", async () => {
@@ -293,6 +422,90 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 8192,
       cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
     });
+  });
+});
+
+describe("discoverModels API selection", () => {
+  it("respects explicit chat mode instead of inferring transport from the catalog", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "deepseek/deepseek-v4-flash", model_info: { mode: "chat", supports_reasoning: true } },
+          { model_name: "openai/gpt-4o", model_info: { mode: "chat" } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const completions = result.models.find((model) => model.id === "deepseek/deepseek-v4-flash");
+    const catalogResponses = result.models.find((model) => model.id === "openai/gpt-4o");
+
+    expect(completions?.thinkingLevelMap?.max).toBe("max");
+    expect(completions?.api).toBeUndefined();
+    expect(catalogResponses?.thinkingLevelMap?.max).toBeUndefined();
+    expect(catalogResponses?.api).toBeUndefined();
+  });
+
+  it("normalizes Azure and Codex catalog APIs to the LiteLLM Responses transport", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [
+            { id: "gpt-4", owned_by: "azure-openai-responses" },
+            { id: "gpt-5.6-sol", owned_by: "openai-codex" },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models).toHaveLength(2);
+    expect(result.models.map((model) => [model.id, model.api])).toEqual([
+      ["gpt-4", "openai-responses"],
+      ["gpt-5.6-sol", "openai-responses"],
+    ]);
+  });
+
+  it("keeps catalog Responses transport when route mode is absent", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "openai/gpt-4o", model_info: {} }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "openai/gpt-4o", api: "openai-responses" });
+  });
+
+  it("keeps response-mode models on Responses without a catalog match", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-responses-model", model_info: { mode: "responses" } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "custom-responses-model", api: "openai-responses" });
+  });
+
+  it("leaves unknown chat models on the default Chat Completions API", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "custom-chat-model", model_info: { mode: "chat", supports_reasoning: true } }],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "custom-chat-model", reasoning: false });
+    expect(result.models[0]?.api).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
 });
 
@@ -379,8 +592,11 @@ describe("discoverModels fallback to /v1/models", () => {
       const result = await discoverModels("https://litellm.example.com", "sk-test", {});
       expect(result.source).toBe("models_list");
       expect(result.models.map((m) => m.id).sort()).toEqual(["anthropic/claude-3-5-sonnet", "openai/gpt-4o"]);
+      const openai = result.models.find((m) => m.id === "openai/gpt-4o")!;
+      expect(openai.api).toBe("openai-responses");
       const anthropic = result.models.find((m) => m.id === "anthropic/claude-3-5-sonnet")!;
       expect(anthropic.name).toBe("anthropic/claude-3-5-sonnet (no metadata)");
+      expect(anthropic.api).toBeUndefined();
       expect(anthropic.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
     });
   }
@@ -870,13 +1086,73 @@ describe("discoverModels fallback to /v1/models", () => {
       id: "gpt-5.5",
       name: "GPT-5.5",
       reasoning: true,
-      thinkingLevelMap: { off: "none", xhigh: "xhigh" },
+      thinkingLevelMap: { off: "none", xhigh: "xhigh", minimal: null },
       input: ["text", "image"],
       contextWindow: 1050000,
       maxTokens: 128000,
       compat: { supportsStore: false },
     });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "low", "medium", "high", "xhigh"]);
     expect(result.models[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 });
+  });
+
+  it("keeps catalog reasoning enabled when models.dev says it is false", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, { data: [{ id: "gpt-5.5", owned_by: "openai" }] });
+      }
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, { openai: { models: { "gpt-5.5": { reasoning: false } } } });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "gpt-5.5", reasoning: true });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "low", "medium", "high", "xhigh"]);
+  });
+
+  it("normalizes boolean Kimi reasoning from the /v1/models fallback", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id: "kimi-k2.6", owned_by: "moonshotai" }] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k2.6",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({ thinkingFormat: "deepseek", supportsReasoningEffort: false }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
+  });
+
+  it("does not advertise models.dev-only reasoning without a catalog match", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-litellm-models-dev-"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) return new Response(null, { status: 403 });
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [{ id: "custom-model", owned_by: "openai" }] });
+      if (url === "https://models.dev/api.json") {
+        return jsonResponse(200, { openai: { models: { "custom-model": { name: "Custom", reasoning: true } } } });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDevCachePath: join(dir, "litellm-models-dev.json"),
+    });
+
+    expect(result.models[0]).toMatchObject({ id: "custom-model", name: "Custom", reasoning: false });
+    expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
   });
 
   it("throws when /model/info returns a non-401/403/404 error", async () => {
@@ -928,6 +1204,7 @@ describe("discoverModels fallback to /health", () => {
           healthy_endpoints: [
             { model: "vertex/claude-sonnet", model_id: "uuid-1" },
             { model: "openai/gpt-4o-mini", model_id: "uuid-2" },
+            { model: "kimi-k2.6", model_id: "uuid-3" },
           ],
         });
       }
@@ -961,6 +1238,19 @@ describe("discoverModels fallback to /health", () => {
           ],
         });
       }
+      if (url.endsWith("/model/info?litellm_model_id=uuid-3")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-k2.6",
+              model_info: {
+                mode: "chat",
+                supports_reasoning: true,
+              },
+            },
+          ],
+        });
+      }
       throw new Error(`unexpected URL: ${url}`);
     });
 
@@ -972,14 +1262,18 @@ describe("discoverModels fallback to /health", () => {
       "https://litellm.example.com/health",
       "https://litellm.example.com/model/info?litellm_model_id=uuid-1",
       "https://litellm.example.com/model/info?litellm_model_id=uuid-2",
+      "https://litellm.example.com/model/info?litellm_model_id=uuid-3",
     ]);
     expect(result.source).toBe("health");
-    expect(result.models.map((model) => model.id)).toEqual(["vertex/claude-sonnet", "openai/gpt-4o-mini"]);
+    expect(result.models.map((model) => model.id)).toEqual(["vertex/claude-sonnet", "openai/gpt-4o-mini", "kimi-k2.6"]);
+    expect(result.models[0]?.api).toBeUndefined();
     expect(result.models[0]).toMatchObject({
       input: ["text", "image"],
       contextWindow: 200000,
       compat: { supportsStore: false, cacheControlFormat: "anthropic" },
     });
+    expect(result.models[1]?.api).toBeUndefined();
+    expect(supportedThinkingLevels(result.models[2]!)).toEqual(["off", "high"]);
   });
 
   it("uses healthy endpoint model names when /health entries do not include model ids", async () => {
@@ -1009,6 +1303,8 @@ describe("discoverModels fallback to /health", () => {
     ]);
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["azure/gpt-35-turbo", "anthropic/claude-3-5-sonnet"]);
+    expect(result.models[0]?.api).toBeUndefined();
+    expect(result.models[1]?.api).toBeUndefined();
     expect(result.models[1]).toMatchObject({
       name: "anthropic/claude-3-5-sonnet",
       contextWindow: 128000,

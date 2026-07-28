@@ -1,6 +1,6 @@
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk } from "./helpers.js";
+import { createCompatibilityHarness, RED_CIRCLE_PNG, sseChunk, successfulResponse } from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -115,6 +115,142 @@ describe("native provider stream compatibility", () => {
 
     expect(second.content).toContainEqual({ type: "text", text: "887" });
     expect(requests.at(-1)?.messages).toContainEqual(expect.objectContaining({ role: "tool", content: "887" }));
+  });
+
+  it("serializes Chat reasoning with tools using only Chat fields", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "gpt-5.5",
+      model_info: { mode: "chat" },
+    });
+    respond(...successfulResponse("done"));
+
+    await models
+      .streamSimple(
+        model,
+        {
+          messages: [user("Use a tool")],
+          tools: [{ name: "noop", description: "No operation", parameters: { type: "object" } }],
+        },
+        { reasoning: "high" },
+      )
+      .result();
+
+    expect(requests[0]).toMatchObject({
+      reasoning_effort: "high",
+      tools: [expect.objectContaining({ type: "function" })],
+    });
+    expect(requests[0]).not.toHaveProperty("reasoning");
+    expect(requests[0]).not.toHaveProperty("include");
+    expect(requests[0]).not.toHaveProperty("thinking");
+  });
+
+  it("serializes Responses reasoning with tools using only Responses fields", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "gpt-5.5",
+      model_info: { mode: "responses" },
+    });
+    respond(
+      sseChunk({ type: "response.created", response: { id: "resp_1" } }),
+      sseChunk({
+        type: "response.completed",
+        response: {
+          id: "resp_1",
+          status: "completed",
+          output: [],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        },
+      }),
+    );
+
+    await models
+      .streamSimple(
+        model,
+        {
+          messages: [user("Use a tool")],
+          tools: [{ name: "noop", description: "No operation", parameters: { type: "object" } }],
+        },
+        { reasoning: "high" },
+      )
+      .result();
+
+    expect(requests[0]).toMatchObject({
+      reasoning: { effort: "high", summary: "auto" },
+      include: ["reasoning.encrypted_content"],
+      tools: [expect.objectContaining({ type: "function" })],
+    });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+    expect(requests[0]).not.toHaveProperty("thinking");
+  });
+
+  it("serializes boolean Kimi reasoning selections as LiteLLM thinking objects", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({ model_name: "kimi-k2.6" });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+
+    respond(...successfulResponse("enabled"));
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({
+      thinking: { type: "enabled" },
+    });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+
+    respond(...successfulResponse("disabled"));
+    await models.streamSimple(model, { messages: [user("Do not think")] }).result();
+
+    expect(requests[1]).toMatchObject({
+      thinking: { type: "disabled" },
+    });
+    expect(requests[1]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("serializes catalog-resolved Kimi route aliases as boolean thinking", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "custom-route/kimi-k2.6",
+      model_info: { mode: null },
+    });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+
+    respond(...successfulResponse("enabled"));
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({ thinking: { type: "enabled" } });
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("serializes granular DeepSeek reasoning selections through LiteLLM-safe fields", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "deepseek/deepseek-v4-flash",
+    });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "high", "max"]);
+
+    respond(...successfulResponse("deepseek"));
+
+    await models.streamSimple(model, { messages: [user("Think deeply")] }, { reasoning: "max" }).result();
+
+    expect(requests[0]).toMatchObject({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
+    });
+  });
+
+  it("keeps unknown reasoning routes usable without speculative thinking controls", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness({
+      model_name: "custom-reasoning-smoke",
+    });
+    expect(getSupportedThinkingLevels(model)).toEqual(["off"]);
+
+    respond(...successfulResponse("custom"));
+    await models.streamSimple(model, { messages: [user("Use the custom route")] }).result();
+
+    expect(requests[0]).not.toHaveProperty("thinking");
+    expect(requests[0]).not.toHaveProperty("reasoning_effort");
+    expect(requests[0]).not.toHaveProperty("reasoning");
   });
 
   it("serializes image input", async () => {
