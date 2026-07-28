@@ -8,15 +8,46 @@ export const RED_CIRCLE_PNG =
 export const SECOND_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-type Chunk = { data: unknown; waitForAbort: boolean };
+type Chunk = { data: unknown; event?: string; waitForAbort: boolean };
 type RequestBody = {
-  messages: Array<{ role: string; content: unknown }>;
+  messages?: Array<{ role: string; content: unknown }>;
   input?: unknown[];
   [key: string]: unknown;
 };
 
 export function sseChunk(data: unknown, waitForAbort = false): Chunk {
   return { data, waitForAbort };
+}
+
+export function anthropicSseChunk(data: { type: string; [key: string]: unknown }): Chunk {
+  return { data, event: data.type, waitForAbort: false };
+}
+
+export function anthropicTextResponse(text: string): Chunk[] {
+  return [
+    anthropicSseChunk({
+      type: "message_start",
+      message: {
+        id: "msg_text",
+        type: "message",
+        role: "assistant",
+        content: [],
+        model: "local-model",
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 2, output_tokens: 0 },
+      },
+    }),
+    anthropicSseChunk({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+    anthropicSseChunk({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }),
+    anthropicSseChunk({ type: "content_block_stop", index: 0 }),
+    anthropicSseChunk({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    }),
+    anthropicSseChunk({ type: "message_stop" }),
+  ];
 }
 
 export function user(content: string) {
@@ -65,6 +96,7 @@ export async function createCompatibilityHarness(
   model: Model<Api>;
   foreignModel: Model<Api>;
   requests: RequestBody[];
+  requestUrls: string[];
   foreignRequests: RequestBody[];
   respond: (...chunks: Chunk[]) => void;
 }> {
@@ -76,6 +108,7 @@ export async function createCompatibilityHarness(
   vi.stubEnv("LITELLM_API_KEY", "sk-test");
 
   const requests: RequestBody[] = [];
+  const requestUrls: string[] = [];
   const foreignRequests: RequestBody[] = [];
   const responses: Chunk[][] = [];
   const respond = (...chunks: Chunk[]) => responses.push(chunks);
@@ -105,12 +138,14 @@ export async function createCompatibilityHarness(
       });
     }
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
-    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses")) {
+    const isAnthropicRequest = url.endsWith("/v1/messages");
+    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses") && !isAnthropicRequest) {
       throw new Error(`unexpected URL: ${url}`);
     }
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
+    if (!isForeignRequest) requestUrls.push(url);
     const history = JSON.stringify(requestBody.messages ?? requestBody.input);
     if (history.includes("Overflow the context")) {
       return Response.json(
@@ -127,13 +162,13 @@ export async function createCompatibilityHarness(
     }
     const chunks =
       responses.shift() ??
-      (isForeignRequest && history.includes("Continue elsewhere")
+      (!isAnthropicRequest && isForeignRequest && history.includes("Continue elsewhere")
         ? successfulResponse("foreign continued")
-        : history.includes("Continue in LiteLLM")
+        : !isAnthropicRequest && history.includes("Continue in LiteLLM")
           ? successfulResponse("LiteLLM continued")
-          : history.includes("diameter: 2 px")
+          : !isAnthropicRequest && history.includes("diameter: 2 px")
             ? successfulResponse("diameter 2 px")
-            : history.includes("Inspect the image")
+            : !isAnthropicRequest && history.includes("Inspect the image")
               ? successfulResponse("red circle")
               : undefined);
     if (!chunks) throw new Error("missing mock response");
@@ -146,9 +181,10 @@ export async function createCompatibilityHarness(
             await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
           }
           if (signal?.aborted) return controller.error(signal.reason);
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk.data)}\n\n`));
+          const event = chunk.event ? `event: ${chunk.event}\n` : "";
+          controller.enqueue(encoder.encode(`${event}data: ${JSON.stringify(chunk.data)}\n\n`));
         }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        if (!isAnthropicRequest) controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
     });
@@ -204,7 +240,7 @@ export async function createCompatibilityHarness(
   const model = models.getModel(provider.id, entry.model_name ?? "local-model");
   if (!model) throw new Error("LiteLLM model was not discovered");
 
-  return { provider, models, model, foreignModel, requests, foreignRequests, respond };
+  return { provider, models, model, foreignModel, requests, requestUrls, foreignRequests, respond };
 }
 
 afterEach(() => {

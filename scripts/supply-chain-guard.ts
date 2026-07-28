@@ -40,7 +40,8 @@ const nonRegistrySpecPrefixes = [
   "./",
 ];
 
-const sourceModules = "cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|provider|skills|types";
+const sourceModules =
+  "cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|protocols|provider|skills|types";
 const allowedPackageFiles = [
   /^package\.json$/,
   /^README\.md$/,

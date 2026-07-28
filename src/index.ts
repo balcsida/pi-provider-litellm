@@ -576,7 +576,6 @@ async function resolveApiKeyAuth(
   return {
     auth: {
       apiKey: creds.apiKey,
-      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl) } : undefined,
@@ -633,7 +632,6 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           }),
           toAuth: async (credential) => ({
             apiKey: credential.access,
-            baseUrl: credential.baseUrl ? `${normalizeBaseUrl(String(credential.baseUrl))}/v1` : undefined,
             headers: resolveHeaders(definition),
           }),
         }
@@ -774,7 +772,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
     return {
-      baseUrl: normalizeBaseUrl(resolved.auth.baseUrl ?? requestBaseUrl(definition)),
+      baseUrl: resolved.env?.[ENV_BASE_URL] ?? requestBaseUrl(definition),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
     };
@@ -796,9 +794,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth.auth.apiKey;
-    if (!baseUrl || !apiKey) return undefined;
+    if (!apiKey) return undefined;
+    const baseUrl =
+      auth.env?.[ENV_BASE_URL] ??
+      (defaultRuntimeAuth?.apiKey === apiKey ? defaultRuntimeAuth.baseUrl : undefined) ??
+      auth.auth.baseUrl ??
+      provider?.baseUrl;
+    if (!baseUrl) return undefined;
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -881,6 +884,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
       auth: createProviderAuth(definition),
+      credentialBaseUrl: (credential) =>
+        credential.type === "oauth" && typeof credential.baseUrl === "string"
+          ? credential.baseUrl
+          : credential.type === "api_key"
+            ? credential.env?.[ENV_BASE_URL]
+            : undefined,
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
@@ -943,10 +952,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    defaultRuntimeAuth = undefined;
     if (!skillsEnabled || discoveryDisabledReason()) return;
     const auth = await getRuntimeAuth(ctx);
-    if (!auth) return;
+    if (!auth) {
+      defaultRuntimeAuth = undefined;
+      return;
+    }
     defaultRuntimeAuth = auth;
     const skills = await listSkills(defaultRuntimeAuth.baseUrl, defaultRuntimeAuth.apiKey, defaultRuntimeAuth.headers);
     const section = createSkillsPromptSection(skills);

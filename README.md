@@ -153,16 +153,35 @@ changing these settings so previously registered tools are removed.
 
 LiteLLM transport and Pi reasoning controls are independent axes:
 
-- Transport is selected from LiteLLM route metadata and the Pi catalog. Routes with `/model/info` `mode: response` or `mode: responses`, or routes matched to a Pi catalog Responses-family API, use LiteLLM's OpenAI-shaped `/v1/responses` path. Other chat routes use `/v1/chat/completions`.
-- Reasoning controls are selected from catalog-backed model capability metadata. A deep or `max` thinking level does not force Responses transport, and a Responses route does not imply a particular thinking selector.
+- Routes with `/model/info` `mode: response` or `mode: responses` use LiteLLM's OpenAI-shaped `/v1/responses` path.
+- Routes whose `/model/info` metadata identifies a supported Anthropic backend adapter use the native Anthropic
+  `/v1/messages` path. Broad adapters such as Bedrock, Bedrock Converse, and Azure AI require corroborating Anthropic
+  backend-model metadata.
+- Routes without authoritative Responses or Anthropic adapter metadata use `/v1/chat/completions`. This includes
+  `/v1/models`, unannotated health records, incomplete `/model/info` records, and unknown adapters.
+- Reasoning controls are selected from catalog-backed model capability metadata. A deep or `max` thinking level does not
+  choose the transport, and a transport does not imply a particular thinking selector.
 
-When a LiteLLM route matches a Pi catalog model, this extension exposes the catalog's meaningful Pi thinking levels and suppresses unsupported levels. Granular models keep their distinct catalog choices, including `xhigh` and `max` when the catalog marks them as supported. If `/model/info` reports `supports_reasoning: false`, reasoning controls are disabled for that LiteLLM route even if the catalog model normally supports them.
+When a LiteLLM route matches a Pi catalog model, this extension exposes the catalog's meaningful Pi thinking levels and
+suppresses unsupported levels. Granular models keep their distinct catalog choices, including `xhigh` and `max` when the
+catalog marks them as supported. If `/model/info` reports `supports_reasoning: false`, reasoning controls are disabled
+for that LiteLLM route even if the catalog model normally supports them.
 
-Known boolean Kimi/Moonshot-style routes are normalized to one canonical enabled choice. Models that support disabling thinking show `off` and `high`; selecting `off` sends `thinking: { type: "disabled" }`, and selecting `high` sends `thinking: { type: "enabled" }`. Known always-thinking Kimi routes show only `high`. Lower labels such as `minimal`, `low`, and `medium` are hidden for these boolean routes because they would all mean the same enabled state.
+Known boolean Kimi/Moonshot-style routes are normalized to one canonical enabled choice. Models that support disabling
+thinking show `off` and `high`; selecting `off` sends `thinking: { type: "disabled" }`, and selecting `high` sends
+`thinking: { type: "enabled" }`. Known always-thinking Kimi routes show only `high`. Lower labels such as `minimal`,
+`low`, and `medium` are hidden for these boolean routes because they would all mean the same enabled state.
 
-Unknown custom routes are conservative. LiteLLM `/model/info` or models.dev may say only `supports_reasoning: true`/`reasoning: true`, but that boolean is not enough to know which Pi levels are distinct or how to serialize them. Such models remain usable, but Pi does not show a reasoning selector until the route can be matched to authoritative catalog metadata. For custom aliases, prefer model names or `owned_by` values that resolve to the underlying catalog model; arbitrary aliases are not assumed to support any specific reasoning controls.
+Unknown custom routes are conservative. LiteLLM `/model/info` or models.dev may say only
+`supports_reasoning: true`/`reasoning: true`, but that boolean is not enough to know which Pi levels are distinct or how
+to serialize them. Such models remain usable, but Pi does not show a reasoning selector until the route can be matched
+to authoritative catalog metadata. For custom aliases, prefer model names or `owned_by` values that resolve to the
+underlying catalog model; arbitrary aliases are not assumed to support any specific reasoning controls.
 
-The exact controls depend on the installed Pi model catalog and the metadata your LiteLLM version returns. Newer LiteLLM proxies that preserve route `mode`, `supports_reasoning`, model names, and ownership metadata give this extension more evidence. Older or incomplete metadata may fall back to a usable but less-specific model entry, and catalog omissions remain conservative until the catalog is updated.
+The exact controls depend on the installed Pi model catalog and the metadata your LiteLLM version returns. Newer LiteLLM
+proxies that preserve route `mode`, `supports_reasoning`, model names, and ownership metadata give this extension more
+evidence. Older or incomplete metadata may fall back to a usable but less-specific model entry, and catalog omissions
+remain conservative until the catalog is updated.
 
 ## Optional environment variables
 

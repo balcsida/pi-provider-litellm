@@ -2,11 +2,10 @@ import {
   type Credential,
   createProvider,
   type Model,
-  openAICompletionsApi,
-  openAIResponsesApi,
   type Provider,
   type ProviderAuth,
 } from "@earendil-works/pi-ai/compat";
+import { createLiteLLMProtocolApis, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -14,6 +13,7 @@ export type LiteLLMProviderOptions = {
   name: string;
   baseUrl: string;
   auth: ProviderAuth;
+  credentialBaseUrl?: (credential: Credential) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
@@ -25,9 +25,8 @@ export function toNativeModels(
   return models.map((model) => ({
     ...model,
     provider,
-    api: model.api ?? "openai-completions",
-    baseUrl,
-  })) as Model<LiteLLMApi>[];
+    baseUrl: resolveModelBaseUrl(baseUrl, model.api),
+  }));
 }
 
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
@@ -42,9 +41,10 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       const result = await options.discover(context.credential, context.signal);
       return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models);
     },
-    api: {
-      "openai-completions": openAICompletionsApi(),
-      "openai-responses": openAIResponsesApi(),
+    filterModels(models, credential) {
+      const baseUrl = credential && options.credentialBaseUrl?.(credential);
+      return baseUrl ? toNativeModels(options.id, baseUrl, models) : models;
     },
+    api: createLiteLLMProtocolApis(),
   });
 }
