@@ -946,7 +946,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ) {
           const auth = await authForCredential(definition, context.credential);
           defaultRuntimeAuth = auth;
-          await registerMcpTools(auth, context.signal);
+          const registration = registerMcpTools(auth, context.signal);
+          if (context.signal) await registration;
+          else void registration.catch(() => undefined);
         }
       }
     };

@@ -325,6 +325,62 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
+  it("does not block model refresh on MCP discovery", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    let mcpStarted!: () => void;
+    let releaseMcp!: (response: Response) => void;
+    const started = new Promise<void>((resolve) => {
+      mcpStarted = resolve;
+    });
+    const pendingMcp = new Promise<Response>((resolve) => {
+      releaseMcp = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        mcpStarted();
+        return pendingMcp;
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    let refreshed = false;
+    const refresh = refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      },
+    }).then(() => {
+      refreshed = true;
+    });
+    await started;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(refreshed).toBe(true);
+    releaseMcp(
+      jsonResponse(200, {
+        tools: [
+          {
+            name: "search",
+            description: "Search",
+            inputSchema: { type: "object", properties: {} },
+            mcp_info: { server_name: "brave" },
+          },
+        ],
+      }),
+    );
+    await refresh;
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
+  });
+
   it("retains Pi-managed models when discovery fails", async () => {
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));

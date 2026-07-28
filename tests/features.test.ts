@@ -150,6 +150,7 @@ describe("feature parity", () => {
     process.env.LITELLM_API_KEY = "second-token";
     process.env.LITELLM_HEADERS = '{"x-tenant":"second"}';
     await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second"));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://first.example.com/mcp-rest/tools/list",
@@ -163,7 +164,6 @@ describe("feature parity", () => {
         headers: expect.objectContaining({ Authorization: "Bearer second-token", "x-tenant": "second" }),
       }),
     );
-    expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second");
   });
 
   it("shares in-flight MCP discovery between default-provider refreshes", async () => {
@@ -334,6 +334,7 @@ describe("feature parity", () => {
     const pi = createPi();
     await extension(pi);
     await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((candidate) => candidate.name)).toContain("mcp_brave_search"));
     const tool = pi.tools.find((candidate) => candidate.name === "mcp_brave_search");
 
     await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
