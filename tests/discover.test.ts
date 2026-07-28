@@ -296,6 +296,70 @@ describe("discoverModels via /model/info", () => {
   });
 });
 
+describe("discoverModels wildcard expansion via /v1/models", () => {
+  it("expands a wildcard /model/info entry and drops the literal wildcard id", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            { model_name: "lemonade/*", model_info: { mode: "chat" } },
+            { model_name: "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL", model_info: { mode: "chat" } },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [
+            { id: "lemonade/*", object: "model", owned_by: "openai" },
+            { id: "lemonade/Bonsai-1.7B-gguf", object: "model", owned_by: "openai" },
+            { id: "lemonade/Laguna-S-2.1-GGUF-UD-IQ4_NL", object: "model", owned_by: "openai" },
+            { id: "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL", object: "model", owned_by: "openai" },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("model_info");
+    expect(result.models.map((m) => m.id).sort()).toEqual([
+      "lemonade/Bonsai-1.7B-gguf",
+      "lemonade/Laguna-S-2.1-GGUF-UD-IQ4_NL",
+      "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL",
+    ]);
+    // the raw wildcard id must NOT surface as a selectable model
+    expect(result.models.some((m) => m.id.includes("*"))).toBe(false);
+    // the concrete /model/info entry is not duplicated by /v1/models
+    expect(result.models.filter((m) => m.id === "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL")).toHaveLength(1);
+    // /v1/models was actually queried (the expansion path ran)
+    expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(true);
+  });
+
+  it("does not query /v1/models when /model/info has no wildcards", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "openai/gpt-4o", model_info: { mode: "chat" } }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("model_info");
+    expect(result.models.map((m) => m.id)).toEqual(["openai/gpt-4o"]);
+    expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(false);
+  });
+});
+
 describe("discoverModels response-mode models", () => {
   it("keeps /model/info response-mode models with a Responses API override", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

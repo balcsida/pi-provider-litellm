@@ -508,8 +508,31 @@ export async function discoverModels(
         model_info: { ...previous?.model_info, ...entry.model_info },
       });
     }
-    const models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
-    return { source: "model_info", models };
+    let models = [...entries.values()].map(mapFromModelInfo).filter((m): m is DiscoveredModel => m !== undefined);
+    // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
+    // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
+    // — it returns the literal wildcard only. The discovered ids live in
+    // /v1/models instead. When /model/info contains any wildcard id, also query
+    // /v1/models and merge the expanded (non-wildcard) entries in, dropping the
+    // raw wildcard row so it doesn't surface as a phantom model choice.
+    // Refs: github.com/BerriAI/litellm/issues/16178, docs.litellm.ai/docs/proxy/model_discovery
+    if (models.some((m) => m.id.includes("*"))) {
+      progress?.("/model/info has wildcard entries, expanding via /v1/models...");
+      let modelsDev: ModelsDevResponse | undefined;
+      if (options.modelsDev !== false) {
+        progress?.("Loading models.dev catalog for metadata enrichment...");
+        modelsDev = await getModelsDevCatalog(options);
+      }
+      const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
+      if (listResult.ok) {
+        const expanded = (listResult.data.data ?? [])
+          .map((entry) => mapFromModelsList(entry, modelsDev))
+          .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"));
+        const seen = new Set<string>(models.map((m) => m.id));
+        models = [...models.filter((m) => !m.id.includes("*")), ...expanded.filter((m) => !seen.has(m.id))];
+      }
+    }
+    return { source: "model_info", models: deduplicateModels(models) };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
