@@ -515,7 +515,7 @@ export async function discoverModels(
     // /v1/models instead. When /model/info contains any wildcard id, also query
     // /v1/models and merge the expanded (non-wildcard) entries in, dropping the
     // raw wildcard row so it doesn't surface as a phantom model choice.
-    // Refs: github.com/BerriAI/litellm/issues/16178, docs.litellm.ai/docs/proxy/model_discovery
+    // Ref: docs.litellm.ai/docs/proxy/model_discovery
     if (models.some((m) => m.id.includes("*"))) {
       progress?.("/model/info has wildcard entries, expanding via /v1/models...");
       let modelsDev: ModelsDevResponse | undefined;
