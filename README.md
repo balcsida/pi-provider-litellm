@@ -156,7 +156,8 @@ LiteLLM transport and Pi reasoning controls are independent axes:
 - Routes with `/model/info` `mode: response` or `mode: responses` use LiteLLM's OpenAI-shaped `/v1/responses` path.
 - Routes whose `/model/info` metadata identifies a supported Anthropic backend adapter use the native Anthropic
   `/v1/messages` path. Broad adapters such as Bedrock, Bedrock Converse, and Azure AI require corroborating Anthropic
-  backend-model metadata.
+  backend-model evidence, taken from `base_model` or from a provider-qualified route name such as
+  `bedrock/converse/us.anthropic.claude-opus-4-6-v1`. A vanity alias with neither stays on Chat Completions.
 - Routes without authoritative Responses or Anthropic adapter metadata use `/v1/chat/completions`. This includes
   `/v1/models`, unannotated health records, incomplete `/model/info` records, and unknown adapters.
 - Reasoning controls are selected from catalog-backed model capability metadata. A deep or `max` thinking level does not

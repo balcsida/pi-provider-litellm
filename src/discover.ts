@@ -64,27 +64,31 @@ function isChatStyleMode(mode: string | null | undefined): boolean {
   return mode == null || mode === "chat" || isResponsesMode(mode);
 }
 
+// Adapters that only front Anthropic models, so the adapter value alone is
+// authoritative evidence of Messages support.
 const ANTHROPIC_MESSAGES_ADAPTERS = new Set(["anthropic", "vertex_ai-anthropic_models"]);
+// Adapters that front mixed catalogs (Bedrock Converse also serves Nova, Llama,
+// and Mistral), so they need corroborating backend-model evidence.
 const ANTHROPIC_BASE_MODEL_ADAPTERS = new Set(["azure_ai", "bedrock", "bedrock_converse"]);
+// Routes addressed by their provider-qualified id carry the backend model in the
+// route name and report no separate `base_model`, so the name is authoritative
+// for them. A vanity alias is neither, and stays on Chat Completions.
+const PROVIDER_QUALIFIED_ROUTE_PATTERN = /^(?:bedrock|azure_ai)\//i;
 const ANTHROPIC_BASE_MODEL_PATTERN = /(?:^|[/_.:-])(?:anthropic|claude|opus|sonnet|haiku)(?:[/_.:-]|$)/i;
 
 function selectApi(
   mode: string | null | undefined,
   litellmProvider?: string,
   baseModel?: string,
+  modelId?: string,
 ): DiscoveredModel["api"] {
   if (isResponsesMode(mode)) return "openai-responses";
   const adapter = litellmProvider?.trim().toLowerCase();
-  if (adapter && ANTHROPIC_MESSAGES_ADAPTERS.has(adapter)) return "anthropic-messages";
-  if (
-    adapter &&
-    ANTHROPIC_BASE_MODEL_ADAPTERS.has(adapter) &&
-    baseModel &&
-    ANTHROPIC_BASE_MODEL_PATTERN.test(baseModel)
-  ) {
-    return "anthropic-messages";
-  }
-  return "openai-completions";
+  if (!adapter) return "openai-completions";
+  if (ANTHROPIC_MESSAGES_ADAPTERS.has(adapter)) return "anthropic-messages";
+  if (!ANTHROPIC_BASE_MODEL_ADAPTERS.has(adapter)) return "openai-completions";
+  const backendModel = baseModel ?? (modelId && PROVIDER_QUALIFIED_ROUTE_PATTERN.test(modelId) ? modelId : undefined);
+  return backendModel && ANTHROPIC_BASE_MODEL_PATTERN.test(backendModel) ? "anthropic-messages" : "openai-completions";
 }
 
 // Matches both the conventional `anthropic/...` prefix and aliases that
@@ -505,7 +509,7 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
   const catalogModel = findCatalogModel(id);
-  const api = selectApi(info.mode, info.litellm_provider, info.base_model);
+  const api = selectApi(info.mode, info.litellm_provider, info.base_model, id);
   const model: DiscoveredModel = {
     id,
     name: id,

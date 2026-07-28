@@ -27,8 +27,10 @@
   metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Cache data is stored as `litellm-models.json` under the Pi agent dir with a keyed API-key fingerprint and a 24-hour
-  stale refresh window.
+- Discovered models are cached by Pi's native provider model store, not by this extension. The legacy
+  `litellm-models.json` file is ignored and never deleted; keep that behavior covered.
+- The models.dev catalog is cached separately as `litellm-models-dev.json` under the Pi agent dir with a 28-day refresh
+  window.
 
 ## LiteLLM Request Hooks
 

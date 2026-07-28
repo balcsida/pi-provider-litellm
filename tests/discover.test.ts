@@ -536,6 +536,16 @@ describe("discoverModels API selection", () => {
               base_model: "amazon.nova-pro-v1:0",
             },
           },
+          {
+            // Provider-qualified route naming a non-Anthropic backend.
+            model_name: "bedrock/converse/amazon.nova-pro-v1:0",
+            model_info: { mode: "chat", litellm_provider: "bedrock_converse" },
+          },
+          {
+            // Vanity alias with no backend evidence at all.
+            model_name: "my-favourite-claude",
+            model_info: { mode: "chat", litellm_provider: "bedrock_converse" },
+          },
           { model_name: "near-match", model_info: { mode: "chat", litellm_provider: "bedrock-converse" } },
           { model_name: "unknown", model_info: { mode: "chat", litellm_provider: "custom_anthropic" } },
         ],
@@ -547,6 +557,8 @@ describe("discoverModels API selection", () => {
     expect(result.models.map((model) => [model.id, model.api])).toEqual([
       ["normalized", "anthropic-messages"],
       ["non-anthropic-converse", "openai-completions"],
+      ["bedrock/converse/amazon.nova-pro-v1:0", "openai-completions"],
+      ["my-favourite-claude", "openai-completions"],
       ["near-match", "openai-completions"],
       ["unknown", "openai-completions"],
     ]);
@@ -569,7 +581,7 @@ describe("discoverModels API selection", () => {
     expect(result.models[0]?.api).toBe("openai-responses");
   });
 
-  it("routes the live Bedrock Converse capability shape to Messages and exposes max", async () => {
+  it("routes live Bedrock Converse capability shapes to Messages and exposes max", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
@@ -578,7 +590,7 @@ describe("discoverModels API selection", () => {
             model_info: {
               mode: "chat",
               litellm_provider: "bedrock_converse",
-              base_model: "anthropic.claude-opus-5",
+              base_model: "us.anthropic.claude-opus-5",
               supports_reasoning: true,
               supports_xhigh_reasoning_effort: true,
               supports_max_reasoning_effort: true,
@@ -590,6 +602,18 @@ describe("discoverModels API selection", () => {
               mode: "chat",
               litellm_provider: "bedrock_converse",
               base_model: "anthropic.claude-sonnet-4-5",
+              supports_reasoning: true,
+              supports_xhigh_reasoning_effort: true,
+              supports_max_reasoning_effort: true,
+            },
+          },
+          {
+            // Live Converse routes can omit `base_model` entirely; the adapter
+            // still identifies an Anthropic backend.
+            model_name: "bedrock/converse/us.anthropic.claude-opus-4-6-v1",
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
               supports_reasoning: true,
               supports_xhigh_reasoning_effort: true,
               supports_max_reasoning_effort: true,
