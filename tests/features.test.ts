@@ -648,16 +648,13 @@ describe("feature parity", () => {
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
-    expect(updated).toMatchObject({
+    expect(updated).toEqual({
       messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
       litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
     });
   });
 
-  it("suppresses separate Kimi reasoning streams before session ids are available", async () => {
+  it("does not inject LiteLLM reasoning fields into Kimi requests", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -683,12 +680,7 @@ describe("feature parity", () => {
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
-    expect(updated).toEqual({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(updated).toBeUndefined();
   });
 
   it("strips unsupported reasoning controls from Bedrock Kimi routes", async () => {
@@ -721,12 +713,7 @@ describe("feature parity", () => {
       },
     );
 
-    expect(updated).toEqual({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(updated).toEqual({ messages: [] });
   });
 
   it("preserves reasoning controls when a Moonshot alias is not Bedrock-backed", async () => {
@@ -746,10 +733,7 @@ describe("feature parity", () => {
       { model: { provider: "litellm", id: "moonshotai.kimi-k2.5", api: "openai-completions" } },
     );
 
-    expect(updated).toMatchObject({
-      messages: [],
-      thinking: { type: "enabled" },
-    });
+    expect(updated).toBeUndefined();
   });
 
   it("leaves Kimi Responses requests unchanged", async () => {

@@ -415,11 +415,7 @@ describe("extension startup", () => {
       { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
     );
 
-    expect(result).toMatchObject({
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
+    expect(result).toBeUndefined();
   });
 
   it("returns a native API-key credential without discovery side effects", async () => {
