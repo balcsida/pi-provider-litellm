@@ -639,13 +639,12 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
   };
 }
 
-// Reasoning fields LiteLLM forwards to chat-completions providers. The Moonshot
-// path defaults them off.
+// Response-shaping fields understood by LiteLLM itself. Do not add upstream
+// reasoning controls here; some adapters reject `thinking` or `reasoning_effort`.
 const REASONING_SUPPRESSION_DEFAULTS: Record<string, unknown> = {
   include_reasoning: false,
   reasoning_content: false,
   merge_reasoning_content_in_choices: true,
-  thinking: { type: "disabled" },
 };
 
 function prepareLiteLLMRequestPayload(
@@ -653,6 +652,7 @@ function prepareLiteLLMRequestPayload(
   modelId: string | undefined,
   api: Api | undefined,
   sessionId: string | undefined,
+  stripReasoningControls = false,
 ): Record<string, unknown> | undefined {
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
@@ -660,9 +660,18 @@ function prepareLiteLLMRequestPayload(
     next ??= { ...payload };
     next[key] = value;
   };
+  const remove = (key: string): void => {
+    if (payload[key] === undefined) return;
+    next ??= { ...payload };
+    delete next[key];
+  };
 
   if (api !== "openai-responses" && modelId && shouldSuppressReasoningContent(modelId)) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) update(key, value);
+    if (stripReasoningControls) {
+      remove("reasoning_effort");
+      remove("thinking");
+    }
   }
 
   if (sessionId) {
@@ -948,6 +957,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ctx.model?.id,
       ctx.model?.api,
       sessionId,
+      ctx.model.api === "openai-completions" &&
+        (ctx.model.compat as { stripReasoningControls?: boolean } | undefined)?.stripReasoningControls === true,
     );
   });
 

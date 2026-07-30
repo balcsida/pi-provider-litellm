@@ -170,8 +170,10 @@ for that LiteLLM route even if the catalog model normally supports them.
 
 Known boolean Kimi/Moonshot-style routes are normalized to one canonical enabled choice. Models that support disabling
 thinking show `off` and `high`; selecting `off` sends `thinking: { type: "disabled" }`, and selecting `high` sends
-`thinking: { type: "enabled" }`. Known always-thinking Kimi routes show only `high`. Lower labels such as `minimal`,
-`low`, and `medium` are hidden for these boolean routes because they would all mean the same enabled state.
+`thinking: { type: "enabled" }`. Bedrock-backed Kimi routes reject `thinking` and `reasoning_effort`, so the extension
+strips both fields and exposes only `high`. Known always-thinking Kimi routes also show only `high`. Lower labels such
+as `minimal`, `low`, and `medium` are hidden for these boolean routes because they would all mean the same enabled
+state.
 
 Unknown custom routes are conservative. LiteLLM `/model/info` or models.dev may say only
 `supports_reasoning: true`/`reasoning: true`, but that boolean is not enough to know which Pi levels are distinct or how
@@ -226,10 +228,12 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters
-mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi
-refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's
-parallel tool mode and retry transient failures once.
+Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`. Names over 64 characters are
+truncated with a stable hash suffix so tools with the same truncated prefix stay distinct. Names that collide after
+sanitization also receive hash suffixes. Tools use simple JSON Schema parameters mapped to Pi/TypeBox parameters.
+Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after
+`/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient
+failures once.
 
 ## LiteLLM Skill Hub
 

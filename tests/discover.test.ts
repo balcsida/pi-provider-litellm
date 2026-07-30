@@ -88,14 +88,16 @@ describe("buildCompat", () => {
       maxTokensField: "max_tokens",
       thinkingFormat: "deepseek",
     });
-    expect(buildCompat("moonshotai/kimi-k2")).toEqual({
-      supportsStore: false,
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
-      supportsStrictMode: false,
-      maxTokensField: "max_tokens",
-      thinkingFormat: "deepseek",
-    });
+    for (const id of ["moonshotai/kimi-k2", "moonshotai.kimi-k2.5", "moonshotai-kimi-k2-5"]) {
+      expect(buildCompat(id)).toEqual({
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsStrictMode: false,
+        maxTokensField: "max_tokens",
+        thinkingFormat: "deepseek",
+      });
+    }
   });
 
   it("adds cacheControlFormat for anthropic-prefixed models", () => {
@@ -142,6 +144,8 @@ describe("shouldSuppressReasoningContent", () => {
   it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
     expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
     expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+    expect(shouldSuppressReasoningContent("moonshotai.kimi-k2.5")).toBe(true);
+    expect(shouldSuppressReasoningContent("moonshotai-kimi-k2-5")).toBe(true);
     expect(shouldSuppressReasoningContent("custom-route/kimi-k2.6")).toBe(true);
   });
 
@@ -302,6 +306,51 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.api).toBe("openai-completions");
     expect(result.models[0]?.thinkingLevelMap).toBeUndefined();
     expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off"]);
+  });
+
+  it("exposes only high thinking for Bedrock-backed Kimi routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: { mode: "chat", litellm_provider: "bedrock", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "moonshotai.kimi-k2.5",
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: null, max: null },
+      compat: expect.objectContaining({
+        thinkingFormat: "deepseek",
+        supportsReasoningEffort: false,
+        stripReasoningControls: true,
+      }),
+    });
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["high"]);
+  });
+
+  it("keeps native Moonshot aliases configurable even when they look Bedrock-shaped", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "moonshotai.kimi-k2.5",
+            model_info: { mode: "chat", litellm_provider: "moonshot", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.compat).not.toHaveProperty("stripReasoningControls");
+    expect(supportedThinkingLevels(result.models[0]!)).toEqual(["off", "high"]);
   });
 
   it("normalizes boolean Kimi /model/info reasoning to off and high", async () => {

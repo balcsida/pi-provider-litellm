@@ -12,9 +12,18 @@ export type LiteLLMRuntimeAuth = {
 
 type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl">;
 
-export type DiscoveredModel = {
-  [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
-}[LiteLLMApi];
+export type LiteLLMOpenAICompletionsCompat = NonNullable<Model<"openai-completions">["compat"]> & {
+  stripReasoningControls?: boolean;
+};
+
+type DiscoveredOpenAICompletionsModel = Omit<DiscoveredModelFor<"openai-completions">, "compat"> & {
+  compat?: LiteLLMOpenAICompletionsCompat;
+};
+
+export type DiscoveredModel =
+  | DiscoveredOpenAICompletionsModel
+  | DiscoveredModelFor<"openai-responses">
+  | DiscoveredModelFor<"anthropic-messages">;
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];

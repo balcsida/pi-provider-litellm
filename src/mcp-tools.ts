@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -9,6 +10,8 @@ const CALL_TIMEOUT_MS = 30_000;
 const MCP_RETRY_DELAY_MS = 350;
 const MCP_RETRY_ATTEMPTS = 1;
 const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const MAX_TOOL_NAME_LENGTH = 64;
+const TOOL_NAME_HASH_LENGTH = 8;
 
 interface McpExecutionResult {
   text: string;
@@ -188,6 +191,14 @@ function sanitizeName(name: string): string {
   return sanitized || "tool";
 }
 
+function buildPiToolName(serverName: string, toolName: string, forceHash = false): string {
+  const name = `mcp_${sanitizeName(serverName)}_${sanitizeName(toolName)}`;
+  if (!forceHash && name.length <= MAX_TOOL_NAME_LENGTH) return name;
+
+  const hash = createHash("sha256").update(`${serverName}\0${toolName}`).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
+  return `${name.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
+}
+
 function buildParameters(inputSchema: Record<string, unknown>): TSchema {
   const properties = inputSchema.properties as Record<string, unknown> | undefined;
   if (!properties || typeof properties !== "object") {
@@ -213,13 +224,18 @@ export async function createMcpToolDefinitions(
     signal,
   );
 
+  const normalizedNameCounts = new Map<string, number>();
+  for (const mcpTool of tools) {
+    const normalizedName = buildPiToolName(mcpTool.server_name, mcpTool.name);
+    normalizedNameCounts.set(normalizedName, (normalizedNameCounts.get(normalizedName) ?? 0) + 1);
+  }
+
   return tools.map((mcpTool) => {
-    const safeServer = sanitizeName(mcpTool.server_name);
-    const safeTool = sanitizeName(mcpTool.name);
     const parameters = buildParameters(mcpTool.input_schema);
+    const normalizedName = buildPiToolName(mcpTool.server_name, mcpTool.name);
 
     return defineTool({
-      name: `mcp_${safeServer}_${safeTool}`,
+      name: buildPiToolName(mcpTool.server_name, mcpTool.name, normalizedNameCounts.get(normalizedName)! > 1),
       label: `${mcpTool.server_name}: ${mcpTool.name}`,
       description: `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       promptSnippet: `${mcpTool.description} via ${mcpTool.server_name} MCP server`,

@@ -419,7 +419,6 @@ describe("extension startup", () => {
       include_reasoning: false,
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
-      thinking: { type: "disabled" },
     });
   });
 

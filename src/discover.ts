@@ -8,6 +8,7 @@ import type {
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
+  LiteLLMOpenAICompletionsCompat,
   ModelInfoEntry,
   ModelInfoResponse,
   ModelsListEntry,
@@ -97,11 +98,16 @@ function selectApi(
 // the `cacheControlFormat: "anthropic"` flag, pi never relays cache_control
 // markers through the proxy, so prompt caching silently no-ops on Claude models.
 const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
-const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
+const MOONSHOT_MODEL_PATTERN = /^(moonshotai[./_-]|moonshot[./_-]|kimi[-/])/i;
+const BEDROCK_ADAPTERS = new Set(["bedrock", "bedrock_converse"]);
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
 
 export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
+}
+
+function isBedrockAdapter(litellmProvider: string | undefined): boolean {
+  return litellmProvider != null && BEDROCK_ADAPTERS.has(litellmProvider.trim().toLowerCase());
 }
 
 export function shouldSuppressReasoningContent(modelId: string): boolean {
@@ -247,10 +253,7 @@ const ALWAYS_THINKING_LEVEL_MAP: ThinkingLevelMap = {
   ...BOOLEAN_THINKING_LEVEL_MAP,
 };
 
-type ReasoningCompat = Pick<
-  NonNullable<Model<"openai-completions">["compat"]>,
-  "thinkingFormat" | "supportsReasoningEffort"
->;
+type ReasoningCompat = Pick<LiteLLMOpenAICompletionsCompat, "thinkingFormat" | "supportsReasoningEffort">;
 
 type ReasoningSignal = boolean | undefined;
 
@@ -270,8 +273,13 @@ function routeSupportsReasoning(routeSignal: ReasoningSignal, catalogModel: Mode
   return catalogModel?.reasoning === true;
 }
 
-function buildThinkingLevelMap(modelId: string, catalogModel: Model<Api> | undefined): ThinkingLevelMap | undefined {
+function buildThinkingLevelMap(
+  modelId: string,
+  catalogModel: Model<Api> | undefined,
+  stripReasoningControls = false,
+): ThinkingLevelMap | undefined {
   if (!catalogModel?.reasoning) return undefined;
+  if (stripReasoningControls) return ALWAYS_THINKING_LEVEL_MAP;
   if (catalogModel.thinkingLevelMap) {
     return isMoonshotRoute(modelId, catalogModel) && getReasoningCompat(catalogModel)?.thinkingFormat === "deepseek"
       ? { ...ALWAYS_THINKING_LEVEL_MAP, ...catalogModel.thinkingLevelMap }
@@ -286,6 +294,7 @@ function applyReasoningPolicy(
   catalogModel: Model<Api> | undefined,
   routeSignal: ReasoningSignal = catalogModel?.reasoning,
   effortCapabilities?: { xhigh?: boolean; max?: boolean },
+  stripReasoningControls = false,
 ): void {
   if (model.api === "anthropic-messages") {
     model.reasoning = routeSignal === false ? false : routeSignal === true || catalogModel?.reasoning === true;
@@ -308,12 +317,19 @@ function applyReasoningPolicy(
     delete model.thinkingLevelMap;
     return;
   }
-  const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel);
+  const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
   if (thinkingLevelMap) model.thinkingLevelMap = thinkingLevelMap;
   else delete model.thinkingLevelMap;
 
-  const reasoningCompat = model.api === "openai-completions" ? getReasoningCompat(catalogModel) : undefined;
-  if (reasoningCompat) model.compat = { ...(model.compat ?? {}), ...reasoningCompat };
+  if (model.api !== "openai-completions") return;
+  const reasoningCompat = getReasoningCompat(catalogModel);
+  if (reasoningCompat || stripReasoningControls) {
+    model.compat = {
+      ...(model.compat ?? {}),
+      ...reasoningCompat,
+      ...(stripReasoningControls ? { stripReasoningControls: true } : {}),
+    };
+  }
 }
 
 function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -521,10 +537,16 @@ function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
     api,
     compat: buildCompat(id, catalogModel, api),
   };
-  applyReasoningPolicy(model, catalogModel, info.supports_reasoning, {
-    xhigh: info.supports_xhigh_reasoning_effort,
-    max: info.supports_max_reasoning_effort,
-  });
+  applyReasoningPolicy(
+    model,
+    catalogModel,
+    info.supports_reasoning,
+    {
+      xhigh: info.supports_xhigh_reasoning_effort,
+      max: info.supports_max_reasoning_effort,
+    },
+    isBedrockAdapter(info.litellm_provider) && isMoonshotRoute(id, catalogModel),
+  );
   return model;
 }
 
