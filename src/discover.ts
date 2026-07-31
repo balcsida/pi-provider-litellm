@@ -293,7 +293,7 @@ function applyReasoningPolicy(
     Partial<Pick<DiscoveredModel, "reasoning" | "thinkingLevelMap">>,
   catalogModel: Model<Api> | undefined,
   routeSignal: ReasoningSignal = catalogModel?.reasoning,
-  effortCapabilities?: { xhigh?: boolean; max?: boolean },
+  effortCapabilities?: { xhigh?: boolean | null; max?: boolean | null },
   stripReasoningControls = false,
 ): void {
   if (model.api === "anthropic-messages") {
@@ -318,8 +318,18 @@ function applyReasoningPolicy(
     return;
   }
   const thinkingLevelMap = buildThinkingLevelMap(model.id, catalogModel, stripReasoningControls);
-  if (thinkingLevelMap) model.thinkingLevelMap = thinkingLevelMap;
-  else delete model.thinkingLevelMap;
+  const hasExtendedEffortMetadata = effortCapabilities?.xhigh != null || effortCapabilities?.max != null;
+  if (thinkingLevelMap) {
+    model.thinkingLevelMap = hasExtendedEffortMetadata
+      ? {
+          ...thinkingLevelMap,
+          xhigh: effortCapabilities?.xhigh === true ? "xhigh" : null,
+          max: effortCapabilities?.max === true ? "max" : null,
+        }
+      : thinkingLevelMap;
+  } else {
+    delete model.thinkingLevelMap;
+  }
 
   if (model.api !== "openai-completions") return;
   const reasoningCompat = getReasoningCompat(catalogModel);
