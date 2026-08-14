@@ -1,3 +1,5 @@
+
+
 # pi-provider-litellm
 
 LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.81.0+ is required.
@@ -117,6 +119,8 @@ Provider fields:
 | `enabled` | `true` | Set `false` to skip an alias |
 
 `/login litellm` and Google ADC token auth remain scoped to the default `litellm` provider. Aliases use their configured `apiKey` or manually stored auth entries matching the alias name.
+
+> 💡 **Tip:** For Anthropic-backed aliases, include `cacheControlFormat: "anthropic"` in your provider configuration so Pi correctly forwards prompt-cache markers through the LiteLLM proxy.
 
 ### Optional LiteLLM features
 
