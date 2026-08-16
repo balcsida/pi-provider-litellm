@@ -2,7 +2,7 @@
 
 LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.81.0+ is required.
 
-Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
+Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata; `supports_*_reasoning_effort` flags map to Pi thinking levels), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
 ## Install
 
@@ -31,6 +31,8 @@ npm run clean && npm run build
 </details>
 
 ## Configure
+
+Base URLs must use HTTPS. Plain `http://` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`).
 
 ### Option A — interactive login
 
@@ -222,7 +224,7 @@ The published npm package should contain only `dist`, `README.md`, and `LICENSE`
 
 ## Release
 
-Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, runs the checks, builds `dist`, verifies the package tarball, publishes to npm with provenance, and creates a GitHub release.
+Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow verifies the tag's SSH signature against `.github/release-allowed-signers`, installs from the lockfile, runs the checks, builds `dist`, verifies the package tarball, publishes to npm with provenance, and creates a GitHub release.
 
 Before tagging a release, keep `package.json` and `package-lock.json` versions in sync and verify the dry-run package contents.
 
@@ -238,6 +240,7 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 |---|---|
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
+| "LiteLLM base URL must use HTTPS except for loopback hosts" | Remote proxies require an `https://` base URL; `http://` works only for `localhost`, `127.0.0.1`, or `[::1]` |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
