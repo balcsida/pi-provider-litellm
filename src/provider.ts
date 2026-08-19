@@ -1,7 +1,16 @@
-import { type Credential, createProvider, type Model, type Provider, type ProviderAuth } from "@earendil-works/pi-ai";
+import {
+  type Credential,
+  createProvider,
+  type Model,
+  type Provider,
+  type ProviderAuth,
+  type RefreshModelsContext,
+} from "@earendil-works/pi-ai";
 import { openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { enrichCachedModel } from "./discover.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi } from "./types.js";
+
+type ModelStore = RefreshModelsContext["store"];
 
 export type LiteLLMProviderOptions = {
   id: string;
@@ -45,10 +54,18 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   if (!refreshModels) return provider;
   return {
     ...provider,
-    refreshModels: (context) =>
-      refreshModels({
-        ...context,
-        stored: context.stored && { ...context.stored, models: context.stored.models.map(enrichCachedModel) },
-      }),
+    refreshModels: (context) => refreshModels({ ...context, store: enrichingStore(context.store) }),
+  };
+}
+
+/** Re-enriches the cached catalog on read so stale entries gain metadata later releases know about. */
+function enrichingStore(store: ModelStore): ModelStore {
+  return {
+    read: async () => {
+      const entry = await store.read();
+      return entry && { ...entry, models: entry.models.map(enrichCachedModel) };
+    },
+    write: (entry) => store.write(entry),
+    delete: () => store.delete(),
   };
 }
