@@ -1,14 +1,8 @@
-import type {
-  Api,
-  Credential,
-  Model,
-  ModelsPublication,
-  ProviderAuth,
-  RefreshModelsContext,
-} from "@earendil-works/pi-ai";
+import type { Api, Credential, Model, ProviderAuth, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult } from "../src/types.js";
+import { createModelStore, type TestModelStore } from "./test-helpers.js";
 
 const apiSpies = vi.hoisted(() => ({ completions: vi.fn(), responses: vi.fn() }));
 vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
@@ -41,21 +35,14 @@ function native(id: string): Model<"openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
 
-type TestRefreshContext = RefreshModelsContext & { publications: ModelsPublication[] };
+type TestRefreshContext = RefreshModelsContext & { store: TestModelStore };
 
 function context(initial: readonly Model<Api>[] | undefined, allowNetwork: boolean): TestRefreshContext {
-  const publications: ModelsPublication[] = [];
   return {
-    stored: initial ? { models: initial, checkedAt: 1 } : undefined,
+    store: createModelStore(initial),
     allowNetwork,
     credential,
     signal: new AbortController().signal,
-    publish: vi.fn(async (publication) => {
-      publications.push(publication);
-      publication.update?.();
-      return true;
-    }),
-    publications,
   };
 }
 
@@ -179,7 +166,7 @@ describe("createLiteLLMProvider", () => {
     await value.refreshModels?.(refreshContext);
 
     expect(value.getModels()).toEqual([native("fresh")]);
-    expect(refreshContext.publications.at(-1)?.persist).toEqual({
+    expect(refreshContext.store.entry).toEqual({
       models: [native("fresh")],
       checkedAt: expect.any(Number),
     });
@@ -208,7 +195,7 @@ describe("createLiteLLMProvider", () => {
     await expect(value.refreshModels?.(refreshContext)).rejects.toThrow("rejected");
 
     expect(value.getModels()).toEqual([native("old")]);
-    expect(refreshContext.publications.every((publication) => publication.persist === undefined)).toBe(true);
+    expect(refreshContext.store.entry?.models).toEqual([native("old")]);
   });
 
   it("retains previous models when discovery is aborted", async () => {
@@ -223,7 +210,7 @@ describe("createLiteLLMProvider", () => {
     await value.refreshModels?.({ ...refreshContext, signal: abort.signal });
 
     expect(value.getModels()).toEqual([native("old")]);
-    expect(refreshContext.publications.every((publication) => publication.persist === undefined)).toBe(true);
+    expect(refreshContext.store.entry?.models).toEqual([native("old")]);
   });
 
   it("routes Responses models through the Responses API", async () => {

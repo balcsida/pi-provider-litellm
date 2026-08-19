@@ -1,16 +1,9 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AuthInteraction,
-  Credential,
-  ModelsStore,
-  ModelsStoreEntry,
-  Provider,
-  RefreshModelsContext,
-} from "@earendil-works/pi-ai";
+import type { Api, AuthInteraction, Credential, Model, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension } from "./test-helpers.js";
+import { createModelStore, createPi, loadExtension, type TestModelStore } from "./test-helpers.js";
 
 const ENV_KEYS = [
   "LITELLM_BASE_URL",
@@ -70,33 +63,13 @@ async function readHelperCount(agentDir: string): Promise<number> {
   }
 }
 
-function createModelsStore(models: readonly any[] = []): ModelsStore {
-  let entry: ModelsStoreEntry | undefined = models.length > 0 ? { models, checkedAt: Date.now() } : undefined;
-  return {
-    read: async () => entry,
-    write: async (_providerId, next) => {
-      entry = next;
-    },
-    delete: async () => {
-      entry = undefined;
-    },
-  };
-}
-
 async function refreshProvider(
   provider: Provider,
-  options: Omit<RefreshModelsContext, "publish" | "signal" | "stored"> & { store?: ModelsStore },
+  options: Omit<RefreshModelsContext, "signal" | "store"> & { store?: TestModelStore },
 ): Promise<readonly unknown[]> {
-  const store = options.store ?? createModelsStore();
   await provider.refreshModels?.({
     ...options,
-    stored: await store.read(provider.id),
-    publish: async ({ persist, update }) => {
-      if (persist === null) await store.delete(provider.id);
-      else if (persist) await store.write(provider.id, persist);
-      update?.();
-      return true;
-    },
+    store: options.store ?? createModelStore(),
     signal: new AbortController().signal,
   });
   return provider.getModels();
@@ -111,14 +84,12 @@ function resolveApiKey(provider: Provider, credential?: Extract<Credential, { ty
       env: async (name) => process.env[name],
       fileExists: async () => false,
     },
-    signal: TEST_SIGNAL,
   });
 }
 
 function resolveApiKeyWithEnv(provider: Provider, env: Record<string, string | undefined>) {
   return provider.auth.apiKey?.resolve({
     ctx: { env: async (name) => env[name], fileExists: async () => false },
-    signal: TEST_SIGNAL,
   });
 }
 
@@ -259,7 +230,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
     await extension(pi);
-    const stored = {
+    const stored: Model<Api> = {
       id: "stored-model",
       name: "Stored model",
       provider: "litellm",
@@ -275,7 +246,7 @@ describe("extension startup", () => {
     await refreshProvider(pi.providers[0]!, {
       allowNetwork: false,
       credential: { type: "api_key", key: "sk-test" },
-      store: createModelsStore([stored]),
+      store: createModelStore([stored]),
     });
 
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
@@ -296,7 +267,7 @@ describe("extension startup", () => {
     await refreshProvider(pi.providers[0]!, {
       allowNetwork: false,
       credential: { type: "api_key", key: "sk-test" },
-      store: createModelsStore(),
+      store: createModelStore(),
     });
 
     expect(await readFile(cachePath, "utf8")).toBe(legacyCache);
@@ -327,7 +298,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
     await extension(pi);
-    const stored = {
+    const stored: Model<Api> = {
       id: "stored-model",
       name: "Stored model",
       provider: "litellm",
@@ -348,7 +319,7 @@ describe("extension startup", () => {
           key: "sk-test",
           env: { LITELLM_BASE_URL: "https://litellm.example.com" },
         },
-        store: createModelsStore([stored]),
+        store: createModelStore([stored]),
       }),
     ).rejects.toThrow("unexpected URL");
 
@@ -426,7 +397,7 @@ describe("extension startup", () => {
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
     await extension(pi);
-    const store = createModelsStore([
+    const store = createModelStore([
       {
         id: "stored-model",
         name: "Stored model",
@@ -560,7 +531,6 @@ describe("extension startup", () => {
 
     const result = await pi.providers[0]?.auth.apiKey?.check?.({
       ctx: { env: async (name) => process.env[name], fileExists: async () => false },
-      signal: TEST_SIGNAL,
     });
 
     expect(result).toEqual({ type: "api_key", source: "LITELLM_API_KEY_HELPER" });
@@ -1002,7 +972,6 @@ describe("extension startup", () => {
       loginOAuth(pi.providers[0]!, {
         onPrompt: async (prompt) => (prompt.placeholder ? "https://litellm.example.com" : ""),
         onDeviceCode: () => undefined,
-        signal: new AbortController().signal,
       }),
     ).resolves.toMatchObject({ access: "opaque-cli-token" });
     expect(polls).toBe(3);
@@ -1363,7 +1332,6 @@ describe("extension startup", () => {
           if (options.message.includes("Select login method")) return "2";
           return "";
         },
-        signal: new AbortController().signal,
       }),
     ).rejects.toThrow("SSO token is required");
   });

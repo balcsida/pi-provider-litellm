@@ -1,6 +1,23 @@
 import { readFileSync } from "node:fs";
-import type { Provider } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelsStoreEntry, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { vi } from "vitest";
+
+/** In-memory ProviderModelsStore whose current entry stays readable for assertions. */
+export type TestModelStore = RefreshModelsContext["store"] & { entry: ModelsStoreEntry | undefined };
+
+export function createModelStore(models?: readonly Model<Api>[]): TestModelStore {
+  const store: TestModelStore = {
+    entry: models ? { models, checkedAt: 1 } : undefined,
+    read: async () => store.entry,
+    write: async (entry) => {
+      store.entry = entry;
+    },
+    delete: async () => {
+      store.entry = undefined;
+    },
+  };
+  return store;
+}
 
 type TestCommandContext = {
   ui: {

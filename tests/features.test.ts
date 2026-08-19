@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
+import { createModelStore, createPi, loadExtension, type TestPi } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -16,8 +16,7 @@ function jsonResponse(status: number, body: unknown): Response {
 async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSignal): Promise<void> {
   await pi.providers[0]?.refreshModels?.({
     allowNetwork,
-    stored: undefined,
-    publish: async () => true,
+    store: createModelStore(),
     credential: {
       type: "api_key",
       key: process.env.LITELLM_API_KEY ?? "sk-test",
@@ -64,7 +63,6 @@ describe("feature parity", () => {
     await expect(
       pi.providers[0]?.auth.apiKey?.check?.({
         ctx: { env: async (name) => process.env[name], fileExists: async () => false },
-        signal: new AbortController().signal,
       }),
     ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
   });
