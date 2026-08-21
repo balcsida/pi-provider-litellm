@@ -18,6 +18,7 @@ import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-age
 import { setupLiteLLMCostTracking } from "./cost.js";
 import {
   discoverModels,
+  enrichCachedModel,
   isGpt55Model,
   isMoonshotModel,
   normalizeBaseUrl,
@@ -1191,11 +1192,35 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp)}/v1` };
   }
 
+  // A seed that returns [] leaves the provider registered with ZERO models, and an
+  // unattended session never recovers: Pi's startup refresh already ran with
+  // allowNetwork:false before this provider persisted anything, /model restores the
+  // cached catalog but the session's default model is never re-resolved, so every
+  // prompt fails with "No API key found for the selected model". Falling back to the
+  // persisted catalog keeps cold starts working exactly like the refresh restore
+  // path would — same store, same enrichment — just early enough for default-model
+  // resolution. Repro for the gap this closes: LITELLM_DISCOVERY_TIMEOUT_MS=1.
+  async function seedFromStore(definition: ProviderDefinition): Promise<Model<LiteLLMApi>[]> {
+    try {
+      const raw = await readFile(join(getAgentDir(), "models-store.json"), "utf8");
+      const entry = (JSON.parse(raw) as Record<string, { models?: Model<LiteLLMApi>[] } | undefined>)[definition.name];
+      const models = (entry?.models ?? []).filter((model) => model?.provider === definition.name);
+      if (models.length > 0 && isVerboseDiscovery()) {
+        process.stderr.write(
+          `LiteLLM (${definition.name}): startup discovery unavailable; seeded ${models.length} models from the persisted catalog.\n`,
+        );
+      }
+      return models.map((model) => enrichCachedModel(model) as Model<LiteLLMApi>);
+    } catch {
+      return [];
+    }
+  }
+
   // Pi's startup path only ever refreshes with allowNetwork:false, and it returns before the
   // network phase, so the provider would stay empty until the user opens /model. Discover here
   // instead, the way 1.x did, and hand the catalog over as the provider's baseline models.
   async function seedModels(definition: ProviderDefinition): Promise<Model<LiteLLMApi>[]> {
-    if (discoveryDisabledReason() || isHostOffline()) return [];
+    if (discoveryDisabledReason() || isHostOffline()) return seedFromStore(definition);
     try {
       const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
       // executeHelpers:false — activation must never run the user's key helper as a side effect,
@@ -1210,7 +1235,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           `LiteLLM (${definition.name}): startup discovery skipped (${error instanceof Error ? error.message : String(error)}).\n`,
         );
       }
-      return [];
+      return seedFromStore(definition);
     }
   }
 
