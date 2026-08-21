@@ -159,4 +159,46 @@ describe("cold start discovery (issue #137)", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("falls back to the persisted models-store catalog when startup discovery is unavailable", async () => {
+    // A cold start whose discovery misses (slow daemon vs the seed budget, or a
+    // daemon that is briefly down) must not leave the provider empty when Pi's
+    // models-store.json still holds the last known catalog: an empty seed means
+    // the session's default model never resolves and never recovers unattended.
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-store-"));
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: { type: "api_key", key: "stored-key", env: { LITELLM_BASE_URL: "https://stored.example.com" } },
+      }),
+    );
+    const storedModel = {
+      id: "gpt-4o",
+      name: "gpt-4o (no metadata)",
+      api: "openai-completions",
+      provider: "litellm",
+      baseUrl: "https://stored.example.com/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    };
+    await writeFile(
+      join(agentDir, "models-store.json"),
+      JSON.stringify({
+        litellm: {
+          checkedAt: 0,
+          models: [storedModel, { ...storedModel, id: "foreign", provider: "someone-else" }],
+        },
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("daemon unreachable");
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["gpt-4o"]);
+  });
 });
