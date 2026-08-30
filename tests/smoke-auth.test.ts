@@ -11,6 +11,49 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+type SmokeRequest = { url: string; body?: unknown; auth?: string };
+
+function adminToken(premiumUser: boolean): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "HS256" })}.${encode({ premium_user: premiumUser })}.signature`;
+}
+
+function mockEnterpriseProxy(premiumUser: boolean, requests: SmokeRequest[] = []): SmokeRequest[] {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    const headers = init?.headers as Record<string, string> | undefined;
+    const auth = headers?.Authorization;
+    requests.push({
+      url,
+      auth,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+
+    if (url.endsWith("/v2/login")) {
+      return jsonResponse(200, { token: adminToken(premiumUser) });
+    }
+    if (url.endsWith("/v1/models")) {
+      if (!auth) return jsonResponse(401, { error: "missing token" });
+      if (auth === "Bearer bad-smoke-key") return jsonResponse(403, { error: "bad token" });
+      return jsonResponse(200, { data: [{ id: "vidaimock-openai" }] });
+    }
+    if (url.endsWith("/key/generate") && auth === "Bearer sk-master") {
+      return jsonResponse(200, { key: "sk-virtual" });
+    }
+    if (url.endsWith("/key/generate") && auth === "Bearer sk-virtual") {
+      return jsonResponse(403, { error: "admin only" });
+    }
+    if (url.endsWith("/model/info")) {
+      return jsonResponse(200, { data: [{ model_name: "vidaimock-openai", model_info: { mode: "chat" } }] });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
+    }
+    throw new Error(`unexpected URL: ${url}`);
+  });
+  return requests;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
@@ -78,37 +121,28 @@ describe("runAuthSmoke", () => {
     });
   });
 
-  it("checks virtual-key auth, enterprise admin-route enforcement, and SSO login", async () => {
-    const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      const headers = init?.headers as Record<string, string> | undefined;
-      const auth = headers?.Authorization;
-      requests.push({
-        url,
-        auth,
-        body: init?.body ? JSON.parse(String(init.body)) : undefined,
-      });
+  it("rejects a configured but inactive Enterprise license", async () => {
+    const requests = mockEnterpriseProxy(false);
 
-      if (url.endsWith("/v1/models")) {
-        if (!auth) return jsonResponse(401, { error: "missing token" });
-        if (auth === "Bearer bad-smoke-key") return jsonResponse(403, { error: "bad token" });
-        return jsonResponse(200, { data: [{ id: "vidaimock-openai" }] });
-      }
-      if (url.endsWith("/key/generate") && auth === "Bearer sk-master") {
-        return jsonResponse(200, { key: "sk-virtual" });
-      }
-      if (url.endsWith("/key/generate") && auth === "Bearer sk-virtual") {
-        return jsonResponse(403, { error: "admin only" });
-      }
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "vidaimock-openai", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/v1/chat/completions")) {
-        return jsonResponse(200, { choices: [{ message: { content: "pong" } }] });
-      }
-      throw new Error(`unexpected URL: ${url}`);
+    await expect(
+      runAuthSmoke({
+        baseUrl: "http://127.0.0.1:4000",
+        masterKey: "sk-master",
+        modelId: "vidaimock-openai",
+        timeoutMs: 1000,
+        enterprise: true,
+      }),
+    ).rejects.toThrow("LiteLLM Enterprise license is not active");
+
+    expect(requests).toContainEqual({
+      url: "http://127.0.0.1:4000/v2/login",
+      body: { username: "admin", password: "sk-master" },
+      auth: undefined,
     });
+  });
+
+  it("checks virtual-key auth, enterprise admin-route enforcement, and SSO login", async () => {
+    const requests = mockEnterpriseProxy(true);
 
     const result = await runAuthSmoke({
       baseUrl: "http://127.0.0.1:4000",
@@ -124,6 +158,7 @@ describe("runAuthSmoke", () => {
         "missing-token",
         "master-key-models",
         "master-key-chat",
+        "enterprise-license",
         "bad-token",
         "virtual-key-chat",
         "enterprise-admin-route",

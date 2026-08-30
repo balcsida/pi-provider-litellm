@@ -58,6 +58,18 @@ function isAuthFailure(status: number): boolean {
   return status === 401 || status === 403;
 }
 
+function isPremiumUserToken(token: unknown): boolean {
+  if (typeof token !== "string") return false;
+  const [, payload] = token.split(".");
+  if (!payload) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { premium_user?: unknown };
+    return claims.premium_user === true;
+  } catch {
+    return false;
+  }
+}
+
 async function expectAuthFailure(label: string, response: Response): Promise<void> {
   if (!isAuthFailure(response.status)) {
     throw new Error(`${label} should reject auth, got ${response.status}`);
@@ -223,6 +235,20 @@ export async function runAuthSmoke(options: AuthSmokeOptions): Promise<AuthSmoke
   checks.push("master-key-chat");
 
   if (options.enterprise) {
+    const loginResponse = await fetchWithTimeout(
+      `${baseUrl}/v2/login`,
+      {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "admin", password: options.masterKey }),
+      },
+      timeoutMs,
+    );
+    await expectOk("enterprise license /v2/login", loginResponse);
+    const login = (await loginResponse.json()) as { token?: unknown };
+    if (!isPremiumUserToken(login.token)) throw new Error("LiteLLM Enterprise license is not active");
+    checks.push("enterprise-license");
+
     await expectAuthFailure("bad-token /v1/models", await fetchModels(baseUrl, BAD_SMOKE_KEY, timeoutMs));
     checks.push("bad-token");
 
