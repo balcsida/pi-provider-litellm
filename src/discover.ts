@@ -240,8 +240,9 @@ function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalo
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
+  const lookupProvider = adapterProvider ?? customProvider;
   const candidateResolutions = candidates.map((candidate) => {
-    const resolved = resolveCatalogModel(candidate, adapterProvider);
+    const resolved = resolveCatalogModel(candidate, lookupProvider);
     const separator = candidate.indexOf("/");
     // A recognized prefix remains independent provider-identity evidence even
     // when adapter-first lookup resolves the same model in the adapter catalog.

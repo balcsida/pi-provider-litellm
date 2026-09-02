@@ -621,6 +621,14 @@ describe("discoverModels via /model/info", () => {
         model_info: { mode: "chat" },
       }),
     ).toMatchObject({ provider: "openai", catalogModelId: "gpt-4o" });
+
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "custom-provider-unqualified",
+        litellm_params: { model: "gpt-4o", custom_llm_provider: "openai" },
+        model_info: { mode: "chat" },
+      }),
+    ).toMatchObject({ provider: "openai", catalogModelId: "gpt-4o" });
   });
 
   it("includes resolved and unresolved known provider prefixes in conflict checks", () => {
