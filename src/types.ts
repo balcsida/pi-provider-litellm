@@ -2,7 +2,7 @@ import type { Model } from "@earendil-works/pi-ai";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
-export type LiteLLMApi = "openai-completions" | "openai-responses";
+export type LiteLLMApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 
 export type LiteLLMRuntimeAuth = {
   baseUrl: string;
@@ -11,10 +11,17 @@ export type LiteLLMRuntimeAuth = {
   allowInsecureHttp?: boolean;
 };
 
-export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
-  api?: LiteLLMApi;
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl"> & {
   suppressReasoningContent?: boolean;
 };
+
+export type DiscoveredModel = {
+  [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
+}[LiteLLMApi];
+
+export type ModelProtocol = {
+  [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
+}[LiteLLMApi];
 
 export type LiteLLMModel = Model<LiteLLMApi> & { suppressReasoningContent?: boolean };
 

@@ -73,7 +73,7 @@ export async function createCompatibilityHarness(): Promise<{
     defineTool: (tool: unknown) => tool,
     getAgentDir: () => "/tmp/pi-provider-litellm-compat",
   }));
-  vi.stubEnv("LITELLM_BASE_URL", "https://litellm.example.com");
+  vi.stubEnv("LITELLM_BASE_URL", "https://proxy.example.com");
   vi.stubEnv("LITELLM_API_KEY", "sk-test");
 
   const requests: RequestBody[] = [];
@@ -166,7 +166,7 @@ export async function createCompatibilityHarness(): Promise<{
   const credential = {
     type: "api_key" as const,
     key: "sk-test",
-    env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+    env: { LITELLM_BASE_URL: "https://proxy.example.com" },
   };
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(provider.id, async () => credential);

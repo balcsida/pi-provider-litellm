@@ -30,7 +30,7 @@
 
 ## LiteLLM Request Hooks
 
-- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
+- `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider` matches the default `litellm` provider or a registered alias from `litellm.providers`.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
 - `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
@@ -38,8 +38,8 @@
 ## Compatibility Rules
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
-- Kimi/Moonshot-style models are handled in `buildCompat()`; keep regression tests with model discovery changes.
-- Anthropic-backed aliases need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM.
+- Kimi/Moonshot-style compatibility is split across `completionsCompat()` and `responsesCompat()`; `buildCompat()` is retained only as the completions alias. Keep regression tests with model discovery changes.
+- Anthropic-backed aliases using `openai-completions` need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM; `openai-responses` uses its native prompt cache fields instead.
 
 ## Smoke And CI
 

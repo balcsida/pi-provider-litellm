@@ -4,11 +4,13 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type {
   DiscoveredModel,
+  DiscoveredModelFor,
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
   ModelInfoEntry,
   ModelInfoResponse,
+  ModelProtocol,
   ModelsListEntry,
   ModelsListResponse,
 } from "./types.js";
@@ -96,7 +98,13 @@ export function emitsThinkTags(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+export function responsesCompat(modelId: string): DiscoveredModelFor<"openai-responses">["compat"] {
+  // Pi's Responses transport has no cacheControlFormat setting and uses
+  // Responses-native prompt-cache fields instead of Anthropic cache_control markers.
+  return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
+}
+
+export function completionsCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -110,6 +118,16 @@ export function buildCompat(modelId: string): DiscoveredModel["compat"] {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
+}
+
+export function modelProtocol(modelId: string, mode?: string | null): ModelProtocol {
+  return isResponsesMode(mode)
+    ? { api: "openai-responses", compat: responsesCompat(modelId) }
+    : { api: "openai-completions", compat: completionsCompat(modelId) };
+}
+
+export function buildCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
+  return completionsCompat(modelId);
 }
 
 function toKnownProvider(provider: string | undefined): BuiltinProvider | undefined {
@@ -273,9 +291,8 @@ function mapFromModelInfo(
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id, responsesMode ? "responses" : "chat"),
     ...(suppressReasoningContent ? { suppressReasoningContent: true } : {}),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
   };
 }
 
@@ -299,7 +316,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
   };
 }
 
@@ -316,7 +333,7 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
   };
 }
 

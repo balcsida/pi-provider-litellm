@@ -20,7 +20,7 @@ afterEach(() => {
 
 async function startHook() {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-skills-"));
-  process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+  process.env.LITELLM_BASE_URL = "https://proxy.example.com";
   process.env.LITELLM_API_KEY = "sk-test";
   const pi = createPi();
   await (await loadExtension(agentDir))(pi);
@@ -59,13 +59,36 @@ describe("before_agent_start skills hook", () => {
         {
           modelRegistry: {
             getProviderAuth: async () => ({
-              auth: { apiKey: "sk-test", baseUrl: "https://litellm.example.com/v1" },
+              auth: { apiKey: "sk-test" },
+              env: { LITELLM_BASE_URL: "https://skills.example.com/v1" },
             }),
             getProvider: () => undefined,
           },
         },
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("rejects placeholder runtime hosts before sending credentials", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    const beforeAgentStart = await startHook();
+    vi.mocked(globalThis.fetch).mockClear();
+
+    await expect(
+      beforeAgentStart?.(
+        { systemPrompt: "Base prompt" },
+        {
+          modelRegistry: {
+            getProviderAuth: async () => ({
+              auth: { apiKey: "sk-test" },
+              env: { LITELLM_BASE_URL: "https://litellm.example.com/v1" },
+            }),
+            getProvider: () => undefined,
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("reports the reason on stderr under LITELLM_VERBOSE_DISCOVERY", async () => {
