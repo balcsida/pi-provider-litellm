@@ -1,7 +1,8 @@
-import type { Api, AssistantMessage, AuthContext, Model, Models, Provider } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, AuthContext, Model, Models, Provider, StreamOptions } from "@earendil-works/pi-ai";
 import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { afterEach, vi } from "vitest";
+import type { ModelInfoEntry } from "../../src/types.js";
 import { useHermeticEnv } from "../test-helpers.js";
 
 // Every provider-compat suite imports this module, and each drives real discovery through
@@ -60,7 +61,39 @@ export function successfulResponse(text: string): Chunk[] {
   ];
 }
 
-export async function createCompatibilityHarness(): Promise<{
+// Responses-shaped equivalent. A `mode: responses` deployment is served on
+// `/responses`, which speaks a different event vocabulary from chat completions,
+// so a chat-shaped reply cannot stand in for it — without this the harness threw
+// on the URL and no Responses request could be inspected at all.
+export function successfulResponsesReply(text: string): Chunk[] {
+  const message = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }],
+  };
+  return [
+    sseChunk({ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } }),
+    sseChunk({ type: "response.output_item.added", output_index: 0, item: { ...message, content: [] } }),
+    sseChunk({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text }),
+    sseChunk({ type: "response.output_item.done", output_index: 0, item: message }),
+    sseChunk({
+      type: "response.completed",
+      response: {
+        id: "resp_1",
+        status: "completed",
+        output: [message],
+        usage: { input_tokens: 1, output_tokens: 1, input_tokens_details: { cached_tokens: 0 } },
+      },
+    }),
+  ];
+}
+
+export async function createCompatibilityHarness(
+  discoveryRows?: readonly ModelInfoEntry[],
+  options: { modelsStore?: InMemoryModelsStore; allowNetwork?: boolean } = {},
+): Promise<{
   provider: Provider;
   models: Models;
   model: Model<Api>;
@@ -86,7 +119,7 @@ export async function createCompatibilityHarness(): Promise<{
     const isForeignRequest = new URL(url).origin === "https://foreign.example.com";
     if (url.endsWith("/model/info")) {
       return Response.json({
-        data: [
+        data: discoveryRows ?? [
           {
             model_name: "local-model",
             model_info: {
@@ -105,11 +138,15 @@ export async function createCompatibilityHarness(): Promise<{
       });
     }
     if (url.endsWith("/mcp-rest/tools/list")) return Response.json([]);
-    if (!url.endsWith("/chat/completions")) throw new Error(`unexpected URL: ${url}`);
+    // Both request surfaces are served so a `mode: responses` deployment can be
+    // exercised on the wire, not only through discovery.
+    if (!url.endsWith("/chat/completions") && !url.endsWith("/responses")) {
+      throw new Error(`unexpected URL: ${url}`);
+    }
 
     const requestBody = (request ? await request.clone().json() : JSON.parse(String(init?.body))) as RequestBody;
     (isForeignRequest ? foreignRequests : requests).push(requestBody);
-    const history = JSON.stringify(requestBody.messages);
+    const history = JSON.stringify(requestBody.messages ?? requestBody.input ?? []);
     if (history.includes("Overflow the context")) {
       return Response.json(
         {
@@ -154,12 +191,17 @@ export async function createCompatibilityHarness(): Promise<{
   });
 
   const providers: Provider[] = [];
+  const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   const extension = (await import("../../src/index.js")).default;
   await extension({
     registerProvider: (provider: Provider) => providers.push(provider),
     registerCommand: () => undefined,
     registerTool: () => undefined,
-    on: () => undefined,
+    on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+      const registered = handlers.get(event) ?? [];
+      registered.push(handler);
+      handlers.set(event, registered);
+    },
   } as never);
   const provider = providers[0];
   if (!provider?.refreshModels) throw new Error("LiteLLM provider was not registered");
@@ -174,8 +216,36 @@ export async function createCompatibilityHarness(): Promise<{
     env: async (name) => process.env[name],
     fileExists: async () => false,
   };
-  const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
-  models.setProvider(provider);
+  const models = createModels({
+    credentials,
+    modelsStore: options.modelsStore ?? new InMemoryModelsStore(),
+    authContext,
+  });
+  const beforeRequestHandlers = handlers.get("before_provider_request") ?? [];
+  const composePayloadHook =
+    (original: StreamOptions["onPayload"]): StreamOptions["onPayload"] =>
+    async (payload, payloadModel) => {
+      let current = (await original?.(payload, payloadModel)) ?? payload;
+      for (const handler of beforeRequestHandlers) {
+        const next = await handler({ type: "before_provider_request", payload: current }, { model: payloadModel });
+        current = next ?? current;
+      }
+      return current;
+    };
+  const hookProvider: Provider = {
+    ...provider,
+    stream: (streamModel, context, options?: StreamOptions) =>
+      provider.stream(streamModel, context, {
+        ...options,
+        onPayload: composePayloadHook(options?.onPayload),
+      } as never),
+    streamSimple: (streamModel, context, options) =>
+      provider.streamSimple(streamModel, context, {
+        ...options,
+        onPayload: composePayloadHook(options?.onPayload),
+      }),
+  };
+  models.setProvider(hookProvider);
   const foreignModel = {
     id: "foreign-model",
     name: "Foreign model",
@@ -196,10 +266,11 @@ export async function createCompatibilityHarness(): Promise<{
       api: openAICompletionsApi(),
     }),
   );
-  const refresh = await models.refresh({ allowNetwork: true });
+  const refresh = await models.refresh({ allowNetwork: options.allowNetwork ?? true });
   const refreshError = refresh.errors.get(provider.id);
   if (refreshError) throw refreshError;
-  const model = models.getModel(provider.id, "local-model");
+  const discoveredId = discoveryRows?.[0]?.model_name ?? "local-model";
+  const model = models.getModel(provider.id, discoveredId);
   if (!model) throw new Error("LiteLLM model was not discovered");
 
   return { provider, models, model, foreignModel, requests, foreignRequests, respond };

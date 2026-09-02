@@ -72,6 +72,7 @@ export const allowedSourceModules = [
   "index",
   "litellm",
   "mcp-tools",
+  "model-groups",
   "provider",
   "skills",
   "types",

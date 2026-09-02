@@ -11,12 +11,35 @@ export type LiteLLMRuntimeAuth = {
   allowInsecureHttp?: boolean;
 };
 
+export interface LiteLLMModelPolicy {
+  // Moonshot/Kimi's strict schema requires assistant tool calls to carry string
+  // content. Discovery enables this outbound rewrite only from deployment evidence.
+  normalizeStrictToolMessages: boolean;
+  // Moonshot routes can inline reasoning as `<think>` text in the visible
+  // answer. Whether to unwrap it is a per-model conclusion discovery reaches
+  // from deployment evidence, carried here so the `message_end` hook does not
+  // re-derive it from the route name.
+  normalizeThinkTags: boolean;
+  // Hide duplicate visible reasoning only for deployment-evidenced Kimi routes
+  // that do not use an always-thinking generation.
+  suppressReasoningVisibility: boolean;
+  // Gemini-backed deployments require lowercase effort values. Discovery carries
+  // this evidence so the request hook does not infer a backend from the route name.
+  normalizeGeminiReasoningEffort?: boolean;
+}
+
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
   api?: LiteLLMApi;
-  suppressReasoningContent?: boolean;
+  litellmPolicy?: LiteLLMModelPolicy;
+  // Persist the deployment's accepted Responses reasoning carrier so cached
+  // models cannot regain catalog-derived selectors without the same evidence.
+  litellmResponsesReasoningControl?: true;
 };
 
-export type LiteLLMModel = Model<LiteLLMApi> & { suppressReasoningContent?: boolean };
+export type LiteLLMModel = Model<LiteLLMApi> & {
+  litellmPolicy?: LiteLLMModelPolicy;
+  litellmResponsesReasoningControl?: true;
+};
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];
@@ -35,9 +58,14 @@ export interface ModelInfoEntry {
   litellm_params?: {
     model?: string;
     custom_llm_provider?: string;
+    allowed_openai_params?: string[];
   };
   model_info?: {
+    id?: string;
     mode?: string | null;
+    litellm_provider?: string;
+    base_model?: string;
+    supported_openai_params?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;

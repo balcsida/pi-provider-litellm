@@ -469,7 +469,7 @@ describe("extension startup", () => {
     });
   });
 
-  it("applies LiteLLM request compatibility hooks to configured provider aliases", async () => {
+  it("does not infer reasoning controls from configured provider alias route text", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(
       join(agentDir, "settings.json"),
@@ -485,7 +485,7 @@ describe("extension startup", () => {
       }),
       "utf8",
     );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "openai-key";
     process.env.LITELLM_ANTHROPIC_API_KEY = "anthropic-key";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
@@ -495,44 +495,11 @@ describe("extension startup", () => {
     await extension(pi);
 
     const result = await pi.handlers.get("before_provider_request")?.[0]?.(
-      {
-        payload: {
-          model: "kimi-k2.6",
-          messages: [{ role: "tool", tool_call_id: "call_1", content: [{ type: "text", text: "tool output" }] }],
-        },
-      },
-      { model: { provider: "litellm-anthropic", id: "kimi-k2.6" } },
+      { payload: { model: "kimi-k2.6" } },
+      { model: { provider: "litellm-anthropic", id: "kimi-k2.6", api: "openai-completions" } },
     );
 
-    expect(result).toMatchObject({
-      messages: [{ role: "tool", tool_call_id: "call_1", content: "tool output" }],
-    });
-
-    const moonshotRoute = await pi.handlers.get("before_provider_request")?.[0]?.(
-      { payload: { messages: [] } },
-      {
-        model: {
-          provider: "litellm-anthropic",
-          id: "k3-prod",
-          api: "openai-completions",
-          suppressReasoningContent: true,
-        },
-      },
-    );
-    const otherRoute = await pi.handlers.get("before_provider_request")?.[0]?.(
-      { payload: { messages: [] } },
-      {
-        model: { provider: "litellm", id: "k3-prod", api: "openai-completions" },
-      },
-    );
-
-    expect(moonshotRoute).toEqual({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-    });
-    expect(otherRoute).toBeUndefined();
+    expect(result).toBeUndefined();
   });
 
   it("returns a native API-key credential without discovery side effects", async () => {
@@ -557,11 +524,16 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
 
-    const prompt = vi.fn().mockResolvedValueOnce(" http://127.0.0.1:4000/v1 ").mockResolvedValueOnce(" sk-login ");
+    const prompt = vi
+      .fn()
+      .mockResolvedValueOnce("enter-a-different-url")
+      .mockResolvedValueOnce(" http://127.0.0.1:4000/v1 ")
+      .mockResolvedValueOnce(" sk-login ");
     const credential = await pi.providers[0]?.auth.apiKey?.login?.(interaction(prompt));
 
-    expect(prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "text" }));
-    expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "secret" }));
+    expect(prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "select" }));
+    expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "text" }));
+    expect(prompt).toHaveBeenNthCalledWith(3, expect.objectContaining({ type: "secret" }));
     expect(seenRequests).toEqual([]);
     expect(credential).toEqual({
       type: "api_key",
@@ -788,7 +760,13 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
     const credential = await pi.providers[0]?.auth.apiKey?.login?.(
-      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+      interaction(
+        vi
+          .fn()
+          .mockResolvedValueOnce("enter-a-different-url")
+          .mockResolvedValueOnce("https://litellm.example.com")
+          .mockResolvedValueOnce(`!${helperPath}`),
+      ),
     );
     const firstAuth = await resolveApiKey(pi.providers[0]!, credential);
     const secondAuth = await resolveApiKey(pi.providers[0]!, credential);
@@ -810,7 +788,13 @@ describe("extension startup", () => {
     const pi = createPi();
     await extension(pi);
     const credential = await pi.providers[0]?.auth.apiKey?.login?.(
-      interaction(vi.fn().mockResolvedValueOnce("https://litellm.example.com").mockResolvedValueOnce(`!${helperPath}`)),
+      interaction(
+        vi
+          .fn()
+          .mockResolvedValueOnce("enter-a-different-url")
+          .mockResolvedValueOnce("https://litellm.example.com")
+          .mockResolvedValueOnce(`!${helperPath}`),
+      ),
     );
 
     expect((await resolveApiKey(pi.providers[0]!, credential))?.auth.apiKey).toBe("opaque-first");
