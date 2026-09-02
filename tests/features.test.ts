@@ -679,7 +679,7 @@ describe("feature parity", () => {
         { reason: "reload" },
         {
           sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
+            getSessionId: () => "123e4567-e89b-12d3-a456-426614174000",
           },
         },
       );
@@ -693,7 +693,7 @@ describe("feature parity", () => {
     expect(updated).toBeUndefined();
   });
 
-  it("injects LiteLLM session ids into LiteLLM provider requests", async () => {
+  it("omits session metadata before session_start and then uses the canonical Pi session id", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -728,30 +728,40 @@ describe("feature parity", () => {
     const pi = createPi();
     await extension(pi);
 
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const model = { provider: "litellm", id: "kimi-k2.6", suppressReasoningContent: true };
+    const beforeSessionStart = beforeRequest?.({ payload: { messages: [] } }, { model });
+    expect(beforeSessionStart).toMatchObject({
+      messages: [],
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+    });
+    expect(beforeSessionStart).not.toHaveProperty("litellm_session_id");
+
+    const getSessionFile = vi.fn(() => join(agentDir, "run-0", "session.jsonl"));
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
       await handler(
         { reason: "reload" },
         {
           sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
+            getSessionId: () => "canonical-pi-session-id",
+            getSessionFile,
           },
         },
       );
     }
 
-    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.(
-      { payload: { messages: [] } },
-      { model: { provider: "litellm", id: "kimi-k2.6", suppressReasoningContent: true } },
-    );
+    const updated = beforeRequest?.({ payload: { messages: [] } }, { model });
     expect(updated).toMatchObject({
       messages: [],
       include_reasoning: false,
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
-      litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
+      litellm_session_id: "canonical-pi-session-id",
     });
+    expect(getSessionFile).not.toHaveBeenCalled();
   });
 
   it("does not send thinking for Kimi OpenAI completions requests", async () => {
@@ -1392,7 +1402,7 @@ describe("feature parity", () => {
 
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+      await handler({ reason: "start" }, { sessionManager: { getSessionId: () => "test-session" } });
     }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];

@@ -17,7 +17,6 @@ import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-age
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
-import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
@@ -1279,7 +1278,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let sessionId: string | undefined;
   pi.on("session_start", (_event, ctx) => {
-    sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+    sessionId = ctx.sessionManager.getSessionId();
   });
 
   pi.on("before_provider_request", (event, ctx) => {

@@ -766,7 +766,7 @@ describe("extension startup", () => {
     vi.mocked(Date.now).mockReturnValue(loginTime + 25 * 60 * 60 * 1000);
     const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
     for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
+      await handler({ reason: "start" }, { sessionManager: { getSessionId: () => "test-session" } });
     }
 
     expect(callCount).toBe(0);
