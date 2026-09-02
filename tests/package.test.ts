@@ -243,7 +243,7 @@ describe("pi package compatibility", () => {
                 name: cachedModelId,
                 provider: "litellm",
                 api: "openai-completions",
-                baseUrl: "https://litellm.example.com/v1",
+                baseUrl: "https://proxy.invalid/v1",
                 reasoning: false,
                 input: ["text"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -314,8 +314,8 @@ describe("pi package compatibility", () => {
       with: { type: "json" },
     });
 
-    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.0");
-    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.0");
+    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.83.0");
+    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.83.0");
     expect(manifest.peerDependenciesMeta).toEqual({
       "@earendil-works/pi-ai": { optional: true },
       "@earendil-works/pi-coding-agent": { optional: true },
@@ -327,7 +327,7 @@ describe("pi package compatibility", () => {
   it("documents native Provider model persistence and the extension-only package surface", async () => {
     const readme = await readFile(join(repoRoot, "README.md"), "utf8");
 
-    expect(readme).toContain("Pi 0.81.0+ is required");
+    expect(readme).toContain("Pi 0.83.0+ is required");
     expect(readme).toMatch(/source\s+entrypoint has been smoke-tested with Pi 0\.81\.0/);
     expect(readme).toMatch(/no\s+longer exposes that library import/);
     expect(readme).toContain("native Provider");
@@ -335,6 +335,12 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("With `/login litellm`, choose `Sign in with an API key` directly");
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
+    expect(readme).toContain("### Model host enforcement");
+    expect(readme).toContain("Pi uses its global implementation, bypassing this extension's host guard");
+    expect(readme).toContain("Path prefixes are part of the root and remain case-sensitive");
+    expect(readme).toContain("Different concrete backends conflict even when they belong to the same provider");
+    expect(readme).toContain("An unresolved routing or base-model identity denies native Messages");
+    expect(readme).toContain("conflicts with a provider-qualified model ID instead receives ` (incomplete metadata)`");
     expect(readme).not.toContain("/litellm-refresh");
     expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
     expect(readme).not.toContain("older than 24 hours");
