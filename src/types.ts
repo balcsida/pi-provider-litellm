@@ -15,7 +15,9 @@ export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "pro
 
 export type DiscoveredModel = {
   [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
-}[LiteLLMApi];
+}[LiteLLMApi] & { suppressReasoningContent?: boolean };
+
+export type LiteLLMModel = Model<LiteLLMApi> & { suppressReasoningContent?: boolean };
 
 export type ModelProtocol = {
   [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
@@ -37,6 +39,7 @@ export interface ModelInfoEntry {
   model_name?: string;
   litellm_params?: {
     model?: string;
+    custom_llm_provider?: string;
     allowed_openai_params?: string[];
   };
   model_info?: {

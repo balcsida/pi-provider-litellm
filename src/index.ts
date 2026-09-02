@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
-  Api,
   ApiKeyCredential,
   AssistantMessage,
   AuthInteraction,
@@ -16,19 +15,13 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import {
-  discoverModels,
-  isGpt55Model,
-  isMoonshotModel,
-  normalizeBaseUrl,
-  shouldSuppressReasoningContent,
-} from "./discover.js";
+import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { LiteLLMApi, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
+import type { LiteLLMApi, LiteLLMModel, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -892,10 +885,11 @@ const GEMINI_MODEL_PATTERN = /(?:^|[-_/.:])gemini(?=$|[-_/.:])/i;
 
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
-  modelId: string | undefined,
-  api: Api | undefined,
+  model: LiteLLMModel | undefined,
   sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
+  const modelId = model?.id;
+  const api = model?.api;
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
     if (payload[key] !== undefined) return;
@@ -903,7 +897,7 @@ function prepareLiteLLMRequestPayload(
     next[key] = value;
   };
 
-  if ((api === undefined || api === "openai-completions") && modelId && shouldSuppressReasoningContent(modelId)) {
+  if ((api === undefined || api === "openai-completions") && model?.suppressReasoningContent === true) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
       if (key !== "thinking") update(key, value);
     }
@@ -992,7 +986,7 @@ function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !shouldSuppressReasoningContent(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || !emitsThinkTags(message.model)) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1316,12 +1310,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("before_provider_request", (event, ctx) => {
     if (ctx.model?.provider !== PROVIDER_NAME) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
-    return prepareLiteLLMRequestPayload(
-      event.payload as Record<string, unknown>,
-      ctx.model?.id,
-      ctx.model?.api,
-      sessionId,
-    );
+    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel, sessionId);
   });
 
   // Skills enrichment is best-effort: an expired credential or an unreachable proxy must not

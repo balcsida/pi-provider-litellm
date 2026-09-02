@@ -738,7 +738,10 @@ describe("feature parity", () => {
     }
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.({ payload: { messages: [] } }, { model: { provider: "litellm", id: "kimi-k2.6" } });
+    const updated = beforeRequest?.(
+      { payload: { messages: [] } },
+      { model: { provider: "litellm", id: "kimi-k2.6", suppressReasoningContent: true } },
+    );
     expect(updated).toMatchObject({
       messages: [],
       include_reasoning: false,
@@ -775,7 +778,14 @@ describe("feature parity", () => {
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
       { payload: { messages: [] } },
-      { model: { provider: "litellm", id: "kimi-k3", api: "openai-completions" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k3",
+          api: "openai-completions",
+          suppressReasoningContent: true,
+        },
+      },
     );
     expect(updated).toEqual({
       messages: [],
@@ -783,6 +793,42 @@ describe("feature parity", () => {
       reasoning_content: false,
       merge_reasoning_content_in_choices: true,
     });
+  });
+
+  it("uses backend suppression evidence instead of a public route alias", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const suppressed = beforeRequest?.(
+      { payload: { messages: [] } },
+      {
+        model: {
+          provider: "litellm",
+          id: "neutral-route",
+          api: "openai-completions",
+          suppressReasoningContent: true,
+        },
+      },
+    );
+    expect(suppressed).toMatchObject({
+      include_reasoning: false,
+      reasoning_content: false,
+      merge_reasoning_content_in_choices: true,
+    });
+
+    const untouched = beforeRequest?.(
+      { payload: { messages: [] } },
+      { model: { provider: "litellm", id: "kimi-looking-route", api: "openai-completions" } },
+    );
+    expect(untouched).toBeUndefined();
   });
 
   it("leaves synthetic Messages payloads unchanged", async () => {
@@ -804,7 +850,14 @@ describe("feature parity", () => {
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const updated = beforeRequest?.(
       { payload },
-      { model: { provider: "litellm", id: "kimi-k2.6", api: "anthropic-messages" } },
+      {
+        model: {
+          provider: "litellm",
+          id: "kimi-k2.6",
+          api: "anthropic-messages",
+          suppressReasoningContent: true,
+        },
+      },
     );
 
     expect(updated).toBeUndefined();
@@ -861,7 +914,7 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      { model: { provider: "litellm", id: "kimi-k3", suppressReasoningContent: true } },
     );
 
     expect(updated).toEqual({
@@ -910,7 +963,7 @@ describe("feature parity", () => {
           ],
         },
       },
-      { model: { provider: "litellm", id: "kimi-k3" } },
+      { model: { provider: "litellm", id: "kimi-k3", suppressReasoningContent: true } },
     );
 
     expect(updated).toEqual({
@@ -952,7 +1005,10 @@ describe("feature parity", () => {
       { role: "tool", tool_call_id: "call_1", content: "tool output" },
     ];
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.({ payload: { messages } }, { model: { provider: "litellm", id: "kimi-k3" } });
+    const updated = beforeRequest?.(
+      { payload: { messages } },
+      { model: { provider: "litellm", id: "kimi-k3", suppressReasoningContent: true } },
+    );
 
     expect(updated?.messages).toBe(messages);
   });

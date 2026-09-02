@@ -8,6 +8,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   type MessagesBackendCompat,
+  normalizedMode,
   reduceModelGroup,
   type SemanticFamily,
   wireString,
@@ -57,7 +58,39 @@ export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
 }
 
-export function shouldSuppressReasoningContent(modelId: string): boolean {
+const MOONSHOT_ROUTE_PROVIDERS = new Set(["moonshot", "moonshotai"]);
+
+function isMoonshotRoute(entry: ModelInfoEntry): boolean {
+  const params = entry.litellm_params;
+  if (!params) return false;
+  const model = wireString(params.model)?.trim();
+  if (!model) return false;
+  const providers = [
+    wireString(params.custom_llm_provider)?.trim(),
+    model.includes("/") ? model.split("/", 1)[0] : undefined,
+  ].filter((provider): provider is string => Boolean(provider));
+  return providers.length > 0 && providers.every((provider) => MOONSHOT_ROUTE_PROVIDERS.has(provider.toLowerCase()));
+}
+
+function shouldSuppressRouteReasoningContent(modelId: string, entry: ModelInfoEntry): boolean {
+  const routeModelId = wireString(entry.litellm_params?.model);
+  return (
+    isMoonshotRoute(entry) &&
+    !FORCED_THINKING_MODEL_PATTERN.test(modelId) &&
+    !(routeModelId && FORCED_THINKING_MODEL_PATTERN.test(routeModelId))
+  );
+}
+
+function aggregateSuppressionEvidence(evidence: Iterable<boolean>): boolean {
+  let hasEvidence = false;
+  for (const suppress of evidence) {
+    hasEvidence = true;
+    if (!suppress) return false;
+  }
+  return hasEvidence;
+}
+
+export function emitsThinkTags(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
@@ -370,6 +403,11 @@ function mapFromModelInfoGroup(
   const reduced = reduceModelGroup(entries, resolveModelInfoCatalog);
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
+  const suppressReasoningContent = aggregateSuppressionEvidence(
+    entries
+      .filter((entry) => normalizedMode(entry.model_info?.mode) !== "unsupported")
+      .map((entry) => shouldSuppressRouteReasoningContent(reduced.id, entry)),
+  );
   const shared = {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
@@ -381,6 +419,7 @@ function mapFromModelInfoGroup(
     cost: reduced.cost,
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
+    ...(suppressReasoningContent ? { suppressReasoningContent: true } : {}),
   };
   if (reduced.api === "anthropic-messages") {
     return { ...shared, api: "anthropic-messages", compat: reduced.messagesCompat };

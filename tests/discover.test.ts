@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
   discoverModels,
+  emitsThinkTags,
   normalizeBaseUrl,
   resolveModelInfoCatalog,
-  shouldSuppressReasoningContent,
 } from "../src/discover.js";
 
 // Deterministic endpoint mock: only the listed suffixes are served and every
@@ -141,18 +141,18 @@ describe("buildCompat", () => {
   });
 });
 
-describe("shouldSuppressReasoningContent", () => {
-  it("suppresses separate reasoning streams for Kimi/Moonshot aliases", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2.6")).toBe(true);
-    expect(shouldSuppressReasoningContent("moonshotai/kimi-k2")).toBe(true);
+describe("emitsThinkTags", () => {
+  it("recognizes Kimi/Moonshot aliases", () => {
+    expect(emitsThinkTags("kimi-k2.6")).toBe(true);
+    expect(emitsThinkTags("moonshotai/kimi-k2")).toBe(true);
   });
 
-  it("does not suppress explicit forced-thinking models", () => {
-    expect(shouldSuppressReasoningContent("kimi-k2-thinking")).toBe(false);
+  it("excludes explicit forced-thinking models", () => {
+    expect(emitsThinkTags("kimi-k2-thinking")).toBe(false);
   });
 
-  it("does not suppress unrelated models", () => {
-    expect(shouldSuppressReasoningContent("openai/gpt-4o")).toBe(false);
+  it("excludes unrelated models", () => {
+    expect(emitsThinkTags("openai/gpt-4o")).toBe(false);
   });
 });
 
@@ -291,6 +291,51 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: null, max: "max" });
+  });
+
+  it.each([
+    ["Moonshot backend behind a neutral alias", "k3-prod", "moonshot/kimi-k2.6", true],
+    ["non-Moonshot backend behind a Kimi alias", "kimi-prod", "openai/gpt-4o", false],
+    ["forced-thinking Moonshot backend", "k3-prod", "moonshot/kimi-k2-thinking", false],
+  ] as const)("derives suppression from the %s", async (_name, route, backend, suppress) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: route,
+            litellm_params: { model: backend },
+            model_info: { id: "deployment", mode: "chat" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
+  it("withholds suppression from mixed Moonshot and non-Moonshot routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "kimi-prod",
+            litellm_params: { model: "moonshot/kimi-k2.6" },
+            model_info: { id: "moonshot", mode: "chat" },
+          },
+          {
+            model_name: "kimi-prod",
+            litellm_params: { model: "openai/gpt-4o" },
+            model_info: { id: "openai", mode: "chat" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
   });
 
   it("uses catalog costs when /model/info identifies an Anthropic backend", async () => {

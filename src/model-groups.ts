@@ -74,7 +74,7 @@ function wireBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
+export function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = wireString(mode)?.trim();
   // An unreadable mode is not evidence that the deployment is non-chat. Treating it
