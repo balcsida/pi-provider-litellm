@@ -2,13 +2,12 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CACHE_TTL_MS, getGcloudToken, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { CACHE_TTL_MS, getGcloudToken, hasGcloudAdcCredentials, resetGcloudTokenCache } from "../src/gcloud-token.js";
+import { useHermeticEnv } from "./test-helpers.js";
 
-const ORIGINAL_ENV = {
-  APPDATA: process.env.APPDATA,
-  GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-  HOME: process.env.HOME,
-};
+// HOME is included because getAdcPath falls back to it when GOOGLE_APPLICATION_CREDENTIALS
+// is unset, which this suite exercises.
+useHermeticEnv(["HOME"]);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -25,15 +24,60 @@ async function writeAdcFile(body: unknown): Promise<string> {
 }
 
 afterEach(() => {
-  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
   resetGcloudTokenCache();
   vi.restoreAllMocks();
 });
 
 describe("getGcloudToken", () => {
+  it("detects authorized_user ADC without exchanging a token", async () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "client-id",
+      client_secret: "client-secret",
+      refresh_token: "refresh-token",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(hasGcloudAdcCredentials()).resolves.toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["client_id", ""],
+    ["client_id", " \t"],
+    ["client_secret", ""],
+    ["client_secret", " \n"],
+    ["refresh_token", ""],
+    ["refresh_token", " \r\n"],
+  ] as const)("rejects a blank %s in authorized_user ADC", async (field, value) => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "client-id",
+      client_secret: "client-secret",
+      refresh_token: "refresh-token",
+      [field]: value,
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(hasGcloudAdcCredentials()).resolves.toBe(false);
+    await expect(getGcloudToken()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("authorized_user ADC has invalid or incomplete required fields"),
+    );
+    expect(warnSpy.mock.calls.flat().join(" ")).not.toContain("Unknown credential type");
+  });
+
+  it("preserves the unknown-type diagnostic for unsupported credential types", async () => {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({ type: "external_account" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(getGcloudToken()).resolves.toBeNull();
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown credential type: external_account"));
+  });
+
   it("exchanges authorized_user ADC credentials for an access token", async () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = await writeAdcFile({
       type: "authorized_user",
@@ -77,6 +121,54 @@ describe("getGcloudToken", () => {
 
     vi.mocked(Date.now).mockReturnValue(now + CACHE_TTL_MS + 1);
     await expect(getGcloudToken()).resolves.toBe("second-token");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses the cached token while the credential is unchanged", async () => {
+    const adcPath = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "stable-client",
+      client_secret: "stable-secret",
+      refresh_token: "stable-refresh",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { access_token: "cached" }));
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-10T12:00:00.000Z").getTime());
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+
+    await expect(getGcloudToken()).resolves.toBe("cached");
+    await expect(getGcloudToken()).resolves.toBe("cached");
+    await expect(getGcloudToken()).resolves.toBe("cached");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Re-running `gcloud auth application-default login` rewrites refresh_token and leaves
+  // client_id and client_secret alone, so the cache identity must react to that field on its
+  // own. Rotating all three at once cannot show this.
+  it("invalidates the cached token when only the refresh token rotates", async () => {
+    const before = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "same-client",
+      client_secret: "same-secret",
+      refresh_token: "refresh-one",
+    });
+    const after = await writeAdcFile({
+      type: "authorized_user",
+      client_id: "same-client",
+      client_secret: "same-secret",
+      refresh_token: "refresh-two",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "before-relogin" }))
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: "after-relogin" }));
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-10T12:00:00.000Z").getTime());
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = before;
+    await expect(getGcloudToken()).resolves.toBe("before-relogin");
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = after;
+    await expect(getGcloudToken()).resolves.toBe("after-relogin");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

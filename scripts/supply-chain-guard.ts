@@ -7,7 +7,29 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const installLifecycleScripts = new Set(["preinstall", "install", "postinstall", "prepare"]);
+// Hooks npm runs automatically during install, packing or publishing. Any of these can
+// mutate the tarball or the consumer's machine without the guard observing it, because
+// the guard inspects `npm pack --dry-run --ignore-scripts`. `prepare` has automatic
+// pre/post siblings that also run on `npm ci`, and the release workflow runs `npm ci`
+// before publishing, so a `postprepare` would execute with repository write access
+// before the tarball is built. `prepublishOnly` is deliberately absent: it runs only on
+// an explicit publish and is this package's verification command, not a mutation hook.
+const automaticLifecycleScripts = new Set([
+  "preinstall",
+  "install",
+  "postinstall",
+  "predependencies",
+  "dependencies",
+  "postdependencies",
+  "preprepare",
+  "prepare",
+  "postprepare",
+  "prepack",
+  "postpack",
+  "prepublish",
+  "publish",
+  "postpublish",
+]);
 const runtimeDependencySections = new Set([
   "dependencies",
   "optionalDependencies",
@@ -40,11 +62,26 @@ const nonRegistrySpecPrefixes = [
   "./",
 ];
 
+// The published source modules, listed explicitly so adding one is a reviewed
+// decision. `tests/supply-chain-guard.test.ts` asserts this list matches `src/`
+// exactly, so an entry for a module this branch does not ship fails the suite.
+export const allowedSourceModules = [
+  "cost",
+  "discover",
+  "gcloud-token",
+  "index",
+  "litellm",
+  "mcp-tools",
+  "provider",
+  "skills",
+  "types",
+];
+
 const allowedPackageFiles = [
   /^package\.json$/,
   /^README\.md$/,
   /^LICENSE$/,
-  /^dist\/(?:cache|cost|discover|gcloud-token|gcloud-token-cli|index|litellm|mcp-tools|provider|skills|types)\.(?:js|d\.ts)$/,
+  new RegExp(`^src/(?:${allowedSourceModules.join("|")})\\.ts$`),
 ];
 
 export interface SupplyChainGuardOptions {
@@ -128,8 +165,8 @@ function checkDependencyValue(section: string, value: unknown, errors: string[],
 
 function checkManifest(manifest: PackageManifest, errors: string[]): void {
   for (const [name] of Object.entries(manifest.scripts ?? {})) {
-    if (installLifecycleScripts.has(name)) {
-      errors.push(`package.json: scripts.${name} runs during package installation`);
+    if (automaticLifecycleScripts.has(name)) {
+      errors.push(`package.json: scripts.${name} runs automatically during install, pack, or publish`);
     }
   }
 
@@ -169,7 +206,22 @@ async function listPackageFiles(root: string, errors: string[]): Promise<string[
   }
 }
 
+// The allowlist bounds what may ship; this bounds what must. Without it a `files` typo
+// publishes a package with no source at all and the guard reports success, because it
+// only ever inspects files that are present. Only the source modules are checked: npm
+// includes package.json, README and LICENSE whatever `files` says, so asserting those
+// could never fail.
+function checkRequiredPackageFiles(files: string[], errors: string[]): void {
+  const present = new Set(files);
+  for (const module of allowedSourceModules) {
+    if (!present.has(`src/${module}.ts`)) {
+      errors.push(`npm package: required published file src/${module}.ts is missing`);
+    }
+  }
+}
+
 function checkPackageFiles(files: string[], errors: string[]): void {
+  checkRequiredPackageFiles(files, errors);
   for (const file of files) {
     if (!allowedPackageFiles.some((pattern) => pattern.test(file))) {
       errors.push(`npm package: unexpected published file ${file}`);

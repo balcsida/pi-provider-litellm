@@ -86,8 +86,9 @@ export type AuthFileEntry =
 export interface ResolvedCredentials {
   baseUrl?: string;
   apiKey?: string;
-  apiKeyFingerprint?: string;
   apiKeyConfig?: string;
+  // `apiKey` was minted from Google ADC rather than config, helper, or env.
+  apiKeyFromGcloudAdc?: boolean;
 }
 
 export interface LiteLLMMcpTool {

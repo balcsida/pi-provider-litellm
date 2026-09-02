@@ -20,22 +20,14 @@
     "provider",
     "proxy"
   ],
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
   "files": [
-    "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./src/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/balcsida/pi-provider-litellm/refs/heads/main/assets/pi_litellm_gallery.png"
   },
@@ -48,7 +40,7 @@
     "format": "biome check --write .",
     "test": "vitest --run --dir tests",
     "supply-chain:guard": "tsx scripts/supply-chain-guard.ts",
-    "check": "npm run lint && npm run typecheck && npm test",
+    "check": "npm run lint && npm run typecheck && npm test && npm run supply-chain:guard",
     "prepublishOnly": "npm run check && npm run clean && npm run build && npm run supply-chain:guard"
   },
   "engines": {
@@ -79,6 +71,7 @@
     "@kitlangton/terminal-control": "0.6.0",
     "@types/node": "^26.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "es-module-lexer": "^2.1.0",
     "tsx": "^4.21.0",
     "vitest": "^4.1.7"
   }

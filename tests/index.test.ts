@@ -10,15 +10,9 @@ import type {
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension } from "./test-helpers.js";
+import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
-const ENV_KEYS = [
-  "LITELLM_BASE_URL",
-  "LITELLM_API_KEY",
-  "LITELLM_API_KEY_HELPER",
-  "LITELLM_HEADERS",
-  "LITELLM_OFFLINE",
-  "LITELLM_VERBOSE_DISCOVERY",
+const SUITE_ENV_VARS = [
   "LITELLM_ANTHROPIC_API_KEY",
   "LITELLM_ANTHROPIC_HEADERS",
   "LITELLM_DISCOVERY_TIMEOUT_MS",
@@ -27,8 +21,10 @@ const ENV_KEYS = [
   "GOOGLE_APPLICATION_CREDENTIALS",
   "STORED_LITELLM_KEY",
   "CUSTOM_LITELLM_KEY",
-];
-const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+] as const;
+
+// Suite-specific names beyond the shared managed set.
+useHermeticEnv(SUITE_ENV_VARS);
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -174,11 +170,6 @@ async function loginOAuth(
 }
 
 afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const original = ORIGINAL_ENV.get(key);
-    if (original === undefined) delete process.env[key];
-    else process.env[key] = original;
-  }
   vi.restoreAllMocks();
   vi.resetModules();
 });

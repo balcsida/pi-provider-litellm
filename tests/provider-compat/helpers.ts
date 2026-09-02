@@ -2,6 +2,13 @@ import type { Api, AssistantMessage, AuthContext, Model, Models, Provider } from
 import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { afterEach, vi } from "vitest";
+import { useHermeticEnv } from "../test-helpers.js";
+
+// Every provider-compat suite imports this module, and each drives real discovery through
+// the extension, which reads LITELLM_* from the environment. Registering the hermetic
+// hooks here gives all of them a known-empty environment; without it an ambient
+// LITELLM_OFFLINE or LITELLM_BASE_URL changes what these tests exercise.
+useHermeticEnv();
 
 export const RED_CIRCLE_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nLkAAAAASUVORK5CYII=";

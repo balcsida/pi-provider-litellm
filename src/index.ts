@@ -16,12 +16,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
-import {
-  getGcloudToken,
-  getGcloudTokenCacheKey,
-  getGcloudTokenCommand,
-  isGcloudTokenAuthEnabled,
-} from "./gcloud-token.js";
+import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
@@ -32,6 +27,7 @@ const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
+const GCLOUD_ADC_SOURCE = "gcloud ADC";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
 const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
@@ -351,8 +347,7 @@ async function resolveCredentials(
   const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
   const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
   const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
-  const gcloudCacheKey = useGcloudToken ? ((await getGcloudTokenCacheKey()) ?? undefined) : undefined;
-  const gcloudKey = executeHelpers && gcloudCacheKey ? (await getGcloudToken())?.trim() : undefined;
+  const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
   // higher-precedence credential (saved auth, gcloud token) already won.
   let configuredKey: string | undefined;
@@ -369,11 +364,7 @@ async function resolveCredentials(
   const apiKey = gcloudKey || configuredKey || helperKey || envKey;
 
   let apiKeyConfig: string | undefined;
-  if (gcloudKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (!executeHelpers && gcloudCacheKey) {
-    apiKeyConfig = getGcloudTokenCommand();
-  } else if (configuredKey && definition.apiKeyConfig) {
+  if (configuredKey && definition.apiKeyConfig) {
     apiKeyConfig = definition.apiKeyConfig;
   } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
     apiKeyConfig = definition.apiKeyConfig;
@@ -388,6 +379,7 @@ async function resolveCredentials(
     baseUrl: configuredBase ? normalizeBaseUrl(configuredBase, definition.allowInsecureHttp) : undefined,
     apiKey: apiKey || undefined,
     apiKeyConfig,
+    apiKeyFromGcloudAdc: Boolean(gcloudKey),
   };
 }
 
@@ -775,7 +767,7 @@ async function resolveApiKeyAuth(
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) } : undefined,
-    source: source ?? creds.apiKeyConfig ?? ENV_API_KEY,
+    source: source ?? (creds.apiKeyFromGcloudAdc ? GCLOUD_ADC_SOURCE : undefined) ?? creds.apiKeyConfig ?? ENV_API_KEY,
   };
 }
 
@@ -791,29 +783,28 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
-        const configured = await resolveCredentials(
-          { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
-          { executeHelpers: false },
-        );
-        if (configured.apiKey || configured.apiKeyConfig)
-          return {
-            type: "api_key",
-            source:
-              definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
-                ? "gcloud ADC"
-                : (configured.apiKeyConfig ?? ENV_API_KEY),
-          };
-        if (definition.apiKeyConfig) {
-          const configuredKey = definition.apiKeyConfig.startsWith("!")
-            ? definition.apiKeyConfig
-            : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
-          if (configuredKey) return { type: "api_key", source: definition.apiKeyConfig };
-        }
-        if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER)))
-          return { type: "api_key", source: ENV_API_KEY_HELPER };
-        return definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))
-          ? { type: "api_key", source: ENV_API_KEY }
-          : undefined;
+
+        // Credentials `resolve` would fall back to if ADC cannot mint a token.
+        const fallbackSource = async (): Promise<string | undefined> => {
+          if (definition.apiKeyConfig) {
+            const configuredKey = definition.apiKeyConfig.startsWith("!")
+              ? definition.apiKeyConfig
+              : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
+            if (configuredKey) return definition.apiKeyConfig;
+          }
+          if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER))) return ENV_API_KEY_HELPER;
+          if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))) return ENV_API_KEY;
+          return undefined;
+        };
+
+        // Mirror the precedence in `resolveCredentials`, where ADC outranks the config
+        // key, the helper and the environment key. Whether the refresh token still mints
+        // is only knowable at request time, and this must not make a network call; if it
+        // fails, `resolve` falls back and reports the credential it actually used.
+        if (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled() && (await hasGcloudAdcCredentials()))
+          return { type: "api_key", source: GCLOUD_ADC_SOURCE };
+        const fallback = await fallbackSource();
+        return fallback ? { type: "api_key", source: fallback } : undefined;
       },
       resolve: ({ ctx, credential }) => resolveApiKeyAuth(definition, ctx, credential),
     },

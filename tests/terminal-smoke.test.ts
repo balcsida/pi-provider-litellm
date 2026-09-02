@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const piPath = resolve(repoRoot, "node_modules/.bin/pi");
-const extensionPath = resolve(repoRoot, "dist/index.js");
+const extensionPath = resolve(repoRoot, "src/index.ts");
 const enabled = process.env.LITELLM_TERMINAL_SMOKE === "1";
 const smokeBaseUrl = process.env.LITELLM_BASE_URL ?? "http://127.0.0.1:4000";
 const waitTimeoutMs = 90_000;

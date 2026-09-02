@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parsePushTriggers } from "./workflow-triggers.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -65,7 +66,8 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("Run interactive Pi terminal smoke");
     expect(workflow).toContain("LITELLM_TERMINAL_SMOKE: '1'");
     expect(workflow).toContain("npm test -- tests/terminal-smoke.test.ts");
-    expect(workflow).toContain("./node_modules/.bin/pi -e ./dist/index.js --list-models litellm");
+    expect(workflow).toContain("./node_modules/.bin/pi -e . --list-models litellm");
+    expect(workflow).not.toContain("-e ./dist/index.js");
     expect(workflow).toContain("--provider litellm");
     expect(workflow).toContain('--model "$LITELLM_CLI_SMOKE_MODEL"');
     expect(workflow).toContain("LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude");
@@ -82,11 +84,51 @@ describe("LiteLLM smoke workflow", () => {
   });
 
   it("reuses the package publish gate in CI and release", () => {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
     expect(readCiWorkflow()).toContain("run: npm run prepublishOnly");
+    expect(manifest.scripts.check).toContain("npm run supply-chain:guard");
+    // `npm pack` selects by the `files` manifest, not by what is on disk, so the
+    // post-build run is not there to observe `dist/` existing. It is there to catch a
+    // manifest that re-authorizes `dist`: with `files` listing it, the pre-build run
+    // passes on a fresh checkout that has no `dist/` yet, and only a run after `build`
+    // fails. Pinned as full equality so the ordering cannot be relaxed and
+    // `npm run check` -- CI's only quality gate -- cannot be dropped.
+    expect(manifest.scripts.prepublishOnly).toBe(
+      "npm run check && npm run clean && npm run build && npm run supply-chain:guard",
+    );
     expect(readCiWorkflow()).not.toContain("run: npm pack --dry-run");
-    expect(readReleaseWorkflow()).not.toContain("run: npm run check");
     expect(readReleaseWorkflow()).not.toContain("run: npm pack --dry-run");
+    expect(readReleaseWorkflow()).not.toContain("run: npm run prepublishOnly");
     expect(readReleaseWorkflow()).toContain("run: npm publish --access public --provenance");
+  });
+
+  it("keeps the publish flow tag-only", () => {
+    expect(parsePushTriggers(readReleaseWorkflow())).toEqual({
+      branches: [],
+      tags: ["v*.*.*"],
+    });
+  });
+
+  // `--list-models` also reports models from Pi's own store, so this leg must run against an
+  // agent dir no earlier step has populated, and must prove it discriminates.
+  it("isolates and negative-controls the list-models smoke leg", () => {
+    const workflow = readWorkflow();
+
+    expect(workflow).toContain('list_models_dir="$' + '{{ runner.temp }}/pi-list-models"');
+    expect(workflow).toContain(
+      'PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm',
+    );
+    expect(workflow).toContain('p.pi.extensions=["./src/does-not-exist.ts"]');
+    expect(workflow).toContain("negative control failed: models listed without a loadable entrypoint");
+    // The shared agent dir stays available to the completion legs, which need the login the
+    // terminal smoke performed, but must not be what --list-models reads.
+    expect(workflow).toContain('export PI_CODING_AGENT_DIR="$' + '{{ runner.temp }}/pi-cli-smoke"');
+  });
+
+  it("does not leave a dist build step in the smoke job", () => {
+    expect(readWorkflow()).not.toContain("run: npm run build");
   });
 
   it("runs for path-filtered pull requests", () => {
@@ -202,7 +244,11 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow.slice(initializeStart, terminalStart)).toContain(agentDir);
     expect(workflow.slice(initializeStart, terminalStart)).toContain('mkdir -p "$PI_CODING_AGENT_DIR"');
     expect(workflow.slice(terminalStart, cliStart)).toContain(agentDir);
-    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(agentDir);
+    // The CLI step exports the shared dir inside its script rather than declaring it as step
+    // env, because its --list-models leg deliberately runs against a separate empty dir.
+    expect(workflow.slice(cliStart, dumpLogsStart)).toContain(
+      'export PI_CODING_AGENT_DIR="$' + '{{ runner.temp }}/pi-cli-smoke"',
+    );
     expect(workflow.slice(cliStart)).not.toContain('rm -rf "$PI_CODING_AGENT_DIR"');
   });
 
