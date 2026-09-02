@@ -214,6 +214,31 @@ describe("enrichCachedModel reasoning policy", () => {
     });
   });
 
+  it("denies cached Chat levels when no compatibility metadata proves a carrier", () => {
+    expect(
+      enrichCachedModel(
+        cachedReasoningModel("openai-completions", {
+          thinkingLevelMap: { low: "low", high: "high" },
+        }),
+      ),
+    ).toMatchObject({
+      reasoning: true,
+      thinkingLevelMap: NO_REASONING_LEVELS,
+      compat: { supportsReasoningEffort: false },
+    });
+  });
+
+  it("keeps cached Chat levels when compatibility metadata proves a carrier", () => {
+    expect(
+      enrichCachedModel(
+        cachedReasoningModel("openai-completions", {
+          thinkingLevelMap: { low: "low", high: "high" },
+          compat: { supportsReasoningEffort: true },
+        }),
+      ).thinkingLevelMap,
+    ).toEqual({ low: "low", high: "high" });
+  });
+
   it("keeps Responses cache behavior unchanged with and without explicit control evidence", () => {
     expect(enrichCachedModel(cachedReasoningModel("openai-responses"))).toMatchObject({
       reasoning: true,
@@ -1736,6 +1761,30 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(result.models.filter((m) => m.id === "lemonade/Qwen3.6-35B-A3B-MTP-GGUF-UD-IQ4_NL")).toHaveLength(1);
     // /v1/models was actually queried (the expansion path ran)
     expect(urls.some((u) => u.endsWith("/v1/models"))).toBe(true);
+  });
+
+  it("does not reintroduce a withheld model-info route through wildcard expansion", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "team/*", model_info: { id: "wildcard", mode: "chat" } },
+            { model_name: "blocked/model", model_info: { id: "chat", mode: "chat" } },
+            { model_name: "blocked/model", model_info: { id: "embedding", mode: "embedding" } },
+          ],
+        }),
+      "/v1/models": () =>
+        jsonResponse(200, {
+          data: [
+            { id: "team/expanded", owned_by: "openai" },
+            { id: "blocked/model", owned_by: "openai" },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.map((model) => model.id)).toEqual(["team/expanded"]);
   });
 
   it("never exposes a literal wildcard when /v1/models expansion fails", async () => {

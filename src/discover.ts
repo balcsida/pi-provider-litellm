@@ -200,6 +200,7 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
       vendorCompat: restored.compat,
       catalogLevels: cachedThinkingLevelMap,
       requireChatCarrier: true,
+      allowInferredChatCarrier: false,
       acceptsResponsesReasoningControl: hasResponsesReasoningControl(restored),
     }),
   } as Model<Api>;
@@ -234,6 +235,7 @@ export function enrichCachedModel(input: Model<Api>): Model<Api> {
       vendorCompat: model.compat,
       catalogLevels: catalogModel.thinkingLevelMap,
       requireChatCarrier: true,
+      allowInferredChatCarrier: false,
       acceptsResponsesReasoningControl: hasResponsesReasoningControl(model),
     }),
     input: catalogModel.input,
@@ -799,6 +801,7 @@ export async function discoverModels(
       group.push(entry);
       groups.set(route, group);
     }
+    const modelInfoRoutes = new Set(groups.keys());
     const incompatibleModeRoutes: string[] = [];
     const ambiguousRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
@@ -834,7 +837,7 @@ export async function discoverModels(
           .map(mapFromModelsList)
           .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"));
         const seen = new Set<string>(models.map((m) => m.id));
-        models = [...models, ...expanded.filter((m) => !seen.has(m.id))];
+        models = [...models, ...expanded.filter((m) => !seen.has(m.id) && !modelInfoRoutes.has(m.id))];
       }
     }
     const deduplicated = deduplicateModels(models);

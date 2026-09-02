@@ -326,6 +326,7 @@ export function closeSerializerPolicy(input: {
   semanticLevels?: DiscoveredModel["thinkingLevelMap"];
   catalogLevels?: DiscoveredModel["thinkingLevelMap"];
   requireChatCarrier?: boolean;
+  allowInferredChatCarrier?: boolean;
   acceptsResponsesReasoningControl?: boolean;
   // For callers with no level evidence at all. Distinct from "no candidate map":
   // this states the no-level conclusion explicitly, so a caller spreading the
@@ -340,6 +341,7 @@ export function closeSerializerPolicy(input: {
     semanticLevels,
     catalogLevels,
     requireChatCarrier,
+    allowInferredChatCarrier = true,
     acceptsResponsesReasoningControl,
     denyLevels,
   } = input;
@@ -380,8 +382,11 @@ export function closeSerializerPolicy(input: {
       : { reasoning, compat };
   }
   if (chatCarrier(merged)) return { reasoning, thinkingLevelMap: candidateLevels, compat };
-  // Advertising a specific map without an explicit carrier would lean on pi-ai's
-  // default for a litellm provider; state the carrier this policy concluded.
+  if (!allowInferredChatCarrier) {
+    return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat: deniedCompat };
+  }
+  // Fresh discovery may establish a carrier through router level flags even when
+  // LiteLLM omits explicit compatibility metadata. Legacy cache maps cannot.
   return {
     reasoning,
     thinkingLevelMap: candidateLevels,
