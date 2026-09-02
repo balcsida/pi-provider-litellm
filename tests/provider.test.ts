@@ -39,6 +39,11 @@ const discovered = (id: string): DiscoveryResult => ({
   ],
 });
 
+const suppressed = (id: string): DiscoveryResult => ({
+  source: "model_info",
+  models: [{ ...discovered(id).models[0], suppressReasoningContent: true }],
+});
+
 function native(id: string): Model<"anthropic-messages" | "openai-completions" | "openai-responses"> {
   return toNativeModels("litellm", "https://proxy.example/v1", discovered(id).models)[0];
 }
@@ -85,6 +90,13 @@ describe("toNativeModels", () => {
     ]);
   });
 
+  it("preserves backend-derived suppression metadata", () => {
+    expect(toNativeModels("litellm", "https://proxy.example/v1", suppressed("neutral-route").models)[0]).toMatchObject({
+      id: "neutral-route",
+      suppressReasoningContent: true,
+    });
+  });
+
   it("projects each protocol from one normalized proxy root", () => {
     const baseModel = discovered("model").models[0];
     const [messages, completions, responses] = toNativeModels("litellm", "https://proxy.example/v1/", [
@@ -112,6 +124,17 @@ describe("createLiteLLMProvider", () => {
     await value.refreshModels?.(context([native("stored")], false));
 
     expect(value.getModels()).toEqual([native("stored")]);
+    expect(discover).not.toHaveBeenCalled();
+  });
+
+  it("restores backend-derived suppression metadata offline", async () => {
+    const discover = vi.fn(async () => discovered("fresh"));
+    const value = controller({ discover });
+    const cached = toNativeModels("litellm", "https://proxy.example/v1", suppressed("neutral-route").models)[0];
+
+    await value.refreshModels?.(context([cached], false));
+
+    expect(value.getModels()[0]).toMatchObject({ id: "neutral-route", suppressReasoningContent: true });
     expect(discover).not.toHaveBeenCalled();
   });
 
