@@ -351,6 +351,32 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("denies unreported singleton router reasoning efforts without catalog evidence", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "private/reasoner",
+            litellm_params: { model: "internal/reasoner" },
+            model_info: { mode: "chat", supports_reasoning: true, supports_high_reasoning_effort: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
+  });
+
   it("merges singleton router reasoning effort flags over catalog metadata", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {

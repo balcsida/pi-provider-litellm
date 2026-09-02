@@ -4,6 +4,7 @@ import {
   type CatalogResolver,
   closeSerializerPolicy,
   meetVendorCompat,
+  NO_TRANSMISSIBLE_LEVELS,
   reduceModelGroup,
   toResponsesLevels,
 } from "../src/model-groups.js";
@@ -638,7 +639,15 @@ describe("reduceModelGroup", () => {
       resolveCatalog,
     );
 
-    expect(result?.thinkingLevelMap).toEqual({ off: "none", minimal: null, high: "high" });
+    expect(result?.thinkingLevelMap).toEqual({
+      off: "none",
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
   });
 
   it("advertises a router reasoning effort only when every deployment explicitly supports it", () => {
@@ -655,13 +664,13 @@ describe("reduceModelGroup", () => {
 
     expect(
       reduceModelGroup([supportsLow("a", true), supportsLow("b", true)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ low: "low", high: "high" });
+    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, low: "low", high: "high" });
     expect(
       reduceModelGroup([supportsLow("a", true), supportsLow("b", undefined)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ low: null, high: "high" });
+    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
     expect(
       reduceModelGroup([supportsLow("a", true), supportsLow("b", false)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ low: null, high: "high" });
+    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
   });
 
   it("overlays conservative router reasoning evidence on catalog metadata", () => {
@@ -686,7 +695,39 @@ describe("reduceModelGroup", () => {
       }),
     );
 
-    expect(result?.thinkingLevelMap).toEqual({ ...catalogThinkingLevelMap, low: null });
+    expect(result?.thinkingLevelMap).toEqual({
+      ...NO_TRANSMISSIBLE_LEVELS,
+      ...catalogThinkingLevelMap,
+      low: null,
+    });
+  });
+
+  it("denies unreported levels when the router reports only high effort", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "reasoner", mode: "chat", supports_high_reasoning_effort: true },
+          litellm_params: { model: "internal/reasoner" },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result?.thinkingLevelMap).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
+  });
+
+  it("denies standard levels when the router reports only an xhigh denial", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { id: "reasoner", mode: "chat", supports_xhigh_reasoning_effort: false },
+          litellm_params: { model: "internal/reasoner" },
+        }),
+      ],
+      resolveCatalog,
+    );
+
+    expect(result?.thinkingLevelMap).toEqual(NO_TRANSMISSIBLE_LEVELS);
   });
 
   it("adopts tiered pricing when identical tiers are declared in any property order", () => {

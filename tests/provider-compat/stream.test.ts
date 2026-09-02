@@ -156,6 +156,22 @@ describe("native provider stream compatibility", () => {
     for (const field of absent) expect(requests[0]).not.toHaveProperty(field);
   });
 
+  it("exposes and sends only the router-reported high effort", async () => {
+    const { models, model, requests, respond } = await createCompatibilityHarness([
+      {
+        model_name: "private-reasoner",
+        litellm_params: { model: "internal/reasoner", allowed_openai_params: ["reasoning_effort"] },
+        model_info: { mode: "chat", supports_reasoning: true, supports_high_reasoning_effort: true },
+      },
+    ]);
+    respond(...successfulResponse("ok"));
+
+    expect(getSupportedThinkingLevels(model)).toEqual(["high"]);
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(requests[0]).toMatchObject({ reasoning_effort: "high" });
+  });
+
   it.each([
     { name: "Kimi K3", backend: "moonshot/kimi-k3" },
     { name: "DeepSeek V4", backend: "deepseek/deepseek-v4-pro" },

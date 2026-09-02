@@ -615,7 +615,13 @@ export function reduceModelGroup(
   const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
   const thinkingLevelMap =
-    parsedCatalogThinkingLevelMap || routerMap ? { ...parsedCatalogThinkingLevelMap, ...routerMap } : undefined;
+    parsedCatalogThinkingLevelMap || routerMap
+      ? {
+          ...(routerMap ? NO_TRANSMISSIBLE_LEVELS : {}),
+          ...parsedCatalogThinkingLevelMap,
+          ...routerMap,
+        }
+      : undefined;
   const acceptedOpenAIParams = intersectParams(deployments);
   const acceptsResponsesReasoningControl = acceptedOpenAIParams.includes("reasoning_effort");
   const kimiEvidence = deployments.map((entry) => kimiDeploymentEvidence(entry));
