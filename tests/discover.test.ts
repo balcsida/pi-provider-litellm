@@ -316,6 +316,27 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it.each([
+    ["uses custom provider evidence for an opaque Moonshot backend", "moonshot", "internal/opaque", true],
+    ["rejects conflicting custom provider and model evidence", "openai", "moonshot/kimi-k3", false],
+  ] as const)("%s", async (_name, customProvider, backend, normalized) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "private-route",
+            litellm_params: { model: backend, custom_llm_provider: customProvider },
+            model_info: { mode: "chat", supports_reasoning: true },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmPolicy?.normalizeStrictToolMessages === true).toBe(normalized);
+  });
+
   it("maps LiteLLM reasoning effort capabilities for a singleton", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {

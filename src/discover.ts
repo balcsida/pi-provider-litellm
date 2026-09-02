@@ -316,7 +316,11 @@ const GENERIC_TRANSPORT_ADAPTERS = new Set([
 ]);
 
 function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFamily"] {
-  const identityFamilies = [entry.litellm_params?.model, entry.model_info?.base_model]
+  const identityFamilies = [
+    entry.litellm_params?.model,
+    entry.litellm_params?.custom_llm_provider,
+    entry.model_info?.base_model,
+  ]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate))
     .map(semanticFamily)
@@ -380,6 +384,7 @@ function qualifiedIdentityProvider(model: string, family: SemanticFamily | undef
 
 export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const customProvider = adapterCatalogProvider(entry.litellm_params?.custom_llm_provider);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
   const baseModel = wireString(entry.model_info?.base_model)?.trim() || undefined;
   // Two recognized generations are contradictory: applying one deployment
@@ -399,7 +404,10 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const resolutions = candidates
     .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
     .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
-  const evidenceProviders = new Set(resolutions.map((resolved) => resolved.provider));
+  const evidenceProviders = new Set([
+    ...resolutions.map((resolved) => resolved.provider),
+    ...(customProvider ? [customProvider] : []),
+  ]);
   const catalogIdentities = new Set(resolutions.map((resolved) => `${resolved.provider}\0${resolved.model.id}`));
   for (const candidate of candidates) {
     const provider = qualifiedIdentityProvider(candidate, semanticFamily(candidate));
@@ -524,9 +532,12 @@ function reportWithheldToolRepairForModels(models: readonly DiscoveredModel[]): 
 }
 
 function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
-  return [entry.litellm_params?.model, entry.model_info?.base_model, entry.model_info?.litellm_provider].some(
-    (candidate) => Boolean(wireString(candidate)?.trim()),
-  );
+  return [
+    entry.litellm_params?.model,
+    entry.litellm_params?.custom_llm_provider,
+    entry.model_info?.base_model,
+    entry.model_info?.litellm_provider,
+  ].some((candidate) => Boolean(wireString(candidate)?.trim()));
 }
 
 function mapFromModelInfoGroup(
