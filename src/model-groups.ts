@@ -7,6 +7,7 @@ export const DEFAULT_MAX_TOKENS = 16_384;
 
 export interface CatalogResolution {
   provider: string;
+  catalogModelId?: string;
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -55,7 +56,7 @@ function wireBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
+export function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
   if (mode == null) return "unknown";
   const value = wireString(mode)?.trim();
   // An unreadable mode is not evidence that the deployment is non-chat. Treating it
@@ -233,9 +234,17 @@ export function reduceModelGroup(
   if (deployments.length === 0) return undefined;
   const catalogs = deployments.map((entry) => resolveCatalog(entry));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
-  const catalogAuthority = catalogProvider ? catalogs : catalogs.map(() => undefined);
+  const catalogModelIds = catalogs.map((catalog) => catalog?.catalogModelId);
+  const hasCatalogModelIdentity = catalogModelIds.some((id) => id !== undefined);
+  const catalogModelId = unanimous(catalogModelIds);
+  // Provider-only test resolvers preserve the reducer's public unit-test contract;
+  // production catalog resolutions always include the concrete model identity.
+  const hasCatalogAuthority =
+    catalogProvider !== undefined && (!hasCatalogModelIdentity || catalogModelId !== undefined);
+  const catalogAuthority = hasCatalogAuthority ? catalogs : catalogs.map(() => undefined);
   const catalogAuthorityAmbiguous =
-    catalogProvider === undefined && catalogs.some((catalog) => catalog?.provider !== undefined);
+    !hasCatalogAuthority &&
+    catalogs.some((catalog) => catalog?.provider !== undefined || catalog?.catalogModelId !== undefined);
   const reasoningEvidence = deployments.map(
     (entry, index) => wireBoolean(entry.model_info?.supports_reasoning) ?? catalogAuthority[index]?.reasoning,
   );
@@ -274,7 +283,7 @@ export function reduceModelGroup(
     cacheRead: completeCostFields[2] ? Math.max(...(costValues[2] as number[])) : 0,
     cacheWrite: completeCostFields[3] ? Math.max(...(costValues[3] as number[])) : 0,
   };
-  if (hasCompleteCost && catalogProvider) {
+  if (hasCompleteCost && hasCatalogAuthority) {
     const deploymentCosts = deployments.map((entry, index) => {
       const baseCost = {
         input: costValues[0][index] as number,
@@ -302,7 +311,7 @@ export function reduceModelGroup(
     const tiers = conservativeCostTiers(deploymentCosts);
     if (tiers) cost.tiers = tiers;
   }
-  const catalogThinkingLevelMap = catalogProvider
+  const catalogThinkingLevelMap = hasCatalogAuthority
     ? intersectThinkingLevelMaps(catalogAuthority.map((catalog) => catalog?.thinkingLevelMap))
     : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
@@ -323,7 +332,7 @@ export function reduceModelGroup(
     cost,
     hasCompleteCost,
     hasCompleteMetadata,
-    ...(catalogProvider ? { catalogProvider } : {}),
+    ...(hasCatalogAuthority ? { catalogProvider } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
   };
 }
@@ -331,6 +340,7 @@ export function reduceModelGroup(
 export function catalogResolution(provider: string, model: Model<Api>): CatalogResolution {
   return {
     provider,
+    catalogModelId: model.id,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),

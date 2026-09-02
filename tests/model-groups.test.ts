@@ -551,6 +551,61 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("withholds catalog authority for different concrete models from one provider", () => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: {
+            id: "a",
+            mode: "chat",
+            supports_reasoning: undefined,
+            supports_vision: undefined,
+            max_input_tokens: undefined,
+            max_output_tokens: undefined,
+            input_cost_per_token: undefined,
+            output_cost_per_token: undefined,
+            cache_read_input_token_cost: undefined,
+            cache_creation_input_token_cost: undefined,
+          },
+          litellm_params: { model: "route-a" },
+        }),
+        row({
+          model_info: {
+            id: "b",
+            mode: "chat",
+            supports_reasoning: undefined,
+            supports_vision: undefined,
+            max_input_tokens: undefined,
+            max_output_tokens: undefined,
+            input_cost_per_token: undefined,
+            output_cost_per_token: undefined,
+            cache_read_input_token_cost: undefined,
+            cache_creation_input_token_cost: undefined,
+          },
+          litellm_params: { model: "route-b" },
+        }),
+      ],
+      (entry) => ({
+        provider: "anthropic",
+        catalogModelId: entry.litellm_params?.model === "route-a" ? "claude-sonnet-4-6" : "claude-opus-4-5",
+        reasoning: true,
+        vision: true,
+        contextWindow: entry.litellm_params?.model === "route-a" ? 200_000 : 180_000,
+        maxTokens: 64_000,
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      catalogAuthorityAmbiguous: true,
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result).not.toHaveProperty("catalogProvider");
+    expect(result).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("uses catalog thinking maps for unambiguous identities", () => {
     const thinkingLevelMap = { low: "low", high: "high" } as const;
     const result = reduceModelGroup([row()], () => ({

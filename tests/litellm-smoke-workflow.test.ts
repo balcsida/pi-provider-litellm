@@ -55,7 +55,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('=== "chat,responses"');
     expect(workflow).toContain('grouped[0].api === "openai-completions"');
     expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
-    expect(workflow).toContain("catalogs.every((catalog) => catalog?.provider === catalogProvider)");
+    expect(workflow).toContain("catalog?.provider === catalogProvider && catalog?.catalogModelId === catalogModelId");
     expect(workflow).toContain("const catalogCost = hasCatalogAuthority ? catalogs[index]?.cost : undefined");
     expect(workflow).toContain("complete ? Math.max(...values) : 0");
     expect(workflow).toContain("grouped[0].cost[field] === expectedCost[field]");

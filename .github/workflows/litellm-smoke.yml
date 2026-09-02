@@ -223,8 +223,13 @@ jobs:
           };
           const catalogs = rows.map((row) => resolveModelInfoCatalog(row));
           const catalogProvider = catalogs[0]?.provider;
+          const catalogModelId = catalogs[0]?.catalogModelId;
           const hasCatalogAuthority =
-            catalogProvider !== undefined && catalogs.every((catalog) => catalog?.provider === catalogProvider);
+            catalogProvider !== undefined &&
+            catalogModelId !== undefined &&
+            catalogs.every(
+              (catalog) => catalog?.provider === catalogProvider && catalog?.catalogModelId === catalogModelId,
+            );
           const deploymentCosts = rows.map((row, index) => {
             const catalogCost = hasCatalogAuthority ? catalogs[index]?.cost : undefined;
             return Object.fromEntries(

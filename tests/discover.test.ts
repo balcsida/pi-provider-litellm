@@ -602,7 +602,7 @@ describe("discoverModels via /model/info", () => {
         litellm_params: { model: "anthropic/opus-4-7" },
         model_info: { mode: "chat" },
       }),
-    ).toMatchObject({ provider: "anthropic" });
+    ).toMatchObject({ provider: "anthropic", catalogModelId: "claude-opus-4-7" });
   });
 
   it("includes resolved and unresolved known provider prefixes in conflict checks", () => {
@@ -688,6 +688,45 @@ describe("discoverModels via /model/info", () => {
               model_name: route,
               litellm_params: { model: "openai/gpt-4o" },
               model_info: { mode: "chat", litellm_provider: "openai", base_model: "openai/gpt-4.1" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: route,
+      name: `${route} (incomplete metadata)`,
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("missing or conflicting deployment provider evidence");
+    expect(diagnostics[0]).toContain(route);
+  });
+
+  it("withholds different concrete catalog identities from one provider across a route group", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `same-provider-group-conflict-${process.pid}-${Date.now()}-${Math.random()}`;
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: route,
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "gpt-4o", mode: "chat", litellm_provider: "openai" },
+            },
+            {
+              model_name: route,
+              litellm_params: { model: "openai/gpt-4.1" },
+              model_info: { id: "gpt-4.1", mode: "chat", litellm_provider: "openai" },
             },
           ],
         }),
@@ -1272,6 +1311,39 @@ describe("discoverModels via /model/info", () => {
           model_name: "kimi-prod",
           ...(model ? { litellm_params: { model } } : {}),
           model_info: { mode: "chat" },
+        })),
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
+  it.each([
+    [
+      "ignores an unsupported non-Moonshot sibling",
+      [
+        { model: "moonshot/kimi-k3", mode: "chat" },
+        { model: "openai/text-embedding-3-small", mode: "embedding" },
+      ],
+      true,
+    ],
+    [
+      "does not use an unsupported Moonshot sibling as evidence",
+      [
+        { model: "azure_ai/FW-Kimi-K3", mode: "chat" },
+        { model: "moonshot/kimi-k3", mode: "embedding" },
+      ],
+      false,
+    ],
+  ] as const)("%s when reducing suppression", async (_name, deployments, suppress) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: deployments.map(({ model, mode }, index) => ({
+          model_name: "kimi-prod",
+          litellm_params: { model },
+          model_info: { id: `deployment-${index}`, mode },
         })),
       }),
     );

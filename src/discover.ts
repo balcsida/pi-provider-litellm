@@ -8,6 +8,7 @@ import {
   conservativeCostTiers,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  normalizedMode,
   reduceModelGroup,
   wireString,
 } from "./model-groups.js";
@@ -330,7 +331,9 @@ function mapFromModelInfoGroup(
   if (!reduced) return undefined;
   if (reduced.catalogAuthorityAmbiguous || hasIntraRowAuthorityConflict) ambiguousRoutes?.push(reduced.id);
   const suppressReasoningContent = aggregateSuppressionEvidence(
-    entries.map((entry) => shouldSuppressRouteReasoningContent(reduced.id, entry)),
+    entries
+      .filter((entry) => normalizedMode(entry.model_info?.mode) !== "unsupported")
+      .map((entry) => shouldSuppressRouteReasoningContent(reduced.id, entry)),
   );
   return {
     id: reduced.id,
