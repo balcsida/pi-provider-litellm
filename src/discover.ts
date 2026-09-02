@@ -236,6 +236,7 @@ interface ModelInfoCatalogEvidence {
 
 function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalogEvidence {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
+  const customProvider = adapterCatalogProvider(entry.litellm_params?.custom_llm_provider);
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((candidate) => wireString(candidate)?.trim())
     .filter((candidate): candidate is string => Boolean(candidate));
@@ -250,6 +251,7 @@ function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalo
   const providers = new Set(
     [
       ...(adapterProvider ? [adapterProvider] : []),
+      ...(customProvider ? [customProvider] : []),
       ...candidateResolutions.flatMap(({ resolved, prefixProvider }) => [resolved?.provider, prefixProvider]),
     ].filter((provider): provider is BuiltinProvider => provider !== undefined),
   );
