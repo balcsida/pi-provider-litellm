@@ -175,7 +175,7 @@ afterEach(() => {
 });
 
 describe("extension startup", () => {
-  it("registers one complete native provider and one session handler", async () => {
+  it("registers one complete native provider and the request hooks", async () => {
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
 
@@ -190,7 +190,8 @@ describe("extension startup", () => {
         refreshModels: expect.any(Function),
       }),
     );
-    expect(pi.handlers.get("session_start")).toHaveLength(1);
+    expect(pi.handlers.get("before_provider_headers")).toHaveLength(1);
+    expect(pi.handlers.get("before_provider_request")).toHaveLength(1);
     expect(pi.commands.has("litellm-refresh")).toBe(false);
   });
 
@@ -764,11 +765,6 @@ describe("extension startup", () => {
     await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: { type: "oauth", ...credential } }), "utf8");
 
     vi.mocked(Date.now).mockReturnValue(loginTime + 25 * 60 * 60 * 1000);
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionId: () => "test-session" } });
-    }
-
     expect(callCount).toBe(0);
   });
 

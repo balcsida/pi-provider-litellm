@@ -151,6 +151,10 @@ Treat the configured LiteLLM proxy as trusted: Skills can add instructions to th
 /model
 ```
 
+Every request routed through a configured LiteLLM provider includes Pi's canonical session ID in the
+`x-litellm-session-id` header. This groups Chat Completions, Responses, and native Messages requests in LiteLLM without
+adding transport-specific fields to request bodies.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |

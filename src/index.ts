@@ -892,7 +892,6 @@ const GEMINI_MODEL_PATTERN = /(?:^|[-_/.:])gemini(?=$|[-_/.:])/i;
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   model: LiteLLMModel | undefined,
-  sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
   const modelId = model?.id;
   const api = model?.api;
@@ -974,11 +973,6 @@ function prepareLiteLLMRequestPayload(
         };
       }
     }
-  }
-
-  if (sessionId) {
-    next ??= { ...payload };
-    next.litellm_session_id = sessionId;
   }
 
   return next;
@@ -1276,15 +1270,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  let sessionId: string | undefined;
-  pi.on("session_start", (_event, ctx) => {
-    sessionId = ctx.sessionManager.getSessionId();
+  pi.on("before_provider_headers", (event, ctx) => {
+    if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
+    event.headers["x-litellm-session-id"] = ctx.sessionManager.getSessionId();
   });
 
   pi.on("before_provider_request", (event, ctx) => {
     if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
-    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel, sessionId);
+    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel);
   });
 
   // Skills enrichment is best-effort: an expired credential or an unreachable proxy must not
