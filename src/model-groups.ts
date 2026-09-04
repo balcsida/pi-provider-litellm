@@ -18,6 +18,7 @@ export interface CatalogResolution {
   catalogModelId?: string;
   semanticFamily?: SemanticFamily;
   messagesCompat?: MessagesBackendCompat;
+  messagesThinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   reasoning?: boolean;
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
@@ -72,6 +73,11 @@ export function wireString(value: unknown): string | undefined {
 // matters here, since a capability is only advertised when every deployment agrees.
 function wireBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function supportedEndpoints(value: unknown): Set<string> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return new Set(value.filter((endpoint): endpoint is string => typeof endpoint === "string"));
 }
 
 export function normalizedMode(mode: unknown): "chat" | "responses" | "unknown" | "unsupported" {
@@ -204,6 +210,7 @@ export function reduceModelGroup(
   // limit, price, and identity evidence reduces only over routable rows, so such a
   // row cannot corrupt them or make the group look larger than it is.
   const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
+  const candidateEndpoints = candidates.map((entry) => supportedEndpoints(entry.model_info?.supported_endpoints));
   const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
   const catalogs = deployments.map((entry) => resolveCatalog(entry));
@@ -264,16 +271,24 @@ export function reduceModelGroup(
   }
   const catalogThinkingLevelMap = catalogProvider
     ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
-    : undefined;
+    : messagesCompat && !catalogAuthorityAmbiguous
+      ? unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesThinkingLevelMap)))
+      : undefined;
   const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
   const routerMap = routerThinkingLevelMap(deployments);
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
 
+  const messagesEndpointAllowed = candidateEndpoints.every(
+    (endpoints) => endpoints === undefined || endpoints.has("/v1/messages"),
+  );
   const api = candidateModes.every((mode) => mode === "responses")
     ? "openai-responses"
-    : candidateModes.every((mode) => mode === "chat") && semanticFamily === "claude" && messagesCompat
+    : candidateModes.every((mode) => mode === "chat") &&
+        messagesEndpointAllowed &&
+        semanticFamily === "claude" &&
+        messagesCompat
       ? "anthropic-messages"
       : "openai-completions";
   let thinkingLevelMap = parsedCatalogThinkingLevelMap;

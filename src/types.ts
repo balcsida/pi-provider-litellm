@@ -47,6 +47,7 @@ export interface ModelInfoEntry {
     mode?: string | null;
     litellm_provider?: string;
     base_model?: string;
+    supported_endpoints?: string[];
     supported_openai_params?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;

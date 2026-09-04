@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Api, AssistantMessage, AuthContext, Model, Models, Provider, StreamOptions } from "@earendil-works/pi-ai";
 import { createModels, createProvider, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -22,6 +25,8 @@ type RequestBody = {
   input?: unknown[];
   [key: string]: unknown;
 };
+
+let agentDir: string | undefined;
 
 export function sseChunk(data: unknown, waitForAbort = false): Chunk {
   return { data, waitForAbort };
@@ -137,6 +142,8 @@ export async function createCompatibilityHarness(
     allowNetwork?: boolean;
     customHeaders?: Record<string, string>;
     sessionFile?: string;
+    baseUrl?: string;
+    allowInsecureHttp?: boolean;
   } = {},
 ): Promise<{
   provider: Provider;
@@ -150,11 +157,19 @@ export async function createCompatibilityHarness(
   respond: (...chunks: Chunk[]) => void;
   respondRaw: (raw: string) => void;
 }> {
+  agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-compat-"));
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
     defineTool: (tool: unknown) => tool,
-    getAgentDir: () => "/tmp/pi-provider-litellm-compat",
+    getAgentDir: () => agentDir,
   }));
-  vi.stubEnv("LITELLM_BASE_URL", "https://proxy.example.com");
+  const baseUrl = options.baseUrl ?? "https://proxy.example.com";
+  if (options.allowInsecureHttp) {
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { providers: { litellm: { allowInsecureHttp: true } } } }),
+    );
+  }
+  vi.stubEnv("LITELLM_BASE_URL", baseUrl);
   vi.stubEnv("LITELLM_API_KEY", "sk-test");
   if (options.customHeaders) vi.stubEnv("LITELLM_HEADERS", JSON.stringify(options.customHeaders));
 
@@ -285,7 +300,7 @@ export async function createCompatibilityHarness(
   const credential = {
     type: "api_key" as const,
     key: "sk-test",
-    env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+    env: { LITELLM_BASE_URL: baseUrl },
   };
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(provider.id, async () => credential);
@@ -386,7 +401,9 @@ export async function createCompatibilityHarness(
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  if (agentDir) await rm(agentDir, { recursive: true, force: true });
+  agentDir = undefined;
 });

@@ -1,6 +1,40 @@
-import { type Context, getSupportedThinkingLevels, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { readFile } from "node:fs/promises";
+import {
+  type Context,
+  getSupportedThinkingLevels,
+  InMemoryModelsStore,
+  type ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { anthropicSseChunk, anthropicTextResponse, claudeRoute, createCompatibilityHarness, user } from "./helpers.js";
+
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-ai/compat")>();
+  const getModels = ((provider: Parameters<typeof actual.getModels>[0]) => {
+    const models = actual.getModels(provider);
+    if (provider !== "anthropic") return models;
+    const template = models.find((model) => model.id === "claude-fable-5");
+    if (!template) return models;
+    return [
+      ...models,
+      {
+        ...template,
+        id: "claude-fable-6",
+        compat: { forceAdaptiveThinking: true, supportsStrictTools: true },
+      },
+      {
+        ...template,
+        id: "claude-fable-6-1",
+        compat: {
+          forceAdaptiveThinking: true,
+          supportsTemperature: false,
+          supportsStrictTools: true,
+        },
+      },
+    ];
+  }) as typeof actual.getModels;
+  return { ...actual, getModels };
+});
 
 const anthropicRoute = {
   model_name: "claude-opus-5",
@@ -44,6 +78,40 @@ const mixedGenerationRoutes = [
 
 const unknownBackendRoute = claudeRoute("bedrock", "bedrock/us.anthropic.claude-invented-9-9-v1:0");
 
+const probedBackendModels = {
+  "claude-opus-5": "bedrock/us.anthropic.claude-opus-5",
+  "claude-fable-5-1": "bedrock/us.anthropic.claude-fable-5-1",
+  "claude-sonnet-4-6": "bedrock/us.anthropic.claude-sonnet-4-6",
+  "claude-opus-4-6": "bedrock/us.anthropic.claude-opus-4-6-v1",
+} as const;
+
+interface AcceptanceOutcome {
+  path: "messages";
+  model: keyof typeof probedBackendModels;
+  level: ThinkingLevel;
+  status: number;
+  accepted: boolean;
+}
+
+const expectedMessagesAcceptance = JSON.parse(
+  await readFile(new URL("../fixtures/proxy/expected-messages-acceptance-2026-09-04.json", import.meta.url), "utf8"),
+) as AcceptanceOutcome[];
+
+function probedRoute(modelName: string, backend: string) {
+  return {
+    model_name: modelName,
+    model_info: {
+      mode: "chat",
+      litellm_provider: "bedrock_converse",
+      base_model: backend,
+      supports_reasoning: true,
+      supports_max_reasoning_effort: true,
+      supports_vision: true,
+    },
+    litellm_params: { model: backend },
+  };
+}
+
 describe("Anthropic Messages wire compatibility", () => {
   it("streams Anthropic SSE text from the exact Messages endpoint", async () => {
     const { models, model, requestHeaders, requestUrls, requests, respond } = await createCompatibilityHarness(
@@ -73,6 +141,28 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requestHeaders[0]?.get("anthropic-version")).toBe("2023-06-01");
     expect(requestHeaders[0]?.get("anthropic-beta")).toBeNull();
     expect(requestHeaders[0]?.get("x-tenant")).toBe("team-a");
+  });
+
+  it("preserves explicitly allowed non-loopback HTTP through discovery and Messages dispatch", async () => {
+    const { models, model, requestUrls, respond } = await createCompatibilityHarness(anthropicRoute, {
+      baseUrl: "http://host.docker.internal",
+      allowInsecureHttp: true,
+    });
+    respond(...anthropicTextResponse("insecure but explicit"));
+
+    await models.streamSimple(model, { messages: [user("Hello")] }).result();
+
+    expect(model).toMatchObject({
+      api: "anthropic-messages",
+      baseUrl: "http://host.docker.internal",
+    });
+    expect(requestUrls).toEqual(["http://host.docker.internal/v1/messages"]);
+  });
+
+  it("rejects non-loopback HTTP when the provider does not opt in", async () => {
+    await expect(
+      createCompatibilityHarness(anthropicRoute, { baseUrl: "http://host.docker.internal" }),
+    ).rejects.toThrow(/HTTPS/);
   });
 
   it("serializes images, tools, and cache controls with Anthropic-native fields", async () => {
@@ -131,6 +221,41 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).not.toHaveProperty("reasoning_effort");
     expect(requests[0]).not.toHaveProperty("include");
     expect(requests[0]).not.toHaveProperty("litellm_session_id");
+  });
+
+  describe("2026-09-04 Messages acceptance oracle", () => {
+    const outcomesByModel = new Map<AcceptanceOutcome["model"], AcceptanceOutcome[]>();
+    for (const outcome of expectedMessagesAcceptance) {
+      const modelOutcomes = outcomesByModel.get(outcome.model) ?? [];
+      modelOutcomes.push(outcome);
+      outcomesByModel.set(outcome.model, modelOutcomes);
+    }
+
+    it.each(Object.entries(probedBackendModels))(
+      "selects and serializes every accepted %s effort",
+      async (modelName, backend) => {
+        const outcomes = outcomesByModel.get(modelName as AcceptanceOutcome["model"]) ?? [];
+        const { models, model, requests, respond } = await createCompatibilityHarness(probedRoute(modelName, backend));
+
+        expect(model.api).toBe("anthropic-messages");
+        expect(outcomes).toHaveLength(4);
+        for (const outcome of outcomes) {
+          expect(outcome).toMatchObject({ path: "messages", accepted: true, status: 200 });
+          expect(getSupportedThinkingLevels(model)).toContain(outcome.level);
+          respond(...anthropicTextResponse(outcome.level));
+          await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: outcome.level }).result();
+          expect(requests.at(-1)).toMatchObject({ output_config: { effort: outcome.level } });
+        }
+      },
+    );
+  });
+
+  it("uses the generation fallback compatibility for the probed Fable minor", async () => {
+    const { model } = await createCompatibilityHarness(
+      probedRoute("claude-fable-5-1", "bedrock/us.anthropic.claude-fable-5-1"),
+    );
+
+    expect(model.compat).toEqual({ forceAdaptiveThinking: true, supportsStrictTools: true });
   });
 
   it("ignores router OpenAI effort additions on native Messages", async () => {
@@ -237,6 +362,28 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requests[0]).toMatchObject({ temperature: 0.7 });
   });
 
+  it("prefers an exact Messages policy over its generation fallback", async () => {
+    const { model } = await createCompatibilityHarness(
+      probedRoute("claude-fable-6-1", "bedrock/us.anthropic.claude-fable-6-1"),
+    );
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsStrictTools: true,
+    });
+  });
+
+  it.each([
+    ["claude-fable-7", "bedrock/us.anthropic.claude-fable-7"],
+    ["claude-fable-7-1", "bedrock/us.anthropic.claude-fable-7-1"],
+  ])("keeps unknown Claude generation %s on Chat rather than borrowing another generation", async (name, backend) => {
+    const { model } = await createCompatibilityHarness(probedRoute(name, backend));
+
+    expect(model.api).toBe("openai-completions");
+  });
+
   it("routes an unrecognized Claude backend through Chat rather than guessing", async () => {
     const { models, model, requestUrls, respondRaw } = await createCompatibilityHarness(unknownBackendRoute);
     respondRaw(
@@ -248,25 +395,6 @@ describe("Anthropic Messages wire compatibility", () => {
 
     expect(model.api).toBe("openai-completions");
     expect(requestUrls).toEqual(["https://proxy.example.com/v1/chat/completions"]);
-  });
-
-  it("omits session grouping from Messages while real Chat serialization retains it", async () => {
-    const sessionFile = "/tmp/pi-compat-session.jsonl";
-    const messages = await createCompatibilityHarness(anthropicRoute, { sessionFile });
-    messages.respond(...anthropicTextResponse("messages"));
-    await messages.models.streamSimple(messages.model, { messages: [user("Hello")] }).result();
-    expect(messages.requests[0]).not.toHaveProperty("litellm_session_id");
-
-    vi.restoreAllMocks();
-    vi.resetModules();
-    const chat = await createCompatibilityHarness(undefined, { sessionFile });
-    chat.respondRaw(
-      'data: {"choices":[{"delta":{"content":"chat"},"finish_reason":null}]}\n\n' +
-        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
-        "data: [DONE]\n\n",
-    );
-    await chat.models.streamSimple(chat.model, { messages: [user("Hello")] }).result();
-    expect(chat.requests[0]?.litellm_session_id).toBeTruthy();
   });
 
   it("rehydrates the same Messages API, URL, and body from the offline model store", async () => {

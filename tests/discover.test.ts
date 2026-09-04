@@ -1,3 +1,4 @@
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
@@ -1391,7 +1392,7 @@ describe("discoverModels response-mode models", () => {
     expect(result.models).toEqual([expect.objectContaining({ id: "team-responses", api: "openai-responses" })]);
   });
 
-  it("downgrades only synthetic Messages when an unreadable /health detail name uses the route fallback", async () => {
+  it("downgrades health-derived Messages when an unreadable detail name uses the route fallback", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(404, {}),
       "/v1/models": () => jsonResponse(404, {}),
@@ -1414,7 +1415,11 @@ describe("discoverModels response-mode models", () => {
       expect.objectContaining({
         id: "team-claude",
         api: "openai-completions",
-        compat: { supportsStore: false, cacheControlFormat: "anthropic" },
+        compat: {
+          supportsStore: false,
+          supportsReasoningEffort: false,
+          cacheControlFormat: "anthropic",
+        },
       }),
     ]);
   });
@@ -1729,7 +1734,7 @@ describe("discoverModels fallback to /health", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
-  it("selects native Messages only after every healthy deployment proves the same Claude backend", async () => {
+  it("keeps health-only Claude routes on Chat even when every deployment identifies the same backend", async () => {
     mockEndpoints({
       "/model/info?litellm_model_id=uuid-one": () =>
         jsonResponse(200, {
@@ -1764,7 +1769,7 @@ describe("discoverModels fallback to /health", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models).toEqual([expect.objectContaining({ id: "shared-claude-route", api: "anthropic-messages" })]);
+    expect(result.models).toEqual([expect.objectContaining({ id: "shared-claude-route", api: "openai-completions" })]);
   });
 
   it("reports completed health detail requests rather than endpoint indexes", async () => {
@@ -1795,6 +1800,104 @@ describe("discoverModels fallback to /health", () => {
 
     expect(reportedBeforeCompletion).toBe(false);
     expect(progress).toHaveBeenCalledWith("Fetched 11/11 models...");
+  });
+
+  it("never selects native Messages from /health, even with complete matching detail", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-claude": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-route",
+              model_info: {
+                id: "uuid-claude",
+                mode: "chat",
+                litellm_provider: "anthropic",
+                supports_reasoning: true,
+                supports_high_reasoning_effort: true,
+              },
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "claude-route", model_id: "uuid-claude" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models[0]).toMatchObject({
+      id: "claude-route",
+      api: "openai-completions",
+      compat: {
+        supportsStore: false,
+        supportsReasoningEffort: false,
+        cacheControlFormat: "anthropic",
+      },
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: null,
+        medium: null,
+        high: null,
+        xhigh: null,
+        max: null,
+      },
+    });
+    expect(
+      getSupportedThinkingLevels({
+        ...result.models[0]!,
+        provider: "litellm",
+        baseUrl: "https://proxy.example.com/v1",
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not emit reasoning controls for health-downgraded Claude routes", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-claude": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-route",
+              model_info: {
+                id: "uuid-claude",
+                mode: "chat",
+                litellm_provider: "anthropic",
+                supports_reasoning: true,
+                supports_high_reasoning_effort: true,
+              },
+              litellm_params: { model: "anthropic/claude-sonnet-4-6" },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "claude-route", model_id: "uuid-claude" }] }),
+    });
+
+    const [model] = (await discoverModels("https://litellm.example.com", "sk-test", {})).models;
+    let payload: unknown;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      payload = JSON.parse(String(init?.body));
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const { openAICompletionsApi } = await import("@earendil-works/pi-ai/api/openai-completions.lazy");
+
+    await openAICompletionsApi()
+      .streamSimple(
+        { ...model!, provider: "litellm", baseUrl: "https://proxy.example.com/v1" },
+        { messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+        { apiKey: "sk-test", reasoning: "high" },
+      )
+      .result();
+
+    expect(payload).not.toHaveProperty("reasoning_effort");
   });
 
   it("uses /health and per-endpoint /model/info when OpenAI model listing is unavailable", async () => {

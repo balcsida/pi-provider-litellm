@@ -690,6 +690,50 @@ describe("native Messages route selection", () => {
     });
   });
 
+  it("respects explicit Messages endpoint capability", () => {
+    const supported = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: { id: "a", mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/messages"] },
+        },
+      ],
+      () => claude({}),
+    );
+    const excluded = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: { id: "a", mode: "chat", supported_endpoints: ["/v1/chat/completions"] },
+        },
+      ],
+      () => claude({}),
+    );
+    const partiallyMalformedIncludingMessages = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: { id: "a", mode: "chat", supported_endpoints: ["/v1/messages", 42] as never },
+        },
+      ],
+      () => claude({}),
+    );
+    const partiallyMalformedOmittingMessages = reduceModelGroup(
+      [
+        {
+          model_name: "claude-route",
+          model_info: { id: "a", mode: "chat", supported_endpoints: ["/v1/chat/completions", 42] as never },
+        },
+      ],
+      () => claude({}),
+    );
+
+    expect(supported?.api).toBe("anthropic-messages");
+    expect(excluded?.api).toBe("openai-completions");
+    expect(partiallyMalformedIncludingMessages?.api).toBe("anthropic-messages");
+    expect(partiallyMalformedOmittingMessages?.api).toBe("openai-completions");
+  });
+
   it.each([
     ["mixed family", [claude({}), { provider: "openai", semanticFamily: "openai" as const }]],
     ["unknown sibling", [claude({}), undefined]],

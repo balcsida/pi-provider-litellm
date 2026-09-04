@@ -25,6 +25,15 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const CLOSED_THINKING_LEVEL_MAP = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: null,
+  high: null,
+  xhigh: null,
+  max: null,
+} as const;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 export function normalizeBaseUrl(input: string, allowInsecureHttp = false): string {
   const url = new URL(input);
@@ -245,9 +254,9 @@ function semanticFamily(id: string): SemanticFamily | undefined {
 }
 
 function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined {
-  // Native Messages is safe only when Pi's Anthropic catalog supplies the exact
-  // serializer policy for that generation; a provider adapter catalog describes
-  // backend access and pricing, not the Anthropic wire contract LiteLLM accepts.
+  // Native Messages is safe only when Pi's Anthropic catalog supplies the
+  // serializer policy for that generation. Lookup tries the exact id first, then
+  // that generation's entry; provider adapter metadata is not a wire contract.
   if (model.api !== "anthropic-messages") return undefined;
   const compat = (model as Model<"anthropic-messages">).compat;
   const carried: MessagesBackendCompat = {};
@@ -260,12 +269,12 @@ function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined 
 function anthropicBackendLookupIds(id: string): string[] {
   const routed = (id.split("/").pop() ?? id).toLowerCase();
   const base = routed.replace(/^(?:[a-z0-9-]+\.)*anthropic[./]/, "");
-  return undecoratedBackendIds(base);
-}
-
-function messagesCompatFromBackend(id: string): MessagesBackendCompat | undefined {
-  const model = findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(id));
-  return model ? messagesCompatOf(model) : undefined;
+  const lookupIds = new Set(undecoratedBackendIds(base));
+  for (const candidate of lookupIds) {
+    const generation = /^(claude-[a-z]+-\d+)-\d+$/.exec(candidate)?.[1];
+    if (generation) lookupIds.add(generation);
+  }
+  return [...lookupIds];
 }
 
 // These are the LiteLLM adapters whose native request path can terminate at a
@@ -330,7 +339,15 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
         baseFamily === "claude" &&
         CLAUDE_MODEL_PATTERN.test(baseModel)));
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
-  const candidateCompats = claudeEvidence ? candidates.map(messagesCompatFromBackend) : [];
+  const candidateMessagesModels = claudeEvidence
+    ? candidates.map((candidate) => findCatalogModelInProvider("anthropic", anthropicBackendLookupIds(candidate)))
+    : [];
+  const candidateCompats = candidateMessagesModels.map((model) => (model ? messagesCompatOf(model) : undefined));
+  const messagesThinkingLevelMaps = new Set(
+    candidateMessagesModels.map((model) => JSON.stringify(model?.thinkingLevelMap)),
+  );
+  const messagesThinkingLevelMap =
+    messagesThinkingLevelMaps.size === 1 ? candidateMessagesModels[0]?.thinkingLevelMap : undefined;
   // Every declared backend identity that participates in Claude evidence must
   // resolve a Messages policy. Filtering unresolved entries would incorrectly
   // make the remaining policy look unanimous.
@@ -345,10 +362,17 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
       return {
         ...catalogResolution(resolved.provider, semantic ?? semanticFamily(resolved.model.id), resolved.model),
         ...(compat ? { messagesCompat: compat } : {}),
+        ...(messagesThinkingLevelMap ? { messagesThinkingLevelMap } : {}),
       };
     }
   }
-  return semantic ? { semanticFamily: semantic, ...(compat ? { messagesCompat: compat } : {}) } : undefined;
+  return semantic
+    ? {
+        semanticFamily: semantic,
+        ...(compat ? { messagesCompat: compat } : {}),
+        ...(messagesThinkingLevelMap ? { messagesThinkingLevelMap } : {}),
+      }
+    : undefined;
 }
 
 async function fetchJson<T>(
@@ -440,8 +464,6 @@ function mapFromModelInfoGroup(
 
 interface HealthDeployment {
   entry: ModelInfoEntry;
-  // Detail route presence is separate from the public `/health` route: missing
-  // detail identity cannot authorize Messages-only request controls.
   hasDetailRoute: boolean;
 }
 
@@ -543,21 +565,26 @@ async function discoverFromHealth(
   }
   const ambiguousRoutes: string[] = [];
   const models = [...groups.values()]
-    .map((group) => {
-      let model = mapFromModelInfoGroup(
+    .map<DiscoveredModel | undefined>((group) => {
+      const model = mapFromModelInfoGroup(
         group.map(({ entry }) => entry),
         ambiguousRoutes,
       );
       if (!model) return undefined;
-      if (group.some(({ hasDetailRoute }) => !hasDetailRoute)) {
-        delete model.thinkingLevelMap;
-        if (model.api === "anthropic-messages") {
-          model = {
-            ...model,
-            api: "openai-completions",
-            compat: buildCompat(model.id, "openai-completions", "claude"),
-          };
-        }
+      if (group.some(({ hasDetailRoute }) => !hasDetailRoute)) delete model.thinkingLevelMap;
+      // `/health` proves availability, not which request protocol the public route
+      // accepts. Detail may enrich metadata but cannot authorize native Messages.
+      if (model.api === "anthropic-messages") {
+        const downgraded: DiscoveredModel = {
+          ...model,
+          api: "openai-completions",
+          thinkingLevelMap: CLOSED_THINKING_LEVEL_MAP,
+          compat: {
+            ...buildCompat(model.id, "openai-completions", "claude"),
+            supportsReasoningEffort: false,
+          },
+        };
+        return downgraded;
       }
       return model;
     })

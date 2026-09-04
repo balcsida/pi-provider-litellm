@@ -748,6 +748,57 @@ describe("extension startup", () => {
     expect(vi.mocked(globalThis.fetch).mock.calls.every(([url]) => !String(url).endsWith("/model/info"))).toBe(true);
   });
 
+  it("streams OAuth Messages requests to the credential host over a conflicting environment host", async () => {
+    process.env.LITELLM_BASE_URL = "https://environment.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    const requestedUrls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.endsWith("/messages")) throw new Error(`unexpected URL: ${url}`);
+      return new Response(
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-opus-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\nevent: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+    const provider = pi.providers[0]!;
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({
+      type: "oauth",
+      access: "sk-oauth",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+      baseUrl: "https://credential.example.com",
+    }));
+    const authContext: AuthContext = {
+      env: async (name) => process.env[name],
+      fileExists: async () => false,
+    };
+    const models = createModels({ credentials, modelsStore: new InMemoryModelsStore(), authContext });
+    models.setProvider(provider);
+    const model = {
+      id: "oauth-messages",
+      name: "OAuth Messages",
+      provider: "litellm",
+      api: "anthropic-messages" as const,
+      baseUrl: "https://credential.example.com",
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 1024,
+      compat: {},
+    };
+
+    const result = await models.complete(model, { messages: [] });
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestedUrls).toEqual(["https://credential.example.com/v1/messages"]);
+  });
+
   it("uses the OAuth credential base URL when ambient configuration is unset", async () => {
     delete process.env.LITELLM_BASE_URL;
     delete process.env.LITELLM_API_KEY;

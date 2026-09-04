@@ -37,7 +37,15 @@ export function toNativeModels(
 }
 
 export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
-const PLACEHOLDER_HOSTS = new Set([new URL(DEFAULT_LITELLM_BASE_URL).host]);
+const PLACEHOLDER_HOSTNAMES = new Set([canonicalHostname(new URL(DEFAULT_LITELLM_BASE_URL).hostname)]);
+
+function canonicalHostname(hostname: string): string {
+  return hostname.replace(/\.$/, "");
+}
+
+export function isPlaceholderHost(hostname: string): boolean {
+  return PLACEHOLDER_HOSTNAMES.has(canonicalHostname(hostname));
+}
 
 function refreshRequired(message: string): Error {
   return new Error(`${message}; a network refresh with a valid LiteLLM base URL is required`);
@@ -47,12 +55,12 @@ function proxyRoot(
   baseUrl: string,
   subject: string,
   allowInsecureHttp = false,
-): { root: string; canonical: string; host: string } {
+): { root: string; canonical: string; hostname: string } {
   try {
     const root = normalizeBaseUrl(baseUrl, allowInsecureHttp);
     const url = new URL(root);
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
-    return { root, canonical: url.href, host: url.host };
+    return { root, canonical: url.href, hostname: url.hostname };
   } catch {
     throw refreshRequired(`${subject} has an invalid LiteLLM model URL`);
   }
@@ -61,9 +69,9 @@ function proxyRoot(
 function activeCredentialRoot(
   root: string,
   allowInsecureHttp = false,
-): { root: string; canonical: string; host: string } {
+): { root: string; canonical: string; hostname: string } {
   const active = proxyRoot(root, "Active credentials", allowInsecureHttp);
-  if (PLACEHOLDER_HOSTS.has(active.host)) {
+  if (isPlaceholderHost(active.hostname)) {
     throw refreshRequired("Active credentials use a placeholder LiteLLM model host");
   }
   return active;
@@ -71,19 +79,21 @@ function activeCredentialRoot(
 
 function modelRootError(
   model: Model<LiteLLMApi>,
-  active: { root: string; canonical: string; host: string },
+  active: { root: string; canonical: string; hostname: string },
   allowInsecureHttp = false,
 ): Error | undefined {
   if (!isLiteLLMApi(model.api)) {
     return refreshRequired(`Cached model uses unsupported LiteLLM transport ${String(model.api)}`);
   }
-  let stored: { root: string; canonical: string; host: string };
+  let stored: { root: string; canonical: string; hostname: string };
   try {
     stored = proxyRoot(model.baseUrl, "Cached model", allowInsecureHttp);
   } catch (error) {
     return error instanceof Error ? error : refreshRequired("Cached model has an invalid LiteLLM model URL");
   }
-  if (PLACEHOLDER_HOSTS.has(stored.host)) return refreshRequired("Cached model uses a placeholder LiteLLM model host");
+  if (isPlaceholderHost(stored.hostname)) {
+    return refreshRequired("Cached model uses a placeholder LiteLLM model host");
+  }
   if (stored.canonical !== active.canonical) {
     return refreshRequired(
       `Cached model has stale LiteLLM model root ${stored.root}; active credentials use ${active.root}`,
@@ -123,7 +133,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models, options.allowInsecureHttp);
     },
     filterModels(models, credential) {
-      let active: { root: string; canonical: string; host: string };
+      let active: { root: string; canonical: string; hostname: string };
       try {
         const root = options.resolveCredentialRoot(credential);
         if (!root) return [];

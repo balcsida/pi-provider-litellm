@@ -19,7 +19,7 @@ import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normaliz
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, toNativeModels } from "./provider.js";
+import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { LiteLLMApi, LiteLLMModel, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -108,7 +108,7 @@ function resolveCredentialRoot(
 
 function requireCredentialRoot(root: string | undefined, providerName: string): string {
   if (!root) throw new Error(`no LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
-  if (new URL(root).host.toLowerCase() === new URL(DEFAULT_LITELLM_BASE_URL).host.toLowerCase()) {
+  if (isPlaceholderHost(new URL(root).hostname)) {
     throw new Error(`placeholder LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
   }
   return root;
