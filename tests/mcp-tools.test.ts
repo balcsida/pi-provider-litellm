@@ -186,6 +186,49 @@ describe("discoverMcpTools", () => {
 
     await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).rejects.toThrow("offline");
   });
+
+  it("accepts an explicit null discovery error as success", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { tools: [], error: null, message: null }));
+
+    await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).resolves.toEqual([]);
+  });
+
+  it("rejects a LiteLLM failure envelope without exposing its message", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [],
+        error: "partial_failure",
+        message: "internal server details",
+      }),
+    );
+
+    const error = await discoverMcpTools("https://litellm.example.com", "sk-test").catch((failure: unknown) => failure);
+
+    expect(error).toEqual(new Error("MCP discovery reported partial_failure"));
+    expect(String(error)).not.toContain("internal server details");
+  });
+
+  it("reports a sanitized and bounded LiteLLM failure tag", async () => {
+    const untrustedTag = `a\nLiteLLM MCP: forged\u001b[0m ${"x".repeat(500)}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [],
+        error: untrustedTag,
+        message: "different internal server details",
+      }),
+    );
+
+    const error = await discoverMcpTools("https://litellm.example.com", "sk-test").catch((failure: unknown) => failure);
+    const message = error instanceof Error ? error.message : String(error);
+    const prefix = "MCP discovery reported ";
+    const errorTag = message.slice(prefix.length);
+
+    expect(message).toMatch(/^MCP discovery reported [a-zA-Z0-9_.-]+…$/u);
+    expect(message).not.toContain("\n");
+    expect(message).not.toContain("\u001b");
+    expect(Buffer.byteLength(errorTag, "utf8")).toBeLessThanOrEqual(96);
+    expect(message).not.toContain("different internal server details");
+  });
 });
 
 describe("executeMcpTool", () => {
@@ -193,7 +236,7 @@ describe("executeMcpTool", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "ok" }));
 
     await expect(
-      executeMcpTool("http://host.docker.internal", "sk-test", "server", "tool", {}, undefined, true),
+      executeMcpTool("http://host.docker.internal", "sk-test", "server", "tool", {}, undefined, undefined, true),
     ).resolves.toBe(JSON.stringify("ok", null, 2));
 
     expect(fetchMock).toHaveBeenCalledWith(

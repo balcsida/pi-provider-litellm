@@ -581,6 +581,50 @@ describe("extension startup", () => {
     expect(listedHosts).toEqual(["first.example.com", "second.example.com"]);
   });
 
+  it("reports an empty catalog again after a refresh that registered tools", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    let listCalls = 0;
+    const catalogs: unknown[][] = [
+      [],
+      [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+      [],
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        const tools = catalogs[Math.min(listCalls, catalogs.length - 1)] ?? [];
+        listCalls += 1;
+        return jsonResponse(200, { tools });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await extension(pi);
+
+    const refresh = (host: string) =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: `https://${host}` } },
+        signal: new AbortController().signal,
+      });
+    const emptyCatalogLines = () =>
+      stderr.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("no MCP tools were registered"));
+
+    await refresh("a.example.com");
+    await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(1));
+    await refresh("b.example.com");
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
+    await refresh("c.example.com");
+    await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(2));
+  });
+
   it("does not block model refresh on MCP discovery", async () => {
     let mcpStarted!: () => void;
     let releaseMcp!: (response: Response) => void;

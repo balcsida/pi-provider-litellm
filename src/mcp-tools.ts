@@ -452,6 +452,15 @@ export async function discoverMcpTools(
     }
     const body = parseDiscoveryJson(await readBoundedText(response, MAX_DISCOVERY_BODY_BYTES, "MCP discovery"));
     const bodyRecord = asRecord(body);
+    // LiteLLM reports total MCP discovery failure in an HTTP 200 envelope. Preserve its
+    // machine-readable error tag after bounding and sanitizing it; never include the message.
+    if (bodyRecord?.error != null) {
+      const unboundedErrorTag = stringValue(bodyRecord.error)?.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const errorTag = unboundedErrorTag
+        ? truncateUtf8(unboundedErrorTag, MAX_DIAGNOSTIC_LABEL_BYTES, SHORT_TRUNCATION_MARKER)
+        : undefined;
+      throw new Error(errorTag ? `MCP discovery reported ${errorTag}` : "MCP discovery reported an error");
+    }
     // An unrecognized body shape is not the same as an empty catalog, and reporting it as "0 raw
     // entries" would send an operator looking at the wrong thing.
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : undefined;
@@ -514,18 +523,14 @@ export async function executeMcpTool(
   toolName: string,
   args: Record<string, unknown>,
   headers?: Record<string, string>,
-  signalOrAllowInsecure?: AbortSignal | boolean,
+  parentSignal?: AbortSignal,
   allowInsecureHttp = false,
 ): Promise<string> {
-  // `allowInsecureHttp` occupied this positional argument before cancellation support was added.
-  // Accept both forms so existing direct callers keep working while tool definitions can pass both.
-  const parentSignal = typeof signalOrAllowInsecure === "boolean" ? undefined : signalOrAllowInsecure;
-  const insecureHttpAllowed = typeof signalOrAllowInsecure === "boolean" ? signalOrAllowInsecure : allowInsecureHttp;
   parentSignal?.throwIfAborted();
   const signal = boundedSignal(CALL_TIMEOUT_MS, parentSignal);
   let response: Response;
   try {
-    response = await fetch(`${normalizeBaseUrl(baseUrl, insecureHttpAllowed)}/mcp-rest/tools/call`, {
+    response = await fetch(`${normalizeBaseUrl(baseUrl, allowInsecureHttp)}/mcp-rest/tools/call`, {
       method: "POST",
       headers: {
         ...headers,
