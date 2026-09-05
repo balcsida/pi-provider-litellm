@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --input-type=module - <<'NODE'
+          node --import tsx --input-type=module - <<'NODE'
           const assert = (condition, message) => {
             if (!condition) throw new Error(message);
           };
@@ -214,7 +214,7 @@ jobs:
           const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
           assert(rows.length === 2, `expected two grouped deployments, received ${rows.length}`);
           const { pathToFileURL } = await import("node:url");
-          const { discoverModels, resolveModelInfoCatalog } = await import(pathToFileURL("dist/discover.js").href);
+          const { discoverModels, resolveModelInfoCatalog } = await import(pathToFileURL("src/discover.ts").href);
           const costSources = {
             input: "input_cost_per_token",
             output: "output_cost_per_token",
