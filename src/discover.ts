@@ -578,7 +578,12 @@ function mapFromModelInfoGroup(
   let hasIntraRowAuthorityConflict = false;
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
     const evidence = resolveModelInfoCatalogEvidence(entry);
-    if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
+    if (evidence.authorityConflict || evidence.catalog?.semanticFamily === "conflicting") {
+      if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
+      if (evidence.catalog) return evidence.catalog;
+      const family = deploymentFamily(entry);
+      return family ? { semanticFamily: family } : undefined;
+    }
     const identity = resolveBackendIdentity(entry);
     const adapter = wireString(entry.model_info?.litellm_provider)?.trim();
     const hasBackendIdentity =
@@ -691,9 +696,9 @@ function healthDeployment(
   deploymentId: string | undefined,
 ): HealthDeployment | undefined {
   const detailRoute = wireString(detail?.model_name)?.trim() || undefined;
-  // /health owns the public route. Detail can enrich that route, but it cannot
-  // redirect reasoning authority to a different name.
-  const route = fallbackRoute?.trim() || detailRoute;
+  // /health exposes backend litellm_params.model values. Correlated detail owns
+  // the public model_name; the health value is only a fallback when detail lacks it.
+  const route = detailRoute || fallbackRoute?.trim();
   if (!route) return undefined;
   if (!detail) {
     return {
@@ -713,8 +718,8 @@ function healthDeployment(
         mode,
       },
     },
-    // Missing or mismatched detail provenance cannot authorize selectable levels.
-    denyLevels: detailRoute === undefined || (fallbackRoute !== undefined && detailRoute !== fallbackRoute.trim()),
+    // Detail without a public route cannot authorize selectable levels.
+    denyLevels: detailRoute === undefined,
   };
 }
 
@@ -788,13 +793,13 @@ function mapFromWildcardExpansion(
   // reasoning levels, compatibility carriers, or request policy to the child.
   const catalogModel = findCatalogModel(id, wireString(entry.owned_by));
   const parentIncomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
+  const base = catalogModel?.name ?? id;
   return {
     id,
-    name: catalogModel?.name ?? (parentIncomplete ? `${id} (incomplete metadata)` : id),
+    name: parentIncomplete ? `${base} (incomplete metadata)` : base,
     ...policy,
-    input:
-      catalogModel?.input ?? (matches.every((model) => model.input.includes("image")) ? ["text", "image"] : ["text"]),
-    cost: catalogModel?.cost ?? {
+    input: matches.every((model) => model.input.includes("image")) ? ["text", "image"] : ["text"],
+    cost: {
       input: Math.max(...matches.map((model) => model.cost.input)),
       output: Math.max(...matches.map((model) => model.cost.output)),
       cacheRead: Math.max(...matches.map((model) => model.cost.cacheRead)),

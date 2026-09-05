@@ -17,6 +17,7 @@ describe("minimizeModelInfo", () => {
           api_key: "secret",
           litellm_params: {
             model: "azure/gpt-5",
+            custom_llm_provider: "azure",
             api_base: "https://private.example/v1",
             api_version: "2025-03-01",
             allowed_openai_params: ["reasoning_effort", "extra_headers"],
@@ -37,6 +38,7 @@ describe("minimizeModelInfo", () => {
           model_name: "route-gpt",
           litellm_params: {
             model: "azure/gpt-5",
+            custom_llm_provider: "azure",
             api_base: "https://example.invalid",
             api_version: "2025-03-01",
             allowed_openai_params: ["reasoning_effort"],

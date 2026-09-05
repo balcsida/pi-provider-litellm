@@ -52,6 +52,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const probeModel = {
   id: "route-gpt",
+  deployments: 1,
   publicSources: [],
   liteLLMFlags: {},
   api: "openai-completions",
@@ -136,6 +137,47 @@ describe("probeDiscovery", () => {
     expect(publicCatalogOptions(snapshot)).toEqual({ offline: true });
   });
 
+  it("reduces duplicate deployment report evidence conservatively", async () => {
+    const duplicateSnapshot: ProbeSnapshot = {
+      modelInfo: {
+        data: [
+          {
+            model_name: "route-gpt",
+            litellm_params: { model: "openai/gpt-5", allowed_openai_params: ["reasoning_effort"] },
+            model_info: {
+              mode: "responses",
+              supports_low_reasoning_effort: true,
+              supports_xhigh_reasoning_effort: true,
+            },
+          },
+          {
+            model_name: "route-gpt",
+            litellm_params: { model: "anthropic/claude-opus-5" },
+            model_info: { mode: "chat", supports_low_reasoning_effort: false },
+          },
+        ],
+      },
+      modelGroupInfo: { data: [] },
+      models: { data: [] },
+    };
+    const dir = await mkdtemp(join(tmpdir(), "probe-duplicate-info-"));
+    const file = join(dir, "snapshot.json");
+    await writeFile(file, JSON.stringify(duplicateSnapshot));
+
+    const report = await probeDiscovery({ snapshot: file, src: join(process.cwd(), "src") });
+
+    expect(report.models[0]).toMatchObject({
+      deployments: 2,
+      publicSources: [],
+      liteLLMFlags: { supports_low_reasoning_effort: false, supports_xhigh_reasoning_effort: false },
+      predictions: {
+        protocol: "openai-completions",
+        reasoning: { low: false, xhigh: false },
+      },
+    });
+    expect(report.models[0]).not.toHaveProperty("identity");
+  });
+
   it("fails when model info is empty for a non-empty discovery", async () => {
     const dir = await mkdtemp(join(tmpdir(), "probe-empty-info-"));
     const sourceDir = join(dir, "src");
@@ -163,6 +205,7 @@ describe("probeDiscovery", () => {
     expect(report.models).toHaveLength(1);
     expect(report.models[0]).toMatchObject({
       id: "route-gpt",
+      deployments: 1,
       identity: { provider: "openai", modelId: "gpt-5", family: "openai" },
       liteLLMFlags: { supports_low_reasoning_effort: true },
       api: "openai-completions",

@@ -859,6 +859,75 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
   });
 
+  it("does not restore route-name Kimi policy after an intra-row authority conflict", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-k2.6-vanity",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "one", mode: "chat", base_model: "anthropic/claude-sonnet-4-6" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k2.6-vanity",
+      reasoning: false,
+      compat: { supportsStore: false },
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsDeveloperRole");
+    expect(result.models[0]).not.toHaveProperty("litellmPolicy");
+    expect(stderr.mock.calls.flat().join(" ")).not.toContain("strict tool-message repair is withheld");
+  });
+
+  it("does not enrich a conflicting family conclusion from a public-catalog hit", async () => {
+    vi.resetModules();
+    const { discoverModels: isolatedDiscoverModels } = await import("../src/discover.js");
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "conflicting-family-hit",
+              litellm_params: { model: "openai/private-gpt", allowed_openai_params: ["reasoning_effort"] },
+              model_info: {
+                id: "one",
+                mode: "chat",
+                litellm_provider: "openai",
+                base_model: "openai/kimi-k2.5",
+                supports_reasoning: true,
+              },
+            },
+          ],
+        }),
+      "models.dev/api.json": () =>
+        jsonResponse(200, {
+          openai: {
+            models: {
+              "kimi-k2.5": { reasoning_options: { type: "effort", values: ["low", "medium", "high"] } },
+            },
+          },
+        }),
+    });
+
+    const result = await isolatedDiscoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "conflicting-family-hit",
+      reasoning: true,
+      compat: { supportsStore: false },
+    });
+    expect(result.models[0]?.compat).not.toHaveProperty("cacheControlFormat");
+    expect(result.models[0]?.thinkingLevelMap).toEqual({ xhigh: null, max: null });
+    expect(result.models[0]).not.toHaveProperty("litellmPolicy");
+  });
+
   it("preserves Bedrock catalog authority", () => {
     expect(
       resolveModelInfoCatalog({
@@ -1736,7 +1805,25 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(result.models[0]?.thinkingLevelMap).toEqual(NO_REASONING_LEVELS);
   });
 
-  it("preserves catalog display metadata without borrowing wildcard policy authority", async () => {
+  it.each([
+    {
+      label: "complete",
+      pricing: {
+        input_cost_per_token: 0.000001,
+        output_cost_per_token: 0.000002,
+        cache_read_input_token_cost: 0.0000001,
+        cache_creation_input_token_cost: 0.0000002,
+      },
+      name: "GPT-5.5",
+      cost: { input: 1, output: 2, cacheRead: 0.09999999999999999, cacheWrite: 0.19999999999999998 },
+    },
+    {
+      label: "incomplete",
+      pricing: {},
+      name: "GPT-5.5 (incomplete metadata)",
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  ])("takes only catalog presentation metadata for a $label wildcard child", async ({ pricing, name, cost }) => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -1748,8 +1835,10 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
                 id: "wildcard",
                 mode: "chat",
                 supports_reasoning: true,
+                supports_vision: false,
                 max_input_tokens: 200_000,
                 max_output_tokens: 100_000,
+                ...pricing,
               },
             },
           ],
@@ -1768,9 +1857,9 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.5",
-      name: "GPT-5.5",
-      input: ["text", "image"],
-      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      name,
+      input: ["text"],
+      cost,
       contextWindow: 200_000,
       maxTokens: 100_000,
       reasoning: true,
@@ -1888,7 +1977,7 @@ describe("discoverModels response-mode models", () => {
     expect(String(stderr.mock.calls[0]?.[0])).toContain("explicitly incompatible deployment modes");
   });
 
-  it("keeps the health route authoritative when detail names a different route", async () => {
+  it("uses the correlated detail model_name instead of the health backend model", async () => {
     mockEndpoints({
       "/model/info?litellm_model_id=uuid-redirect": () =>
         jsonResponse(200, {
@@ -1908,8 +1997,8 @@ describe("discoverModels response-mode models", () => {
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
-    expect(result.models[0]).toMatchObject({ id: "authoritative-route", reasoning: true });
-    expect(result.models[0]?.thinkingLevelMap).toEqual(NO_REASONING_LEVELS);
+    expect(result.models[0]).toMatchObject({ id: "different-route", reasoning: true });
+    expect(result.models[0]?.thinkingLevelMap).toEqual({ off: null, xhigh: null, max: null });
   });
 
   it("keeps /health response-mode model_info fallbacks on Chat", async () => {
@@ -2285,6 +2374,46 @@ describe("discoverModels fallback to /health", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("groups health backends that correlate to one detail model_name", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=bedrock-a": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-opus-5",
+              litellm_params: { model: "bedrock/us.anthropic.claude-opus-5-a" },
+              model_info: { id: "bedrock-a", mode: "chat" },
+            },
+          ],
+        }),
+      "/model/info?litellm_model_id=bedrock-b": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "claude-opus-5",
+              litellm_params: { model: "bedrock/eu.anthropic.claude-opus-5-b" },
+              model_info: { id: "bedrock-b", mode: "chat" },
+            },
+          ],
+        }),
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "bedrock/us.anthropic.claude-opus-5", model_id: "bedrock-a" },
+            { model: "bedrock/eu.anthropic.claude-opus-5", model_id: "bedrock-b" },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("health");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]?.id).toBe("claude-opus-5");
   });
 
   it("bounds health detail concurrency while preserving endpoint order and completion progress", async () => {

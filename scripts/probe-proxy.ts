@@ -46,6 +46,7 @@ export interface ProbeReport {
   source: string;
   models: Array<{
     id: string;
+    deployments: number;
     identity?: ReturnType<typeof resolveBackendIdentity>;
     publicSources: string[];
     liteLLMFlags: Record<string, boolean>;
@@ -256,28 +257,57 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
     if (discovery.models.length > 0 && rows.length === 0) {
       throw new Error(`/model/info returned zero rows for ${discovery.models.length} discovered models`);
     }
-    const rowsByName = new Map(rows.map((row) => [row.model_name, row]));
+    const rowsByName = new Map<string, BackendIdentityRow[]>();
+    for (const row of rows) {
+      if (typeof row.model_name !== "string") continue;
+      const group = rowsByName.get(row.model_name) ?? [];
+      group.push(row);
+      rowsByName.set(row.model_name, group);
+    }
     const catalog = await loadPublicCatalog(publicCatalogOptions(snapshot));
     const models = discovery.models.map((model) => {
-      const row = rowsByName.get(model.id) ?? { model_name: model.id };
-      const identity = resolveBackendIdentity(row);
-      const provider = identity?.provider ?? (row.model_info as JsonObject | undefined)?.litellm_provider;
-      const publicRecord = identity
-        ? catalog.lookup(typeof provider === "string" ? provider : undefined, identity.modelId)
-        : undefined;
+      const group = rowsByName.get(model.id) ?? [{ model_name: model.id }];
+      const identities = group.map(resolveBackendIdentity);
+      const identityKey = identities[0] ? JSON.stringify(identities[0]) : undefined;
+      const identity =
+        identityKey && identities.every((candidate) => JSON.stringify(candidate) === identityKey)
+          ? identities[0]
+          : undefined;
+      const publicRecords = group.map((row, index) => {
+        const rowIdentity = identities[index];
+        const provider = rowIdentity?.provider ?? (row.model_info as JsonObject | undefined)?.litellm_provider;
+        return rowIdentity
+          ? catalog.lookup(typeof provider === "string" ? provider : undefined, rowIdentity.modelId)
+          : undefined;
+      });
+      const flagNames = new Set(group.flatMap((row) => Object.keys(reasoningFlags(row))));
+      const liteLLMFlags = Object.fromEntries(
+        [...flagNames].map((flag) => [flag, group.every((row) => reasoningFlags(row)[flag] === true)]),
+      );
+      const reasoningPredictions = group.map((row, index) =>
+        reasoningPrediction(row, publicRecords[index]?.effortLevels),
+      );
       return {
         id: model.id,
-        identity,
-        publicSources: publicRecord ? [publicRecord.source] : [],
-        liteLLMFlags: reasoningFlags(row),
+        deployments: group.length,
+        ...(identity ? { identity } : {}),
+        publicSources:
+          identity && publicRecords.every((record) => record !== undefined)
+            ? [...new Set(publicRecords.map((record) => record?.source).filter((source) => source !== undefined))]
+            : [],
+        liteLLMFlags,
         api: model.api,
         reasoning: model.reasoning,
         ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
         limits: { context: model.contextWindow, output: model.maxTokens },
         cost: model.cost,
         predictions: {
-          protocol: protocolPrediction(row),
-          reasoning: reasoningPrediction(row, publicRecord?.effortLevels),
+          protocol: group.every((row) => protocolPrediction(row) === "openai-responses")
+            ? "openai-responses"
+            : "openai-completions",
+          reasoning: Object.fromEntries(
+            LEVELS.map((level) => [level, reasoningPredictions.every((prediction) => prediction[level] === true)]),
+          ),
         },
       };
     });
