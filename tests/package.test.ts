@@ -283,12 +283,10 @@ describe("pi package compatibility", () => {
     );
 
     // A scanner bug that returned nothing would make the allowlist vacuously true, so
-    // require every shipped module to yield at least one specifier. The oracle itself is
-    // pinned by tests/import-specifiers.test.ts.
+    // require the shipped source set to yield specifiers. Pure helper modules may have no
+    // imports. The oracle itself is pinned by tests/import-specifiers.test.ts.
     expect(sourceFiles.length).toBeGreaterThan(0);
-    for (const [file, specifiers] of imports) {
-      expect(specifiers.length, `${file}: no module specifiers found`).toBeGreaterThan(0);
-    }
+    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(0);
 
     const allowed = new Set([
       "@earendil-works/pi-ai",
@@ -336,9 +334,37 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("~/.pi/agent/models-store.json");
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
     expect(readme).not.toContain("/litellm-refresh");
-    expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
+    expect(readme).toContain("Legacy `litellm-models.json` files are ignored and are not deleted");
+    expect(readme).toContain("https://models.dev/api.json");
+    expect(readme).toContain("litellm-models-dev.json");
+    expect(readme).toContain("caches the result for 28 days");
+    expect(readme).toContain("`PI_OFFLINE` suppresses activation-time discovery and the models.dev request");
+    expect(readme).toContain("`LITELLM_OFFLINE=1` also disables");
     expect(readme).not.toContain("older than 24 hours");
     expect(readme).not.toContain("enter `2` for SSO");
+  });
+});
+
+describe("deployment group documentation", () => {
+  it("documents conservative tier envelopes and evidence-free wildcard expansions", async () => {
+    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
+
+    expect(readme).toContain("Catalog thinking controls are intersected per level");
+    expect(readme).toContain("disagreement or absence becomes an explicit denial");
+    expect(readme).toContain("tiered pricing is the conservative worst-case envelope");
+    expect(readme).toContain("sorted union of every deployment's thresholds");
+    expect(readme).toContain("maximum applicable rate across all deployments");
+    expect(readme).toContain("Wildcard expansion retains every known tier");
+    expect(readme).toContain("suppressing a complete sibling's higher tier could understate the known worst-case rate");
+    expect(readme).toContain("IDs that match no surviving wildcard route are discarded");
+    expect(readme).toContain("A matched wildcard expansion");
+    expect(readme).toContain("catalog tiers remain for unaffected fields");
+    expect(readme).toContain("the public `model_name` route is never backend authority");
+    expect(readme).toContain("`litellm_params.custom_llm_provider` is provider evidence");
+    expect(readme).toContain("`/v1/models` and `/health` do not provide deployment-level backend identity");
+    expect(readme).toContain("an unqualified ID is resolved only within an explicitly recognized `owned_by` provider");
+    expect(readme).toContain("never searched across every Pi provider catalog");
+    expect(readme).not.toContain("all matching groups use compatible thresholds");
   });
 });
 

@@ -50,6 +50,16 @@ describe("LiteLLM smoke workflow", () => {
               litellm_params:`);
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-3-5-sonnet");
+    expect(workflow.match(/^[ \t]*- model_name: grouped-vidaimock[ \t]*$/gm)).toHaveLength(2);
+    expect(workflow).toContain('row.model_name === "grouped-vidaimock"');
+    expect(workflow).toContain('=== "chat,responses"');
+    expect(workflow).toContain('grouped[0].api === "openai-completions"');
+    expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
+    expect(workflow).toContain("catalog?.provider === catalogProvider && catalog?.catalogModelId === catalogModelId");
+    expect(workflow).toContain("const catalogCost = hasCatalogAuthority ? catalogs[index]?.cost : undefined");
+    expect(workflow).toContain("complete ? Math.max(...values) : 0");
+    expect(workflow).toContain("grouped[0].cost[field] === expectedCost[field]");
+    expect(workflow).toContain("Object.values(grouped[0].thinkingLevelMap).every((value) => value === null)");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1");
     expect(workflow).toContain("api_base: http://host.docker.internal:8100");
     expect(workflow).toContain("--add-host=host.docker.internal:host-gateway");

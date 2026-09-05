@@ -19,11 +19,22 @@
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
-- Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
+- Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
+- Shared thinking-level definitions and map intersection live in `src/thinking-levels.ts`.
+- Prefer `/model/info` for rich metadata. Use `/v1/models` as the status-code fallback only when `/model/info`
+  returns 401, 403, or 404; after a successful `/model/info`, also query `/v1/models` only to expand wildcard routes.
+- Treat `model_name` as a public route group, not backend evidence. Resolve backend identity from
+  `model_info.base_model` before `litellm_params.model`; treat `custom_llm_provider` as provider evidence, withholding
+  identity when a non-generic provider conflicts with the model prefix. Reduce every deployment before choosing
+  transport, capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
+- Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
 - The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
+- ` (no metadata)` is the fallback-only cache enrichment marker. Reduced `/model/info` groups and unresolved `/health`
+  routes use ` (incomplete metadata)`, which must remain ineligible for route-name cache enrichment.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
+- Pi stores discovered models in `models-store.json`; models.dev enrichment uses `litellm-models-dev.json` with a
+  28-day cache window under the Pi agent dir.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
 - Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, and service accounts warn and fail closed.
 - `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.

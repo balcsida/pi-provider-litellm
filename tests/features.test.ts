@@ -603,7 +603,9 @@ describe("feature parity", () => {
     await refreshProvider(pi);
 
     // Activation seeds the catalog, then the refresh discovers again; neither may touch MCP.
-    expect(new Set(requestedUrls)).toEqual(new Set(["https://litellm.example.com/model/info"]));
+    expect(new Set(requestedUrls)).toEqual(
+      new Set(["https://litellm.example.com/model/info", "https://models.dev/api.json"]),
+    );
     expect(pi.tools.map((tool) => tool.name)).toContain("litellm_skill_list");
     expect(pi.tools.some((tool) => tool.name.startsWith("mcp_"))).toBe(false);
   });

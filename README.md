@@ -232,9 +232,30 @@ Before tagging a release, keep `package.json` and `package-lock.json` versions i
 
 ## Model catalog
 
-Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models*.json` files are ignored and are not deleted.
+Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credentials remain in `~/.pi/agent/auth.json`. Legacy `litellm-models.json` files are ignored and are not deleted.
+
+For `/model/info` enrichment, the extension requests `https://models.dev/api.json` and caches the result for 28 days in `~/.pi/agent/litellm-models-dev.json`. `PI_OFFLINE` suppresses activation-time discovery and the models.dev request. `LITELLM_OFFLINE=1` also disables LiteLLM discovery; direct discovery callers use only an existing models.dev cache and do not refresh it.
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
+
+### Deployment groups and metadata authority
+
+LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model:
+
+- Responses is selected only when every row explicitly reports Responses mode; mixed or unknown groups use Chat.
+- Vision and reasoning are advertised only when every routable deployment resolves them as supported. An explicit `supports_reasoning: false` suppresses all thinking controls, even when catalog or router effort metadata exists. Catalog thinking controls are intersected per level: a level is exposed only when every deployment maps it to the same value, while disagreement or absence becomes an explicit denial. Router-reported reasoning-effort levels similarly require every deployment to explicitly support the level.
+- Context and output limits use the minimum resolved value across deployments.
+- Each displayed base-price field uses the maximum only when every deployment resolves that field; unresolved fields remain zero and the model name is suffixed with ` (incomplete metadata)`.
+- When complete base pricing comes from the catalog under unanimous catalog authority, tiered pricing is the conservative worst-case envelope. Its usable finite non-negative thresholds are the sorted union of every deployment's thresholds, and each price field at each interval is the maximum applicable rate across all deployments, floored by each deployment's base rate. Differing tier breakpoints are therefore preserved rather than treated as incompatible. An explicit `/model/info` base-price field replaces catalog pricing for that field at every threshold; catalog tiers remain for unaffected fields and are omitted only when every base-price field is explicit.
+- Reduced route groups omit tier ladders when complete base-pricing or catalog authority is unavailable. Wildcard expansion retains every known tier from matching groups even when another match has incomplete metadata: suppressing a complete sibling's higher tier could understate the known worst-case rate. The ` (incomplete metadata)` marker remains because the resulting envelope is only as complete as the available ladders.
+- Wildcard routes expand through `/v1/models`; dropped exact or wildcard groups suppress matching expanded ids.
+- Expanded ids inherit conservative bounds from every matching wildcard group, including the same union-threshold, maximum-applicable-rate tier envelope.
+- Catalog metadata is accepted only from unanimous deployment identities resolved from `model_info.base_model` first and `litellm_params.model` second; the public `model_name` route is never backend authority. `litellm_params.custom_llm_provider` is provider evidence for the selected backend model: a non-generic provider that conflicts with the model prefix withholds identity, while generic transport adapters are ignored. Recognized provider prefixes remain identity evidence even when the named model is absent from that provider's catalog. Different concrete catalog models conflict even within one provider; an unresolved Azure deployment name may still use its resolved `base_model`. Conflicts across a group trigger the bounded ambiguous-authority diagnostic; ambiguous groups are not matched across all Pi provider catalogs. Cross-host Claude routes spanning providers such as Vertex and Bedrock may intentionally trigger this withholding: explicit router metadata remains usable, but the route does not borrow either host's catalog metadata.
+- `/v1/models` and `/health` do not provide deployment-level backend identity. Their route IDs therefore have narrower catalog authority than `/model/info`: an unqualified ID is resolved only within an explicitly recognized `owned_by` provider on `/v1/models`, or through the bounded alias rules documented here (currently Anthropic aliases), and is never searched across every Pi provider catalog. `/health` has no owner field, so the same bounded ID/alias rule applies. Unresolved `/v1/models` entries remain evidence-free; unresolved `/health` entries remain permanently incomplete.
+
+The ` (no metadata)` suffix is reserved for unresolved, evidence-free entries mapped by the full `/v1/models` fallback. During wildcard expansion after a successful `/model/info` response, IDs that match no surviving wildcard route are discarded. A matched wildcard expansion inherits its matching groups' authority and is either unmarked or marked ` (incomplete metadata)`, never ` (no metadata)`. Only an unchanged evidence-free sentinel shape is eligible for bounded catalog enrichment on a later cache read.
+
+The ` (incomplete metadata)` suffix marks reduced `/model/info` groups, incomplete matched wildcard expansions, or unresolved `/health` routes and permanently prevents route-name cache enrichment. It means at least one metadata field is unknown, including cache pricing that the proxy omitted; known input/output prices may still be shown alongside the suffix.
 
 ## Troubleshooting
 
@@ -245,6 +266,8 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| `LiteLLM discovery: ... route group(s) have missing or conflicting deployment provider evidence` | One or more deployments lack resolvable backend authority or resolve to different providers or concrete catalog models. Add consistent `litellm_params.model`, `model_info.base_model`, or adapter metadata; catalog-derived limits, pricing, and reasoning metadata are withheld meanwhile. This may be intentional for cross-host routes such as Vertex/Bedrock Claude. |
+| A model is marked ` (incomplete metadata)` | `/model/info` or `/health` did not provide enough authoritative metadata. Explicit fields remain usable, but unknown cost fields are shown as zero and route-name cache enrichment stays disabled. |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
 | Enterprise SSO waits for token insertion | The proxy returned 404/405 for `/sso/cli/start`, so Pi used the legacy flow — upgrade LiteLLM or paste the UI token |

@@ -6,7 +6,8 @@ import type {
   ProviderAuth,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { discoverModels } from "../src/discover.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult } from "../src/types.js";
 
@@ -237,5 +238,89 @@ describe("createLiteLLMProvider", () => {
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
+  });
+});
+
+// Reduced groups deliberately use a permanent marker so offline cache reads
+// cannot re-authorize metadata that discovery withheld.
+describe("discovery and offline cache parity", () => {
+  let fetchSpy: MockInstance<typeof fetch> | undefined;
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  it("preserves reduced discovery metadata through the provider cache", async () => {
+    const cases = [
+      [
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "openai/gpt-5.5" },
+          },
+        ],
+        "openai/gpt-5.5",
+      ],
+      [
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "openai/gpt-5.5-internal-preview" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
+      ],
+      [
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "internal/mystery" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
+      ],
+      [
+        [
+          { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "b", mode: "chat" },
+            litellm_params: { model: "internal/mystery" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
+      ],
+      [
+        [
+          { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+          { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
+      ],
+    ] as const;
+
+    for (const [data, expectedName] of cases) {
+      fetchSpy?.mockRestore();
+      fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const onlineResult = await discoverModels("https://proxy.example/v1", "sk-test", { modelsDev: false });
+      const onlineModels = toNativeModels("litellm", "https://proxy.example/v1", onlineResult.models);
+
+      expect(onlineModels).toHaveLength(1);
+      expect(onlineModels[0]?.name).toBe(expectedName);
+
+      const provider = controller();
+      await provider.refreshModels?.(context(onlineModels, false));
+
+      expect(provider.getModels()).toEqual(onlineModels);
+    }
   });
 });

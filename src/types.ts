@@ -28,6 +28,8 @@ export interface DiscoveryOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   allowInsecureHttp?: boolean;
+  modelsDev?: boolean;
+  modelsDevCachePath?: string;
 }
 
 export interface ModelInfoEntry {
@@ -37,7 +39,10 @@ export interface ModelInfoEntry {
     custom_llm_provider?: string;
   };
   model_info?: {
+    id?: string;
     mode?: string | null;
+    litellm_provider?: string;
+    base_model?: string;
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;
