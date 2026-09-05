@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --input-type=module - <<'NODE'
+          node --import tsx --input-type=module - <<'NODE'
           const assert = (condition, message) => {
             if (!condition) throw new Error(message);
           };
@@ -223,7 +223,7 @@ jobs:
             `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
           );
           const { pathToFileURL } = await import("node:url");
-          const { discoverModels } = await import(pathToFileURL("dist/discover.js").href);
+          const { discoverModels } = await import(pathToFileURL("src/discover.ts").href);
           const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY);
           const grouped = result.models.filter((model) => model.id === "grouped-vidaimock");
           console.log(JSON.stringify(grouped, null, 2));
