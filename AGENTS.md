@@ -13,6 +13,7 @@
 - Use `npm ci` when reinstalling dependencies from the lockfile.
 - Use `npm test` for the full test suite.
 - Use `npm test -- tests/<file>.test.ts` for a focused Vitest run.
+- Use `npm run probe:proxy -- --snapshot <fixture> [--src <worktree>]` for snapshot probing, or `npm run probe:proxy -- --live --base-url $LITELLM_DEV_BASE_URL --max-requests 100` for the bounded live matrix.
 - Use `npm run check` before committing code changes; it runs Biome, typecheck, tests, and the package-content guard.
 - Use `npm run clean && npm run build` when changing exported/runtime code.
 - Use `npm run supply-chain:guard` and `npm pack --dry-run` when package contents, dependency policy, or release packaging change.

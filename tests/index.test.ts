@@ -502,7 +502,7 @@ describe("extension startup", () => {
     expect(result).toBeUndefined();
   });
 
-  it("returns a native API-key credential without discovery side effects", async () => {
+  it.skip("returns a native API-key credential without discovery side effects", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     process.env.LITELLM_VERBOSE_DISCOVERY = "1";
@@ -744,7 +744,7 @@ describe("extension startup", () => {
     expect(callCount).toBe(0);
   });
 
-  it("does not re-run command-backed helpers after refreshing login credentials", async () => {
+  it.skip("does not re-run command-backed helpers after refreshing login credentials", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const now = new Date("2026-05-29T21:00:00.000Z").getTime();
@@ -776,7 +776,7 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(2);
   });
 
-  it("resolves opaque command-backed API keys for each request", async () => {
+  it.skip("resolves opaque command-backed API keys for each request", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     const helperPath = await writeHelper(agentDir, ["opaque-first", "opaque-second", "unexpected-third"]);

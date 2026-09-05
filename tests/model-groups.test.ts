@@ -3,8 +3,8 @@ import {
   type CatalogResolution,
   type CatalogResolver,
   closeSerializerPolicy,
+  intersectThinkingLevelMaps,
   meetVendorCompat,
-  NO_TRANSMISSIBLE_LEVELS,
   reduceModelGroup,
   toResponsesLevels,
 } from "../src/model-groups.js";
@@ -607,127 +607,74 @@ describe("reduceModelGroup", () => {
     });
   });
 
-  it("uses catalog thinking maps for unambiguous identities", () => {
-    const thinkingLevelMap = { low: "low", high: "high" } as const;
-    const result = reduceModelGroup([row()], () => ({
-      provider: "xai",
-      reasoning: true,
-      thinkingLevelMap,
-      vision: false,
-      contextWindow: 128_000,
-      maxTokens: 16_384,
-      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-    }));
-
-    expect(result?.thinkingLevelMap).toEqual(thinkingLevelMap);
-  });
-
-  it("preserves explicit router reasoning efforts for a singleton", () => {
+  it("applies public effort levels and LiteLLM overrides", () => {
     const result = reduceModelGroup(
       [
         row({
           model_info: {
             id: "reasoner",
             mode: "chat",
-            supports_none_reasoning_effort: true,
+            supported_openai_params: ["reasoning_effort"],
             supports_minimal_reasoning_effort: false,
-            supports_high_reasoning_effort: true,
+            supports_xhigh_reasoning_effort: true,
           },
-          litellm_params: { model: "internal/reasoner" },
-        }),
-      ],
-      resolveCatalog,
-    );
-
-    expect(result?.thinkingLevelMap).toEqual({
-      off: "none",
-      minimal: null,
-      low: null,
-      medium: null,
-      high: "high",
-      xhigh: null,
-      max: null,
-    });
-  });
-
-  it("advertises a router reasoning effort only when every deployment explicitly supports it", () => {
-    const supportsLow = (id: string, low: boolean | undefined) =>
-      row({
-        model_info: {
-          id,
-          mode: "chat",
-          supports_low_reasoning_effort: low,
-          supports_high_reasoning_effort: true,
-        },
-        litellm_params: { model: `internal/${id}` },
-      });
-
-    expect(
-      reduceModelGroup([supportsLow("a", true), supportsLow("b", true)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, low: "low", high: "high" });
-    expect(
-      reduceModelGroup([supportsLow("a", true), supportsLow("b", undefined)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
-    expect(
-      reduceModelGroup([supportsLow("a", true), supportsLow("b", false)], resolveCatalog)?.thinkingLevelMap,
-    ).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
-  });
-
-  it("overlays conservative router reasoning evidence on catalog metadata", () => {
-    const catalogThinkingLevelMap = { off: "none", low: "low", high: "high", max: "max" } as const;
-    const result = reduceModelGroup(
-      [
-        row({
-          model_info: { id: "a", mode: "chat", supports_low_reasoning_effort: true },
-        }),
-        row({
-          model_info: { id: "b", mode: "chat", supports_low_reasoning_effort: false },
         }),
       ],
       () => ({
         provider: "openai",
         reasoning: true,
-        thinkingLevelMap: catalogThinkingLevelMap,
-        vision: true,
-        contextWindow: 128_000,
-        maxTokens: 16_384,
-        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+        effortLevels: ["minimal", "low", "medium", "high"],
       }),
     );
 
     expect(result?.thinkingLevelMap).toEqual({
-      ...NO_TRANSMISSIBLE_LEVELS,
-      ...catalogThinkingLevelMap,
-      low: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: null,
     });
   });
 
-  it("denies unreported levels when the router reports only high effort", () => {
+  it("leaves standard levels absent without a public opinion", () => {
     const result = reduceModelGroup(
       [
         row({
-          model_info: { id: "reasoner", mode: "chat", supports_high_reasoning_effort: true },
+          model_info: { supports_reasoning: true, supported_openai_params: ["reasoning_effort"] },
           litellm_params: { model: "internal/reasoner" },
         }),
       ],
-      resolveCatalog,
+      () => ({ reasoning: true }),
     );
 
-    expect(result?.thinkingLevelMap).toEqual({ ...NO_TRANSMISSIBLE_LEVELS, high: "high" });
+    expect(result?.thinkingLevelMap).toEqual({ xhigh: null, max: null });
   });
 
-  it("denies standard levels when the router reports only an xhigh denial", () => {
+  it("keeps off denied for an always-thinking Kimi generation when D4 supplies effort levels", () => {
     const result = reduceModelGroup(
       [
         row({
-          model_info: { id: "reasoner", mode: "chat", supports_xhigh_reasoning_effort: false },
-          litellm_params: { model: "internal/reasoner" },
+          model_info: { supports_reasoning: true, supported_openai_params: ["reasoning_effort"] },
+          litellm_params: { model: "moonshot/kimi-k2.7-code" },
         }),
       ],
-      resolveCatalog,
+      () => ({
+        provider: "moonshotai",
+        reasoning: true,
+        semanticModel: "kimi-k2.7-code",
+        effortLevels: ["low", "medium", "high"],
+      }),
     );
 
-    expect(result?.thinkingLevelMap).toEqual(NO_TRANSMISSIBLE_LEVELS);
+    expect(result?.reasoningPolicy.thinkingLevelMap).toEqual({
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null,
+      off: null,
+    });
   });
 
   it("adopts tiered pricing when identical tiers are declared in any property order", () => {
@@ -934,72 +881,6 @@ describe("reduceModelGroup", () => {
       },
     },
     {
-      name: "Kimi K3 with effort",
-      semanticModel: "kimi-k3" as const,
-      params: ["reasoning_effort"],
-      expected: {
-        reasoning: true,
-        thinkingLevelMap: {
-          off: null,
-          minimal: null,
-          low: "low",
-          medium: null,
-          high: "high",
-          xhigh: null,
-          max: "max",
-        },
-        compat: {
-          thinkingFormat: "openai",
-          supportsReasoningEffort: true,
-          requiresReasoningContentOnAssistantMessages: true,
-        },
-      },
-    },
-    {
-      name: "DeepSeek V4 with native controls",
-      semanticModel: "deepseek-v4" as const,
-      params: ["thinking", "reasoning_effort"],
-      expected: {
-        reasoning: true,
-        thinkingLevelMap: {
-          off: "off",
-          minimal: null,
-          low: null,
-          medium: null,
-          high: "high",
-          xhigh: null,
-          max: "max",
-        },
-        compat: {
-          thinkingFormat: "deepseek",
-          supportsReasoningEffort: true,
-          requiresReasoningContentOnAssistantMessages: true,
-        },
-      },
-    },
-    {
-      name: "DeepSeek V4 through an effort-only route",
-      semanticModel: "deepseek-v4" as const,
-      params: ["reasoning_effort"],
-      expected: {
-        reasoning: true,
-        thinkingLevelMap: {
-          off: null,
-          minimal: null,
-          low: null,
-          medium: null,
-          high: "high",
-          xhigh: null,
-          max: "max",
-        },
-        compat: {
-          thinkingFormat: "openai",
-          supportsReasoningEffort: true,
-          requiresReasoningContentOnAssistantMessages: true,
-        },
-      },
-    },
-    {
       name: "DeepSeek V4 through a thinking-only route",
       semanticModel: "deepseek-v4" as const,
       params: ["thinking"],
@@ -1033,6 +914,84 @@ describe("reduceModelGroup", () => {
     );
 
     expect(result?.reasoningPolicy).toEqual(expected);
+  });
+
+  it.each([
+    {
+      name: "Kimi K2.7 Code with effort",
+      semanticModel: "kimi-k2.7-code" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: null, max: null },
+        compat: {
+          supportsReasoningEffort: false,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "Kimi K3 with effort",
+      semanticModel: "kimi-k3" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: null, max: null },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 with native controls",
+      semanticModel: "deepseek-v4" as const,
+      params: ["thinking", "reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { xhigh: null, max: null },
+        compat: {
+          thinkingFormat: "deepseek",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+    {
+      name: "DeepSeek V4 through an effort-only route",
+      semanticModel: "deepseek-v4" as const,
+      params: ["reasoning_effort"],
+      expected: {
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: null, max: null },
+        compat: {
+          thinkingFormat: "openai",
+          supportsReasoningEffort: true,
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    },
+  ])("derives $name policy from literal D4 expectations", ({ semanticModel, params, expected }) => {
+    const result = reduceModelGroup(
+      [
+        row({
+          model_info: { supported_openai_params: params },
+          litellm_params: { model: "internal/model" },
+        }),
+      ],
+      () => ({ semanticModel }),
+    );
+
+    expect(result?.reasoningPolicy).toEqual(expected);
+  });
+
+  it("closes a level when any wildcard parent omits its level map", () => {
+    expect(intersectThinkingLevelMaps([undefined, { high: "high" }])).toEqual({ high: null });
+  });
+
+  it("closes a level when wildcard parents disagree on its wire value", () => {
+    expect(intersectThinkingLevelMaps([{ high: "high" }, { high: "max" }])).toEqual({ high: null });
   });
 
   it.each([

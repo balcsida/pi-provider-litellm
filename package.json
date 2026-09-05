@@ -39,6 +39,7 @@
     "lint": "biome check --error-on-warnings .",
     "format": "biome check --write .",
     "test": "vitest --run --dir tests",
+    "probe:proxy": "tsx scripts/probe-proxy.ts",
     "supply-chain:guard": "tsx scripts/supply-chain-guard.ts",
     "check": "npm run lint && npm run typecheck && npm test && npm run supply-chain:guard",
     "prepublishOnly": "npm run check && npm run clean && npm run build && npm run supply-chain:guard"

@@ -1,0 +1,578 @@
+[
+ {
+  "path": "chat",
+  "model": "gpt-5.1",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.9
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.1",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 9,
+  "error": null,
+  "secs": 2.2
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.1",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 9,
+  "error": null,
+  "secs": 2.0
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.1",
+  "level": "xhigh",
+  "status": 400,
+  "reasoning_tokens": null,
+  "error": "{\"message\": \"litellm.UnsupportedParamsError: reasoning_effort=xhigh is not supported for this model.. Received Model Group=gpt-5.1\\nAvailable Model Group Fallba",
+  "secs": 0.4
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.4",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 2.1
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.4",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.4",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 6,
+  "error": null,
+  "secs": 2.0
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.4",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 24,
+  "error": null,
+  "secs": 1.5
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.5",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.8
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.5",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.5",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 5,
+  "error": null,
+  "secs": 1.9
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.5",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.4
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-sol",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-sol",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.4
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-sol",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.3
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-sol",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.5
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-terra",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.2
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-terra",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.1
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-terra",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.1
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.6-terra",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.3
+ },
+ {
+  "path": "chat",
+  "model": "o3",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "o3",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 2.2
+ },
+ {
+  "path": "chat",
+  "model": "o3",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "o3",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.6
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 2.6
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 192,
+  "error": null,
+  "secs": 3.1
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5",
+  "level": "xhigh",
+  "status": 400,
+  "reasoning_tokens": null,
+  "error": "{\"message\": \"litellm.UnsupportedParamsError: reasoning_effort=xhigh is not supported for this model.. Received Model Group=gpt-5\\nAvailable Model Group Fallback",
+  "secs": 0.3
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5-mini",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.5
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5-mini",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.9
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5-mini",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 128,
+  "error": null,
+  "secs": 2.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5-mini",
+  "level": "xhigh",
+  "status": 400,
+  "reasoning_tokens": null,
+  "error": "{\"message\": \"litellm.UnsupportedParamsError: reasoning_effort=xhigh is not supported for this model.. Received Model Group=gpt-5-mini\\nAvailable Model Group Fal",
+  "secs": 0.3
+ },
+ {
+  "path": "chat",
+  "model": "deepseek-v4-flash",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": null,
+  "error": null,
+  "secs": 1.3
+ },
+ {
+  "path": "chat",
+  "model": "deepseek-v4-flash",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": null,
+  "error": null,
+  "secs": 0.8
+ },
+ {
+  "path": "chat",
+  "model": "deepseek-v4-flash",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": null,
+  "error": null,
+  "secs": 1.1
+ },
+ {
+  "path": "chat",
+  "model": "deepseek-v4-flash",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": null,
+  "error": null,
+  "secs": 0.9
+ },
+ {
+  "path": "chat",
+  "model": "kimi-k3",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 7,
+  "error": null,
+  "secs": 1.1
+ },
+ {
+  "path": "chat",
+  "model": "kimi-k3",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 23,
+  "error": null,
+  "secs": 4.8
+ },
+ {
+  "path": "chat",
+  "model": "kimi-k3",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 1,
+  "error": null,
+  "secs": 1.0
+ },
+ {
+  "path": "chat",
+  "model": "kimi-k3",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 3.6
+ },
+ {
+  "path": "chat",
+  "model": "glm-5",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 0.5
+ },
+ {
+  "path": "chat",
+  "model": "glm-5",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 5.1
+ },
+ {
+  "path": "chat",
+  "model": "glm-5",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 0.5
+ },
+ {
+  "path": "chat",
+  "model": "glm-5",
+  "level": "xhigh",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 0.5
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.3-codex",
+  "level": "low",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 2.1
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.3-codex",
+  "level": "medium",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.6
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.3-codex",
+  "level": "high",
+  "status": 200,
+  "reasoning_tokens": 0,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "chat",
+  "model": "gpt-5.3-codex",
+  "level": "xhigh",
+  "status": 400,
+  "reasoning_tokens": null,
+  "error": "{\"message\": \"litellm.UnsupportedParamsError: reasoning_effort=xhigh is not supported for this model.. Received Model Group=gpt-5.3-codex\\nAvailable Model Group ",
+  "secs": 0.3
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-5",
+  "level": "low",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.4
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-5",
+  "level": "medium",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.4
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-5",
+  "level": "high",
+  "status": 200,
+  "thinking_block": true,
+  "error": null,
+  "secs": 1.7
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-5",
+  "level": "max",
+  "status": 200,
+  "thinking_block": true,
+  "error": null,
+  "secs": 2.0
+ },
+ {
+  "path": "messages",
+  "model": "claude-fable-5-1",
+  "level": "low",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 3.3
+ },
+ {
+  "path": "messages",
+  "model": "claude-fable-5-1",
+  "level": "medium",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 3.0
+ },
+ {
+  "path": "messages",
+  "model": "claude-fable-5-1",
+  "level": "high",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 2.9
+ },
+ {
+  "path": "messages",
+  "model": "claude-fable-5-1",
+  "level": "max",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 2.5
+ },
+ {
+  "path": "messages",
+  "model": "claude-sonnet-4-6",
+  "level": "low",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.2
+ },
+ {
+  "path": "messages",
+  "model": "claude-sonnet-4-6",
+  "level": "medium",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.0
+ },
+ {
+  "path": "messages",
+  "model": "claude-sonnet-4-6",
+  "level": "high",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.6
+ },
+ {
+  "path": "messages",
+  "model": "claude-sonnet-4-6",
+  "level": "max",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.1
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-4-6",
+  "level": "low",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.5
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-4-6",
+  "level": "medium",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.5
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-4-6",
+  "level": "high",
+  "status": 200,
+  "thinking_block": false,
+  "error": null,
+  "secs": 1.6
+ },
+ {
+  "path": "messages",
+  "model": "claude-opus-4-6",
+  "level": "max",
+  "status": 200,
+  "thinking_block": true,
+  "error": null,
+  "secs": 1.8
+ }
+]

@@ -30,6 +30,7 @@ export interface LiteLLMModelPolicy {
 
 export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
   api?: LiteLLMApi;
+  litellmDiscoveryVersion?: 2;
   litellmPolicy?: LiteLLMModelPolicy;
   // Persist the deployment's accepted Responses reasoning carrier so cached
   // models cannot regain catalog-derived selectors without the same evidence.
@@ -37,6 +38,7 @@ export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "ap
 };
 
 export type LiteLLMModel = Model<LiteLLMApi> & {
+  litellmDiscoveryVersion?: 2;
   litellmPolicy?: LiteLLMModelPolicy;
   litellmResponsesReasoningControl?: true;
 };
@@ -51,6 +53,7 @@ export interface DiscoveryOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   allowInsecureHttp?: boolean;
+  modelsDev?: boolean;
 }
 
 export interface ModelInfoEntry {
@@ -76,8 +79,6 @@ export interface ModelInfoEntry {
     supports_none_reasoning_effort?: boolean;
     supports_minimal_reasoning_effort?: boolean;
     supports_low_reasoning_effort?: boolean;
-    supports_medium_reasoning_effort?: boolean;
-    supports_high_reasoning_effort?: boolean;
     supports_xhigh_reasoning_effort?: boolean;
     supports_max_reasoning_effort?: boolean;
     supports_vision?: boolean;

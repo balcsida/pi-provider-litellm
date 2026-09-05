@@ -117,7 +117,7 @@ describe("native provider stream compatibility", () => {
       params: ["reasoning_effort"],
       reasoning: "max" as const,
       expected: {
-        reasoning_effort: "max",
+        reasoning_effort: "high",
         include_reasoning: false,
         reasoning_content: false,
         merge_reasoning_content_in_choices: true,
@@ -129,7 +129,7 @@ describe("native provider stream compatibility", () => {
       backend: "deepseek/deepseek-v4",
       params: ["thinking", "reasoning_effort"],
       reasoning: "max" as const,
-      expected: { thinking: { type: "enabled" }, reasoning_effort: "max" },
+      expected: { thinking: { type: "enabled" }, reasoning_effort: "high" },
       absent: ["include_reasoning", "reasoning_content", "merge_reasoning_content_in_choices"],
     },
     {
@@ -161,12 +161,12 @@ describe("native provider stream compatibility", () => {
       {
         model_name: "private-reasoner",
         litellm_params: { model: "internal/reasoner", allowed_openai_params: ["reasoning_effort"] },
-        model_info: { mode: "chat", supports_reasoning: true, supports_high_reasoning_effort: true },
+        model_info: { mode: "chat", supports_reasoning: true },
       },
     ]);
     respond(...successfulResponse("ok"));
 
-    expect(getSupportedThinkingLevels(model)).toEqual(["high"]);
+    expect(getSupportedThinkingLevels(model)).toEqual(["off", "minimal", "low", "medium", "high"]);
     await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
 
     expect(requests[0]).toMatchObject({ reasoning_effort: "high" });
@@ -455,14 +455,14 @@ describe("native provider stream compatibility", () => {
       name: "Kimi K3",
       backend: "moonshot/kimi-k3",
       params: ["reasoning_effort"],
-      expected: { reasoning_effort: "max" },
+      expected: { reasoning_effort: "high" },
       absent: ["thinking"],
     },
     {
       name: "DeepSeek V4",
       backend: "deepseek/deepseek-v4",
       params: ["thinking", "reasoning_effort"],
-      expected: { thinking: { type: "enabled" }, reasoning_effort: "max" },
+      expected: { thinking: { type: "enabled" }, reasoning_effort: "high" },
       absent: [],
     },
   ])("rehydrates exact $name policy and wire behavior offline", async ({ backend, params, expected, absent }) => {

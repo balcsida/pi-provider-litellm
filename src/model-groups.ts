@@ -25,6 +25,7 @@ export interface CatalogResolution {
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   reasoning?: boolean;
+  effortLevels?: string[];
   thinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   vision?: boolean;
   contextWindow?: number;
@@ -65,15 +66,6 @@ export interface ReducedModelGroup {
 const RESPONSES_MODE_PATTERN = /^responses?$/i;
 const CHAT_STYLE_MODE_PATTERN = /^chat$/i;
 const COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
-const REASONING_EFFORT_FLAGS = [
-  ["off", "none", "supports_none_reasoning_effort"],
-  ["minimal", "minimal", "supports_minimal_reasoning_effort"],
-  ["low", "low", "supports_low_reasoning_effort"],
-  ["medium", "medium", "supports_medium_reasoning_effort"],
-  ["high", "high", "supports_high_reasoning_effort"],
-  ["xhigh", "xhigh", "supports_xhigh_reasoning_effort"],
-  ["max", "max", "supports_max_reasoning_effort"],
-] as const;
 type CostField = (typeof COST_FIELDS)[number];
 
 // `/model/info` is parsed JSON from operator-authored proxy config, so a field
@@ -172,17 +164,50 @@ function explicitLimit(value: number | undefined): number | undefined {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? undefined : value;
 }
 
-function routerThinkingLevelMap(entries: readonly ModelInfoEntry[]): DiscoveredModel["thinkingLevelMap"] {
+const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+const LITELLM_LEVEL_FLAGS = {
+  off: "supports_none_reasoning_effort",
+  minimal: "supports_minimal_reasoning_effort",
+  low: "supports_low_reasoning_effort",
+  xhigh: "supports_xhigh_reasoning_effort",
+  max: "supports_max_reasoning_effort",
+} as const;
+
+function normalizeEffort(level: string): (typeof EXTENDED_LEVELS)[number] | undefined {
+  const normalized = level === "none" ? "off" : level;
+  return EXTENDED_LEVELS.find((candidate) => candidate === normalized);
+}
+
+// D4 starts from public catalog evidence when available. Without a public
+// opinion, standard levels remain absent so Pi keeps its defaults; xhigh/max are
+// always closed unless LiteLLM explicitly opts in.
+function reasoningLevelMap(
+  entries: readonly ModelInfoEntry[],
+  catalogEfforts: readonly (readonly string[] | undefined)[],
+): DiscoveredModel["thinkingLevelMap"] {
+  const publicSets = catalogEfforts
+    .filter((levels): levels is readonly string[] => levels !== undefined)
+    .map((levels) => new Set(levels.map(normalizeEffort).filter((level) => level !== undefined)));
+  const levels =
+    publicSets.length > 0 ? EXTENDED_LEVELS.filter((level) => publicSets.every((set) => set.has(level))) : [];
   const map: NonNullable<DiscoveredModel["thinkingLevelMap"]> = {};
-  for (const [level, effort, flag] of REASONING_EFFORT_FLAGS) {
-    const reported = entries.map((entry) => entry.model_info?.[flag]);
-    if (!reported.some((value) => value !== undefined)) continue;
-    // Preserve upstream singleton behavior (including explicit false), while a
-    // group advertises a router-reported effort only when every deployment says
-    // true. Missing, false, or unreadable evidence suppresses that level.
-    map[level] = reported.every((value) => wireBoolean(value) === true) ? effort : null;
+  for (const level of levels) map[level] = level === "off" ? "none" : level;
+
+  for (const [level, flag] of Object.entries(LITELLM_LEVEL_FLAGS) as Array<
+    [keyof typeof LITELLM_LEVEL_FLAGS, (typeof LITELLM_LEVEL_FLAGS)[keyof typeof LITELLM_LEVEL_FLAGS]]
+  >) {
+    const reported = entries.map((entry) => wireBoolean(entry.model_info?.[flag]));
+    if (reported.some((value) => value === false)) map[level] = null;
+    else if (reported.length > 0 && reported.every((value) => value === true)) {
+      map[level] = level === "off" ? "none" : level;
+    }
   }
-  return Object.keys(map).length > 0 ? map : undefined;
+  for (const level of ["xhigh", "max"] as const) {
+    const flag = LITELLM_LEVEL_FLAGS[level];
+    if (!entries.every((entry) => wireBoolean(entry.model_info?.[flag]) === true)) map[level] = null;
+  }
+  return map;
 }
 
 function normalizeParams(params: unknown): Set<string> {
@@ -226,7 +251,22 @@ export const NO_TRANSMISSIBLE_LEVELS = {
   max: null,
 } as const;
 
-const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+// A level mentioned by any independent authority is selectable only when every
+// authority supplies the same mapping. Missing, conflicting, and explicit false
+// evidence all close that level.
+export function intersectThinkingLevelMaps(
+  maps: readonly DiscoveredModel["thinkingLevelMap"][],
+): DiscoveredModel["thinkingLevelMap"] {
+  if (maps.every((map) => map === undefined)) return undefined;
+  const intersection: NonNullable<DiscoveredModel["thinkingLevelMap"]> = {};
+  for (const level of EXTENDED_LEVELS) {
+    const values = maps.map((map) => map?.[level]);
+    if (values.every((value) => value === undefined)) continue;
+    const first = values[0];
+    intersection[level] = first !== undefined && values.every((value) => value === first) ? first : null;
+  }
+  return Object.keys(intersection).length > 0 ? intersection : undefined;
+}
 
 // Efforts the Responses API accepts. pi-ai passes an unmapped level through
 // verbatim and reads `thinkingLevelMap.off` as the disable value, so a Chat-shaped
@@ -385,8 +425,8 @@ export function closeSerializerPolicy(input: {
   if (!allowInferredChatCarrier) {
     return { reasoning, thinkingLevelMap: NO_TRANSMISSIBLE_LEVELS, compat: deniedCompat };
   }
-  // Fresh discovery may establish a carrier through router level flags even when
-  // LiteLLM omits explicit compatibility metadata. Legacy cache maps cannot.
+  // Callers that explicitly permit inference may treat their own direct router
+  // evidence as a carrier. Route, catalog, and legacy cache evidence must opt out.
   return {
     reasoning,
     thinkingLevelMap: candidateLevels,
@@ -614,26 +654,42 @@ export function reduceModelGroup(
     const tiers = unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.cost?.tiers)));
     if (tiers) cost.tiers = JSON.parse(tiers);
   }
-  const catalogThinkingLevelMap = catalogProvider
-    ? unanimous(catalogAuthority.map((catalog) => stableJson(catalog?.thinkingLevelMap)))
-    : undefined;
-  const parsedCatalogThinkingLevelMap = catalogThinkingLevelMap ? JSON.parse(catalogThinkingLevelMap) : undefined;
-  const routerMap = routerThinkingLevelMap(deployments);
-  const thinkingLevelMap =
-    parsedCatalogThinkingLevelMap || routerMap
-      ? {
-          ...(routerMap ? NO_TRANSMISSIBLE_LEVELS : {}),
-          ...parsedCatalogThinkingLevelMap,
-          ...routerMap,
-        }
-      : undefined;
   const acceptedOpenAIParams = intersectParams(deployments);
   const acceptsResponsesReasoningControl = acceptedOpenAIParams.includes("reasoning_effort");
+  const publicEfforts = catalogAuthority.map(
+    (catalog) =>
+      catalog?.effortLevels ??
+      (catalog?.thinkingLevelMap
+        ? Object.entries(catalog.thinkingLevelMap)
+            .filter(([, value]) => value !== null)
+            .map(([level]) => level)
+        : undefined),
+  );
+  const d4Map = reasoningLevelMap(deployments, publicEfforts);
+  const thinkingLevelMap = acceptsResponsesReasoningControl ? d4Map : undefined;
   const kimiEvidence = deployments.map((entry) => kimiDeploymentEvidence(entry));
   const unanimousNormalKimi = kimiEvidence.every((evidence) => evidence.identified && !evidence.forcedThinking);
 
   const id = wireString(deployments[0]?.model_name);
   if (id === undefined) return undefined;
+
+  const semanticReasoningPolicy = buildReasoningPolicy(
+    semanticModel,
+    acceptedOpenAIParams,
+    reasoning,
+    explicitlyUnsupported,
+  );
+  const reasoningPolicy = semanticReasoningPolicy.thinkingLevelMap
+    ? {
+        ...semanticReasoningPolicy,
+        thinkingLevelMap: acceptsResponsesReasoningControl
+          ? {
+              ...d4Map,
+              ...(semanticReasoningPolicy.thinkingLevelMap.off === null ? { off: null } : {}),
+            }
+          : semanticReasoningPolicy.thinkingLevelMap,
+      }
+    : semanticReasoningPolicy;
 
   return {
     id,
@@ -653,7 +709,7 @@ export function reduceModelGroup(
     normalizeThinkTags: unanimousNormalKimi,
     suppressReasoningVisibility: unanimousNormalKimi,
     acceptedOpenAIParams,
-    reasoningPolicy: buildReasoningPolicy(semanticModel, acceptedOpenAIParams, reasoning, explicitlyUnsupported),
+    reasoningPolicy,
   };
 }
 
@@ -661,6 +717,11 @@ export function catalogResolution(provider: string, model: Model<Api>): CatalogR
   return {
     provider,
     reasoning: model.reasoning,
+    effortLevels: model.thinkingLevelMap
+      ? Object.entries(model.thinkingLevelMap)
+          .filter(([, value]) => value !== null)
+          .map(([level]) => level)
+      : undefined,
     thinkingLevelMap: model.thinkingLevelMap,
     vision: model.input.includes("image"),
     contextWindow: model.contextWindow,

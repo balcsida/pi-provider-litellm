@@ -1,7 +1,10 @@
 import { isIP } from "node:net";
+import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { LITELLM_DISCOVERY_VERSION, resolveBackendIdentity } from "./backend-identity.js";
 import {
   type CatalogResolution,
   catalogResolution,
@@ -9,6 +12,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   hasMixedIncompatibleDeploymentModes,
+  intersectThinkingLevelMaps,
   isResponsesMode,
   meetVendorCompat,
   reduceModelGroup,
@@ -16,6 +20,7 @@ import {
   type SemanticModel,
   wireString,
 } from "./model-groups.js";
+import { loadPublicCatalog, type PublicCatalog } from "./public-catalog.js";
 import type {
   DiscoveredModel,
   DiscoveryOptions,
@@ -384,7 +389,12 @@ function qualifiedIdentityProvider(model: string, family: SemanticFamily | undef
   return adapterCatalogProvider(qualifier);
 }
 
-export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
+interface ModelInfoCatalogEvidence {
+  catalog?: CatalogResolution;
+  authorityConflict: boolean;
+}
+
+function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalogEvidence {
   const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
   const customProvider = adapterCatalogProvider(entry.litellm_params?.custom_llm_provider);
   const routingModel = wireString(entry.litellm_params?.model)?.trim() || undefined;
@@ -403,8 +413,9 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   const model =
     contradictoryGenerations || resolvedFamily === "conflicting" ? undefined : (routingGeneration ?? baseGeneration);
   const candidates = [routingModel, baseModel].filter((candidate): candidate is string => candidate !== undefined);
+  const lookupProvider = adapterProvider ?? customProvider;
   const resolutions = candidates
-    .map((candidate) => resolveCatalogModel(candidate, adapterProvider))
+    .map((candidate) => resolveCatalogModel(candidate, lookupProvider))
     .filter((resolved): resolved is NonNullable<typeof resolved> => resolved !== undefined);
   const evidenceProviders = new Set([
     ...resolutions.map((resolved) => resolved.provider),
@@ -418,23 +429,34 @@ export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolutio
   if (adapterProvider && (!identityFamily || !isGenericTransportAdapter(entry.model_info?.litellm_provider))) {
     evidenceProviders.add(adapterProvider);
   }
-  if (evidenceProviders.size > 1) return undefined;
+  if (evidenceProviders.size > 1) return { authorityConflict: true };
   if (catalogIdentities.size > 1) {
-    return resolvedFamily || model
-      ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
-      : undefined;
+    const catalog =
+      resolvedFamily || model
+        ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
+        : undefined;
+    return { catalog, authorityConflict: true };
   }
   const resolved = resolutions[0];
   if (resolved) {
     return {
-      ...catalogResolution(resolved.provider, resolved.model),
-      ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}),
-      ...(model ? { semanticModel: model } : {}),
+      catalog: {
+        ...catalogResolution(resolved.provider, resolved.model),
+        ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}),
+        ...(model ? { semanticModel: model } : {}),
+      },
+      authorityConflict: false,
     };
   }
-  return resolvedFamily || model
-    ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
-    : undefined;
+  const catalog =
+    resolvedFamily || model
+      ? { ...(resolvedFamily ? { semanticFamily: resolvedFamily } : {}), ...(model ? { semanticModel: model } : {}) }
+      : undefined;
+  return { catalog, authorityConflict: false };
+}
+
+export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
+  return resolveModelInfoCatalogEvidence(entry).catalog;
 }
 
 async function fetchJson<T>(
@@ -544,6 +566,7 @@ function hasReadableBackendEvidence(entry: ModelInfoEntry): boolean {
 
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
+  publicCatalog: PublicCatalog | undefined,
   options: {
     ambiguousRoutes?: string[];
     conflictingFamilyRoutes?: string[];
@@ -552,24 +575,48 @@ function mapFromModelInfoGroup(
     denyLevels?: boolean;
   } = {},
 ): DiscoveredModel | undefined {
+  let hasIntraRowAuthorityConflict = false;
   const reduced = reduceModelGroup(entries, (entry, singleton) => {
-    const resolved = resolveModelInfoCatalog(entry);
-    if (resolved) return resolved;
+    const evidence = resolveModelInfoCatalogEvidence(entry);
+    if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
+    const identity = resolveBackendIdentity(entry);
+    const adapter = wireString(entry.model_info?.litellm_provider)?.trim();
+    const hasBackendIdentity =
+      wireString(entry.model_info?.base_model) !== undefined || wireString(entry.litellm_params?.model) !== undefined;
+    const publicRecord =
+      identity && hasBackendIdentity
+        ? publicCatalog?.lookup(identity.provider ?? adapter, identity.modelId)
+        : undefined;
+    if (evidence.catalog || (publicRecord && identity)) {
+      return {
+        ...evidence.catalog,
+        ...(publicRecord ? { provider: evidence.catalog?.provider ?? publicRecord.provider } : {}),
+        ...(identity?.family ? { semanticFamily: identity.family } : {}),
+        ...(identity && semanticModel(identity.qualifiedId)
+          ? { semanticModel: semanticModel(identity.qualifiedId) }
+          : {}),
+        ...(publicRecord?.effortLevels ? { reasoning: true, effortLevels: publicRecord.effortLevels } : {}),
+        ...(publicRecord?.thinkingLevelMap
+          ? { thinkingLevelMap: publicRecord.thinkingLevelMap as DiscoveredModel["thinkingLevelMap"] }
+          : {}),
+      };
+    }
     const semanticFamily = deploymentFamily(entry);
     if (semanticFamily) return { semanticFamily };
-    if (options.allowRouteCatalogFallback === false || !singleton || hasReadableBackendEvidence(entry))
+    // Preserve the existing route-catalog fallback only when no backend field
+    // exists. Opaque backend evidence never yields authority to public route text.
+    const route = wireString(entry.model_name);
+    if (options.allowRouteCatalogFallback === false || !singleton || hasReadableBackendEvidence(entry) || !route) {
       return undefined;
-    // Preserve upstream singleton enrichment only when LiteLLM provides no
-    // readable backend identity. Route text never overrides opaque evidence.
-    // `reduceModelGroup` only passes rows whose route name is a readable string.
-    const id = entry.model_name;
-    const catalog = id ? resolveCatalogModel(id) : undefined;
+    }
+    const catalog = resolveCatalogModel(route);
     return catalog ? catalogResolution(catalog.provider, catalog.model) : undefined;
   });
   if (!reduced) return undefined;
-  if (reduced.catalogAuthorityAmbiguous) options.ambiguousRoutes?.push(reduced.id);
+  if (reduced.catalogAuthorityAmbiguous || hasIntraRowAuthorityConflict) options.ambiguousRoutes?.push(reduced.id);
   if (reduced.deploymentFamilies.includes("conflicting")) options.conflictingFamilyRoutes?.push(reduced.id);
-  const reasoningPolicy = reduced.semanticModel ? reduced.reasoningPolicy : undefined;
+  const hasBackendEvidence = entries.some(hasReadableBackendEvidence);
+  const reasoningPolicy = reduced.semanticModel && hasBackendEvidence ? reduced.reasoningPolicy : undefined;
   const reasoning = reasoningPolicy?.reasoning ?? reduced.reasoning;
   // The semantic policy's compat only applies on Chat, so its level map must be
   // gated the same way. Vendor compatibility is reduced from deployment
@@ -588,10 +635,15 @@ function mapFromModelInfoGroup(
     api: reduced.api,
     reasoning,
     vendorCompat,
-    semanticCompat: reasoningPolicy?.compat,
+    semanticCompat: reduced.acceptsResponsesReasoningControl
+      ? { ...reasoningPolicy?.compat, supportsReasoningEffort: true }
+      : reasoningPolicy?.compat,
     semanticLevels: reasoningPolicy?.thinkingLevelMap,
     catalogLevels: reduced.thinkingLevelMap,
     requireChatCarrier: true,
+    // D4 requires a declared reasoning_effort carrier; public or LiteLLM level
+    // evidence alone does not authorize adding an unsupported request field.
+    allowInferredChatCarrier: false,
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
     denyLevels: options.denyLevels,
   });
@@ -620,6 +672,7 @@ function mapFromModelInfoGroup(
     contextWindow: reduced.contextWindow,
     maxTokens: reduced.maxTokens,
     api: reduced.api,
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
     ...(reduced.api === "openai-responses" && reduced.acceptsResponsesReasoningControl
       ? { litellmResponsesReasoningControl: true as const }
       : {}),
@@ -629,9 +682,7 @@ function mapFromModelInfoGroup(
 
 interface HealthDeployment {
   entry: ModelInfoEntry;
-  allowRouteCatalogFallback: boolean;
   denyLevels: boolean;
-  endpointOnly: boolean;
 }
 
 function healthDeployment(
@@ -640,16 +691,15 @@ function healthDeployment(
   deploymentId: string | undefined,
 ): HealthDeployment | undefined {
   const detailRoute = wireString(detail?.model_name)?.trim() || undefined;
+  // /health owns the public route. Detail can enrich that route, but it cannot
+  // redirect reasoning authority to a different name.
   const route = fallbackRoute?.trim() || detailRoute;
   if (!route) return undefined;
   if (!detail) {
     return {
       entry: { model_name: route, model_info: { ...(deploymentId ? { id: deploymentId } : {}), mode: "chat" } },
-      allowRouteCatalogFallback: true,
-      // Route text may enrich display metadata, but without deployment detail
-      // there is no backend evidence authorizing a reasoning control carrier.
+      // Route text alone is not backend or carrier evidence.
       denyLevels: true,
-      endpointOnly: true,
     };
   }
   const mode = isResponsesMode(detail.model_info?.mode) ? "chat" : detail.model_info?.mode;
@@ -663,12 +713,107 @@ function healthDeployment(
         mode,
       },
     },
-    // A detail row that omits its own route did not establish request-control
-    // evidence. Route catalog metadata remains available as on the prior health
-    // path, but selectable levels stay explicitly closed.
-    allowRouteCatalogFallback: true,
-    denyLevels: detailRoute === undefined,
-    endpointOnly: false,
+    // Missing or mismatched detail provenance cannot authorize selectable levels.
+    denyLevels: detailRoute === undefined || (fallbackRoute !== undefined && detailRoute !== fallbackRoute.trim()),
+  };
+}
+
+function wildcardMatches(route: string, modelId: string): boolean {
+  const segments = route.split("*");
+  let offset = 0;
+  for (const [index, segment] of segments.entries()) {
+    if (segment === "") continue;
+    const found = modelId.indexOf(segment, offset);
+    if (found < 0 || (index === 0 && found !== 0)) return false;
+    offset = found + segment.length;
+  }
+  const suffix = segments.at(-1);
+  return suffix === "" || modelId.endsWith(suffix ?? "");
+}
+
+interface WildcardExpansionSource {
+  model: DiscoveredModel;
+  deploymentFamilies: readonly CatalogResolution["semanticFamily"][];
+}
+
+function mapFromWildcardExpansion(
+  entry: ModelsListEntry,
+  wildcards: readonly WildcardExpansionSource[],
+  withheldRepairRoutes?: string[],
+): DiscoveredModel | undefined {
+  const id = wireString(entry.id);
+  if (!id || id.includes("*")) return undefined;
+  const matchingSources = wildcards.filter(({ model }) => wildcardMatches(model.id, id));
+  if (matchingSources.length === 0) return undefined;
+  const matches = matchingSources.map(({ model }) => model);
+  const api = matches.every((model) => model.api === "openai-responses") ? "openai-responses" : "openai-completions";
+  const reasoning = matches.every((model) => model.reasoning);
+  const thinkingLevelMap = reasoning
+    ? intersectThinkingLevelMaps(matches.map((model) => model.thinkingLevelMap))
+    : undefined;
+  const hasFamilyEvidence = matchingSources.some(({ deploymentFamilies }) =>
+    deploymentFamilies.some((family) => family !== undefined),
+  );
+  const vendorCompat = hasFamilyEvidence ? meetVendorCompat(matches.map((model) => model.compat)) : buildCompat(id);
+  const modelPolicies = matches.map((model) => model.litellmPolicy);
+  const hasModelPolicy = modelPolicies.some((policy) => policy !== undefined);
+  const modelPolicy = hasModelPolicy
+    ? {
+        normalizeStrictToolMessages: modelPolicies.every((policy) => policy?.normalizeStrictToolMessages === true),
+        normalizeThinkTags: modelPolicies.every((policy) => policy?.normalizeThinkTags === true),
+        suppressReasoningVisibility: modelPolicies.every((policy) => policy?.suppressReasoningVisibility === true),
+        ...(modelPolicies.every((policy) => policy?.normalizeGeminiReasoningEffort === true)
+          ? { normalizeGeminiReasoningEffort: true as const }
+          : {}),
+      }
+    : !hasFamilyEvidence && isMoonshotModel(id)
+      ? moonshotPolicy(id)
+      : undefined;
+  const policy = closeSerializerPolicy({
+    api,
+    reasoning,
+    vendorCompat,
+    catalogLevels: thinkingLevelMap,
+    requireChatCarrier: true,
+    allowInferredChatCarrier: false,
+    acceptsResponsesReasoningControl:
+      api === "openai-responses" && matches.every((model) => model.litellmResponsesReasoningControl === true),
+  });
+  const hasKimiEvidence = matchingSources.some(({ deploymentFamilies }) => deploymentFamilies.includes("kimi"));
+  const routeOnlyMoonshot = !hasFamilyEvidence && isMoonshotModel(id);
+  if (modelPolicy?.normalizeStrictToolMessages === false && (hasKimiEvidence || routeOnlyMoonshot)) {
+    withheldRepairRoutes?.push(id);
+  }
+  // A concrete /v1/models id may enrich presentation only. It never contributes
+  // reasoning levels, compatibility carriers, or request policy to the child.
+  const catalogModel = findCatalogModel(id, wireString(entry.owned_by));
+  const parentIncomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
+  return {
+    id,
+    name: catalogModel?.name ?? (parentIncomplete ? `${id} (incomplete metadata)` : id),
+    ...policy,
+    input:
+      catalogModel?.input ?? (matches.every((model) => model.input.includes("image")) ? ["text", "image"] : ["text"]),
+    cost: catalogModel?.cost ?? {
+      input: Math.max(...matches.map((model) => model.cost.input)),
+      output: Math.max(...matches.map((model) => model.cost.output)),
+      cacheRead: Math.max(...matches.map((model) => model.cost.cacheRead)),
+      cacheWrite: Math.max(...matches.map((model) => model.cost.cacheWrite)),
+    },
+    contextWindow: Math.min(
+      ...matches.map((model) => model.contextWindow),
+      catalogModel?.contextWindow ?? Number.POSITIVE_INFINITY,
+    ),
+    maxTokens: Math.min(
+      ...matches.map((model) => model.maxTokens),
+      catalogModel?.maxTokens ?? Number.POSITIVE_INFINITY,
+    ),
+    api,
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
+    ...(api === "openai-responses" && matches.every((model) => model.litellmResponsesReasoningControl === true)
+      ? { litellmResponsesReasoningControl: true as const }
+      : {}),
+    ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),
   };
 }
 
@@ -686,12 +831,14 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
       vendorCompat: buildCompat(id),
       catalogLevels: catalogModel?.thinkingLevelMap,
       requireChatCarrier: true,
+      allowInferredChatCarrier: false,
     }),
     input: catalogModel?.input ?? ["text"],
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
     api: "openai-completions",
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
     ...(isMoonshotModel(id) ? { litellmPolicy: moonshotPolicy(id) } : {}),
   };
 }
@@ -754,16 +901,13 @@ async function discoverFromHealth(
         const route = wireString(entries[0]?.model_name);
         if (route) incompatibleModeRoutes.push(route);
       }
-      const model = mapFromModelInfoGroup(entries, {
+      return mapFromModelInfoGroup(entries, undefined, {
         ambiguousRoutes,
         conflictingFamilyRoutes,
         withheldRepairRoutes,
-        allowRouteCatalogFallback: group.every(({ allowRouteCatalogFallback }) => allowRouteCatalogFallback),
+        allowRouteCatalogFallback: false,
         denyLevels: group.some(({ denyLevels }) => denyLevels),
       });
-      if (!model || !group.every(({ endpointOnly }) => endpointOnly)) return model;
-      const catalogName = findCatalogModel(model.id)?.name;
-      return catalogName ? { ...model, name: catalogName } : model;
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
   reportIncompatibleDeploymentModes(incompatibleModeRoutes);
@@ -793,28 +937,49 @@ export async function discoverModels(
   progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   if (infoResult.ok) {
+    const infoRows = infoResult.data.data ?? [];
+    const acceptsReasoningEffort = (value: unknown) =>
+      Array.isArray(value) && value.some((param) => wireString(param)?.trim() === "reasoning_effort");
+    const needsPublicReasoning = infoRows.some(
+      (entry) =>
+        acceptsReasoningEffort(entry.model_info?.supported_openai_params) ||
+        acceptsReasoningEffort(entry.litellm_params?.allowed_openai_params),
+    );
+    const publicCatalog = needsPublicReasoning
+      ? await loadPublicCatalog({
+          cachePath: join(getAgentDir(), "litellm-models-dev.json"),
+          offline: options.modelsDev === false ? true : undefined,
+          timeoutMs: options.timeoutMs,
+          signal: options.signal,
+        })
+      : undefined;
     const groups = new Map<string, ModelInfoEntry[]>();
-    for (const entry of infoResult.data.data ?? []) {
+    for (const entry of infoRows) {
       const route = wireString(entry.model_name);
       if (!route) continue;
       const group = groups.get(route) ?? [];
       group.push(entry);
       groups.set(route, group);
     }
-    const modelInfoRoutes = new Set(groups.keys());
     const incompatibleModeRoutes: string[] = [];
     const ambiguousRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
     const withheldRepairRoutes: string[] = [];
-    let models = [...groups.values()]
-      .map((group) => {
-        if (hasMixedIncompatibleDeploymentModes(group)) {
-          const route = wireString(group[0]?.model_name);
-          if (route) incompatibleModeRoutes.push(route);
-        }
-        return mapFromModelInfoGroup(group, { ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes });
-      })
-      .filter((m): m is DiscoveredModel => m !== undefined);
+    const reducedGroups = [...groups.entries()].map(([route, group]) => {
+      if (hasMixedIncompatibleDeploymentModes(group)) incompatibleModeRoutes.push(route);
+      return {
+        route,
+        model: mapFromModelInfoGroup(group, publicCatalog, {
+          ambiguousRoutes,
+          conflictingFamilyRoutes,
+          withheldRepairRoutes,
+        }),
+        deploymentFamilies: group.map(deploymentFamily),
+      };
+    });
+    let models = reducedGroups
+      .map(({ model }) => model)
+      .filter((model): model is DiscoveredModel => model !== undefined);
     reportIncompatibleDeploymentModes(incompatibleModeRoutes);
     reportAmbiguousCatalogAuthority(ambiguousRoutes);
     reportConflictingFamilyEvidence(conflictingFamilyRoutes);
@@ -826,22 +991,38 @@ export async function discoverModels(
     // /v1/models and merge the expanded (non-wildcard) entries in, dropping the
     // raw wildcard row so it doesn't surface as a phantom model choice.
     // Ref: docs.litellm.ai/docs/proxy/model_discovery
-    if (models.some((m) => m.id.includes("*"))) {
+    const wildcardRoutes = reducedGroups.filter(({ route }) => route.includes("*"));
+    const wildcards = wildcardRoutes
+      .filter((source): source is typeof source & { model: DiscoveredModel } => source.model !== undefined)
+      .map(({ model, deploymentFamilies }) => ({ model, deploymentFamilies }));
+    if (wildcards.length > 0) {
+      const droppedRoutes = reducedGroups.filter(({ model }) => model === undefined).map(({ route }) => route);
+      const droppedExactIds = new Set(droppedRoutes.filter((route) => !route.includes("*")));
+      const droppedWildcards = droppedRoutes.filter((route) => route.includes("*"));
       // A wildcard row is not addressable. Remove it before expansion so a failed
       // `/v1/models` request cannot leak the literal wildcard into the selector.
       models = models.filter((model) => !model.id.includes("*"));
       progress?.("/model/info has wildcard entries, expanding via /v1/models...");
       const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
       if (listResult.ok) {
+        const seen = new Set<string>(models.map((model) => model.id));
         const expanded = (listResult.data.data ?? [])
-          .map(mapFromModelsList)
-          .filter((m): m is DiscoveredModel => m !== undefined && !m.id.includes("*"));
-        const seen = new Set<string>(models.map((m) => m.id));
-        models = [...models, ...expanded.filter((m) => !seen.has(m.id) && !modelInfoRoutes.has(m.id))];
+          .filter((entry) => {
+            const id = wireString(entry.id);
+            return (
+              id === undefined ||
+              (!seen.has(id) &&
+                !droppedExactIds.has(id) &&
+                !droppedWildcards.some((route) => wildcardMatches(route, id)))
+            );
+          })
+          .map((entry) => mapFromWildcardExpansion(entry, wildcards, withheldRepairRoutes))
+          .filter((model): model is DiscoveredModel => model !== undefined);
+        models = [...models, ...expanded];
       }
     }
     const deduplicated = deduplicateModels(models);
-    reportWithheldToolRepairForModels(deduplicated);
+    reportWithheldToolRepair(withheldRepairRoutes);
     return { source: "model_info", models: deduplicated };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
