@@ -17,7 +17,6 @@ import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-age
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
-import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
@@ -893,7 +892,6 @@ const GEMINI_MODEL_PATTERN = /(?:^|[-_/.:])gemini(?=$|[-_/.:])/i;
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   model: LiteLLMModel | undefined,
-  sessionId: string | undefined,
 ): Record<string, unknown> | undefined {
   const modelId = model?.id;
   const api = model?.api;
@@ -975,11 +973,6 @@ function prepareLiteLLMRequestPayload(
         };
       }
     }
-  }
-
-  if (sessionId) {
-    next ??= { ...payload };
-    next.litellm_session_id = sessionId;
   }
 
   return next;
@@ -1277,15 +1270,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  let sessionId: string | undefined;
-  pi.on("session_start", (_event, ctx) => {
-    sessionId = getSessionIdFromFile(ctx.sessionManager.getSessionFile());
+  pi.on("before_provider_headers", (event, ctx) => {
+    if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
+    event.headers["x-litellm-session-id"] = ctx.sessionManager.getSessionId();
   });
 
   pi.on("before_provider_request", (event, ctx) => {
     if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
-    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel, sessionId);
+    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel);
   });
 
   // Skills enrichment is best-effort: an expired credential or an unreachable proxy must not

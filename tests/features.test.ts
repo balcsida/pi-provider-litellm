@@ -1,10 +1,21 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Api, Model, Provider } from "@earendil-works/pi-ai";
+import { createProvider } from "@earendil-works/pi-ai";
+import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
+import {
+  createEventBus,
+  discoverAndLoadExtensions,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
 
-useHermeticEnv();
+useHermeticEnv(["PI_CODING_AGENT_DIR"]);
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -26,6 +37,53 @@ async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSi
       env: { LITELLM_BASE_URL: process.env.LITELLM_BASE_URL ?? "https://litellm.example.com" },
     },
     signal: signal ?? new AbortController().signal,
+  });
+}
+
+const testModel = (provider: string, id: string, api: Api): Model<Api> => ({
+  id,
+  name: id,
+  api,
+  provider,
+  baseUrl: "https://litellm.example.com/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 128_000,
+  maxTokens: 4096,
+});
+
+const successfulStream = (api: Api): string =>
+  api === "anthropic-messages"
+    ? [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n',
+      ].join("\n")
+    : api === "openai-responses"
+      ? [
+          'data: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-test","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}\n',
+          'data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-test","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":1},"user":null,"metadata":{}}}\n',
+          "data: [DONE]\n",
+        ].join("\n")
+      : 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+
+function nativeProvider(id: string, models: readonly Model<Api>[]): Provider {
+  return createProvider({
+    id,
+    name: id,
+    baseUrl: "https://litellm.example.com/v1",
+    auth: {
+      apiKey: {
+        name: "test key",
+        resolve: async () => ({ auth: { apiKey: "sk-test" }, source: "test" }),
+      },
+    },
+    models,
+    api: {
+      "openai-completions": openAICompletionsApi(),
+      "openai-responses": openAIResponsesApi(),
+      "anthropic-messages": anthropicMessagesApi(),
+    },
   });
 }
 
@@ -643,115 +701,149 @@ describe("feature parity", () => {
     expect(pi.handlers.has("message_end")).toBe(true);
   });
 
-  it("does not inject LiteLLM session ids into non-LiteLLM provider requests", async () => {
+  it("sends the Pi session id as a LiteLLM header across runtime request paths", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    // This test loads the extension through Pi's real loader, so getAgentDir() is not
+    // mocked and must be pointed at the temp dir or it reads the developer's settings.
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
-
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "anthropic/claude-3-5-sonnet",
-              model_info: {
-                mode: "chat",
-                input_cost_per_token: 0.000003,
-                output_cost_per_token: 0.000015,
-                cache_read_input_token_cost: 0.0000003,
-                cache_creation_input_token_cost: 0.00000375,
-              },
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-dev": {
+              baseUrl: "https://litellm.example.com",
+              apiKey: "sk-test",
+              mcp: { enabled: false },
+              skills: { enabled: false },
             },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler(
-        { reason: "reload" },
-        {
-          sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
           },
+          mcp: { enabled: false },
+          skills: { enabled: false },
+        },
+      }),
+      "utf8",
+    );
+
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: null,
+      allowModelNetwork: false,
+    });
+    const sessionManager = SessionManager.inMemory(agentDir, { id: "canonical-pi-session-id" });
+    const loaded = await discoverAndLoadExtensions(
+      [join(process.cwd(), "src/index.ts")],
+      agentDir,
+      agentDir,
+      createEventBus(),
+    );
+    expect(loaded.errors).toEqual([]);
+    const extension = loaded.extensions[0];
+    if (!extension) throw new Error("extension did not load");
+    const modelRegistry = new ModelRegistry(runtime);
+    let currentModel: Model<Api> | undefined;
+    const runner = new ExtensionRunner([extension], loaded.runtime, agentDir, sessionManager, modelRegistry);
+    runner.bindCore(
+      {
+        sendMessage: () => {},
+        sendUserMessage: () => {},
+        appendEntry: () => {},
+        setSessionName: () => {},
+        getSessionName: () => undefined,
+        setLabel: () => {},
+        getActiveTools: () => [],
+        getAllTools: () => [],
+        setActiveTools: () => {},
+        refreshTools: () => {},
+        getCommands: () => [],
+        setModel: async () => true,
+        getThinkingLevel: () => "off",
+        setThinkingLevel: () => {},
+      },
+      {
+        getModel: () => currentModel,
+        getScopedModels: () => [],
+        isIdle: () => false,
+        isProjectTrusted: () => true,
+        getSignal: () => undefined,
+        abort: () => {},
+        hasPendingMessages: () => false,
+        shutdown: () => {},
+        getContextUsage: () => undefined,
+        compact: () => {},
+        getSystemPrompt: () => "",
+      },
+    );
+
+    const chat = testModel("litellm", "chat-model", "openai-completions");
+    const responses = testModel("litellm", "responses-model", "openai-responses");
+    const messages = testModel("litellm", "messages-model", "anthropic-messages");
+    const alias = testModel("litellm-dev", "alias-model", "openai-completions");
+    const other = testModel("other", "other-model", "openai-completions");
+    runtime.registerNativeProvider(nativeProvider("litellm", [chat, responses, messages]));
+    runtime.registerNativeProvider(nativeProvider("litellm-dev", [alias]));
+    runtime.registerNativeProvider(nativeProvider("other", [other]));
+
+    const requests: Array<{ api: Api; headers: Headers; body: Record<string, unknown> }> = [];
+    let retryPending = true;
+    const requestFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const api: Api = url.endsWith("/responses")
+        ? "openai-responses"
+        : url.endsWith("/messages")
+          ? "anthropic-messages"
+          : "openai-completions";
+      const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+      const body = JSON.parse(String(input instanceof Request ? await input.clone().text() : init?.body)) as Record<
+        string,
+        unknown
+      >;
+      requests.push({ api, headers, body });
+      if (retryPending && body.model === "chat-model") {
+        retryPending = false;
+        return jsonResponse(503, { error: { message: "retry", type: "server_error" } });
+      }
+      return new Response(successfulStream(api), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+
+    const send = async (model: Model<Api>): Promise<void> => {
+      currentModel = model;
+      await runtime.completeSimple(
+        model,
+        { messages: [] },
+        {
+          fetch: requestFetch,
+          maxRetries: 1,
+          maxRetryDelayMs: 1,
+          transformHeaders: (headers) => runner.emitBeforeProviderHeaders(headers),
+          onPayload: (payload) => runner.emitBeforeProviderRequest(payload),
         },
       );
+    };
+
+    await send(chat);
+    await send(responses);
+    await send(messages);
+    await send(alias);
+    await send(other);
+
+    expect(requests.map(({ api, headers }) => [api, headers.get("x-litellm-session-id")])).toEqual([
+      ["openai-completions", "canonical-pi-session-id"],
+      ["openai-completions", "canonical-pi-session-id"],
+      ["openai-responses", "canonical-pi-session-id"],
+      ["anthropic-messages", "canonical-pi-session-id"],
+      ["openai-completions", "canonical-pi-session-id"],
+      ["openai-completions", null],
+    ]);
+    for (const request of requests) {
+      expect(request.body).not.toHaveProperty("litellm_session_id");
     }
-
-    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.(
-      { payload: { messages: [] } },
-      { model: { provider: "openai-codex", id: "gpt-5.5" } },
-    );
-    expect(updated).toBeUndefined();
-  });
-
-  it("injects LiteLLM session ids into LiteLLM provider requests", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_API_KEY = "sk-test";
-
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
-          data: [
-            {
-              model_name: "kimi-k2.6",
-              litellm_params: { model: "moonshot/kimi-k2.6" },
-              model_info: { mode: "chat" },
-            },
-            {
-              model_name: "anthropic/claude-3-5-sonnet",
-              model_info: {
-                mode: "chat",
-                input_cost_per_token: 0.000003,
-                output_cost_per_token: 0.000015,
-                cache_read_input_token_cost: 0.0000003,
-                cache_creation_input_token_cost: 0.00000375,
-              },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler(
-        { reason: "reload" },
-        {
-          sessionManager: {
-            getSessionFile: () => join(agentDir, "2026-05-11T16-00-00-000Z_123e4567-e89b-12d3-a456-426614174000.jsonl"),
-          },
-        },
-      );
-    }
-
-    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
-    const updated = beforeRequest?.(
-      { payload: { messages: [] } },
-      { model: { provider: "litellm", id: "kimi-k2.6", suppressReasoningContent: true } },
-    );
-    expect(updated).toMatchObject({
-      messages: [],
-      include_reasoning: false,
-      reasoning_content: false,
-      merge_reasoning_content_in_choices: true,
-      litellm_session_id: "123e4567-e89b-12d3-a456-426614174000",
-    });
   });
 
   it("does not send thinking for Kimi OpenAI completions requests", async () => {
@@ -1389,11 +1481,6 @@ describe("feature parity", () => {
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
-
-    const sessionStartHandlers = pi.handlers.get("session_start") ?? [];
-    for (const handler of sessionStartHandlers) {
-      await handler({ reason: "start" }, { sessionManager: { getSessionFile: () => undefined } });
-    }
 
     const responseHandler = pi.handlers.get("after_provider_response")?.[0];
     responseHandler?.(

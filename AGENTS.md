@@ -32,7 +32,7 @@
 
 - `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
-- `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
+- `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 
 ## Compatibility Rules
