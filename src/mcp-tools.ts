@@ -73,6 +73,8 @@ const INCIDENT_REASON_TEXT: Readonly<Record<McpIncidentReason, string>> = {
 export interface McpPreparationReport {
   // Raw tool entries the proxy returned, before any normalization.
   discovered: number;
+  // LiteLLM returned the usable subset from servers that answered while reporting another failed.
+  partialFailure: boolean;
   // Tools that will be registered, whatever parameter shape they ended up with.
   prepared: number;
   // Of `prepared`, how many carry the extension-owned envelope rather than a proxy-supplied schema.
@@ -90,6 +92,7 @@ export interface McpPreparationReport {
 export interface McpDiscovery {
   raw: number;
   tools: LiteLLMMcpTool[];
+  partialFailure: boolean;
   // Entries dropped by normalization, as bounded safe labels.
   invalid: string[];
 }
@@ -153,6 +156,18 @@ export function reportMcpRegistrationFatal(registered: number, attempted: number
 // failure is reported if it later recurs.
 export function reportMcpRegistrationSuccess(): void {
   clearIncident("registration-fatal");
+}
+
+export function reportMcpPartialDiscovery(partialFailure: boolean, registered: number): void {
+  if (!partialFailure) {
+    clearIncident("discovery-partial-failure");
+    return;
+  }
+  emitSafetyDiagnostic(
+    "discovery-partial-failure",
+    `proxy reported a partial server failure; ${plural(registered, "tool")} registered.`,
+    `discovery-partial-failure:${registered}`,
+  );
 }
 
 // Reports a discovery that yielded no registrable tool, so the silence is explained. A pass that did
@@ -452,17 +467,20 @@ export async function discoverMcpTools(
     }
     const body = parseDiscoveryJson(await readBoundedText(response, MAX_DISCOVERY_BODY_BYTES, "MCP discovery"));
     const bodyRecord = asRecord(body);
-    // LiteLLM reports total MCP discovery failure in an HTTP 200 envelope. Preserve its
-    // machine-readable error tag after bounding and sanitizing it; never include the message.
-    if (bodyRecord?.error != null) {
-      const unboundedErrorTag = stringValue(bodyRecord.error)?.replace(/[^a-zA-Z0-9_.-]/g, "_");
-      const errorTag = unboundedErrorTag
-        ? truncateUtf8(unboundedErrorTag, MAX_DIAGNOSTIC_LABEL_BYTES, SHORT_TRUNCATION_MARKER)
-        : undefined;
-      throw new Error(errorTag ? `MCP discovery reported ${errorTag}` : "MCP discovery reported an error");
+    const errorTag = bodyRecord?.error;
+    const partialFailure = errorTag === "partial_failure";
+    // LiteLLM reports total MCP discovery failure in an HTTP 200 envelope. Use only
+    // extension-owned text: neither its machine-readable tag nor its message is safe for stderr.
+    if (errorTag != null && !partialFailure) {
+      throw new Error(
+        errorTag === "unexpected_error"
+          ? "MCP discovery reported an unexpected proxy error"
+          : "MCP discovery reported an error",
+      );
     }
     // An unrecognized body shape is not the same as an empty catalog, and reporting it as "0 raw
-    // entries" would send an operator looking at the wrong thing.
+    // entries" would send an operator looking at the wrong thing. This check also applies to a
+    // partial-failure envelope, because LiteLLM's successful subset must still be an array.
     const rawTools = Array.isArray(body) ? body : Array.isArray(bodyRecord?.tools) ? bodyRecord.tools : undefined;
     if (rawTools === undefined) throw new Error("MCP discovery returned an unexpected body shape");
     if (rawTools.length > MAX_DISCOVERY_ENTRIES) {
@@ -478,7 +496,7 @@ export async function discoverMcpTools(
       else invalid.push(invalidToolLabel(raw, index));
     });
     onProgress?.(`Normalized ${tools.length} of ${rawTools.length} raw MCP tools`);
-    return { raw: rawTools.length, tools, invalid };
+    return { raw: rawTools.length, tools, invalid, partialFailure };
   } catch (error) {
     onProgress?.("MCP tools discovery encountered an error");
     if (parentSignal?.aborted) throw parentSignal.reason;
@@ -632,6 +650,7 @@ const NAME_KEYED_KEYWORDS = new Set([
   "$defs",
   "definitions",
   "dependentSchemas",
+  "dependentRequired",
   "dependencies",
 ]);
 
@@ -905,11 +924,17 @@ function isValidDependencies(value: unknown): boolean {
   );
 }
 
+function isValidDependentRequired(value: unknown): boolean {
+  const dependentRequired = asRecord(value);
+  return dependentRequired !== undefined && Object.values(dependentRequired).every(isStringArray);
+}
+
 // Shape validation is a separate concern from the hazard scan above: it exists to avoid handing the
 // validator a structurally broken document, and it deliberately only looks where a subschema may
 // legally appear so that data positions are not misread as constraints.
 function hasValidSchemaShape(record: Record<string, unknown>): boolean {
   if ("required" in record && !isStringArray(record.required)) return false;
+  if ("dependentRequired" in record && !isValidDependentRequired(record.dependentRequired)) return false;
   if ("dependencies" in record && !isValidDependencies(record.dependencies)) return false;
   if (SCHEMA_MAP_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaMap(record[keyword]))) return false;
   if (SCHEMA_ARRAY_KEYWORDS.some((keyword) => keyword in record && !isValidSchemaArray(record[keyword]))) return false;
@@ -1023,6 +1048,7 @@ export function prepareTools(discovery: McpDiscovery): {
     prepared,
     report: {
       discovered: discovery.raw,
+      partialFailure: discovery.partialFailure,
       prepared: prepared.length,
       // Counting only hazard degradations would tell an operator that schemaless tools retain a
       // proxy-specific argument contract; they have only the extension-owned args-envelope shape.

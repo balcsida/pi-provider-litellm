@@ -333,6 +333,99 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
+  it.each([
+    ["unexpected_error", "MCP discovery reported an unexpected proxy error"],
+    ["proxy-owned-tag", "MCP discovery reported an error"],
+  ])("does not expose the %s discovery envelope in stderr", async (proxyTag, expectedText) => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    const proxyMessage = "private proxy details";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return jsonResponse(200, { tools: [], error: proxyTag, message: proxyMessage });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    await refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: {
+        type: "api_key",
+        key: "sk-test",
+        env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map(([message]) => String(message)).join("")).toContain(expectedText),
+    );
+
+    const output = stderr.mock.calls.map(([message]) => String(message)).join("");
+    expect(output).not.toContain(proxyTag);
+    expect(output).not.toContain(proxyMessage);
+  });
+
+  it("retries a partial-failure catalog and registers tools from the clean refresh", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    let listCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        listCalls += 1;
+        const tools = [
+          { name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } },
+          { name: "browse", server_name: "server", inputSchema: { type: "object", properties: {} } },
+        ];
+        return jsonResponse(
+          200,
+          listCalls === 1
+            ? { tools: tools.slice(0, 1), error: "partial_failure", message: "private proxy details" }
+            : { tools },
+        );
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const refresh = () =>
+      refreshProvider(pi.providers[0]!, {
+        allowNetwork: true,
+        credential: {
+          type: "api_key",
+          key: "sk-test",
+          env: { LITELLM_BASE_URL: "https://litellm.example.com" },
+        },
+      });
+
+    await refresh();
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
+    await refresh();
+    await vi.waitFor(() => {
+      expect(listCalls).toBe(2);
+      expect(pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mcp_"))).toEqual([
+        named("mcp_server_search"),
+        named("mcp_server_browse"),
+      ]);
+    });
+    const diagnostics = stderr.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("partial server failure"));
+    expect(diagnostics).toEqual(["LiteLLM MCP: proxy reported a partial server failure; 1 tool registered.\n"]);
+    expect(stderr.mock.calls.map(([message]) => String(message)).join("")).not.toContain("private proxy details");
+  });
+
   it("does not settle the identity when a catalog yields no registrable tool", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let listCalls = 0;

@@ -22,6 +22,7 @@ import {
   createMcpToolDefinitions,
   credentialFingerprint,
   reportMcpCatalogOutcome,
+  reportMcpPartialDiscovery,
   reportMcpRegistrationFatal,
   reportMcpRegistrationSuccess,
 } from "./mcp-tools.js";
@@ -1212,16 +1213,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           return;
         }
         reportMcpRegistrationSuccess();
+        reportMcpPartialDiscovery(report.partialFailure, registered);
         if (isVerboseDiscovery()) {
           process.stderr.write(
             `LiteLLM MCP: registered ${registered} of ${definitions.length} prepared MCP tools ` +
               `(${report.discovered} raw, ${report.enveloped} enveloped).\n`,
           );
         }
-        // A catalog that produced nothing is not a settled catalog: leaving the identity unset lets a
-        // later refresh retry discovery, which is network-only and non-blocking.
+        // A catalog that produced nothing or came from a partial-failure response is not settled:
+        // leaving the identity unset lets a later refresh retry discovery, which is network-only and
+        // non-blocking. Re-registering surviving tools is safe because Pi replaces tools by name.
         reportMcpCatalogOutcome(report.discovered, definitions.length);
-        if (definitions.length > 0) registeredMcpIdentity = identity;
+        if (definitions.length > 0 && !report.partialFailure) registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(

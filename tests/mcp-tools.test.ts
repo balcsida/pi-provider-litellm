@@ -7,6 +7,7 @@ import {
   discoverMcpTools as discoverMcpToolsRaw,
   executeMcpTool,
   findSchemaHazard,
+  reportMcpPartialDiscovery,
 } from "../src/mcp-tools.js";
 
 // Thin wrappers so the bulk of the suite keeps asserting on the shapes it cares about.
@@ -193,41 +194,53 @@ describe("discoverMcpTools", () => {
     await expect(discoverMcpTools("https://litellm.example.com", "sk-test")).resolves.toEqual([]);
   });
 
-  it("rejects a LiteLLM failure envelope without exposing its message", async () => {
+  it.each([
+    ["unexpected_error", "MCP discovery reported an unexpected proxy error"],
+    ["proxy-owned-tag", "MCP discovery reported an error"],
+  ])("uses fixed text for the %s discovery failure tag", async (proxyTag, expectedMessage) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         tools: [],
-        error: "partial_failure",
+        error: proxyTag,
         message: "internal server details",
       }),
     );
 
     const error = await discoverMcpTools("https://litellm.example.com", "sk-test").catch((failure: unknown) => failure);
 
-    expect(error).toEqual(new Error("MCP discovery reported partial_failure"));
+    expect(error).toEqual(new Error(expectedMessage));
+    expect(String(error)).not.toContain(proxyTag);
     expect(String(error)).not.toContain("internal server details");
   });
 
-  it("reports a sanitized and bounded LiteLLM failure tag", async () => {
-    const untrustedTag = `a\nLiteLLM MCP: forged\u001b[0m ${"x".repeat(500)}`;
+  it("keeps tools from a partial-failure discovery envelope", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
-        tools: [],
-        error: untrustedTag,
-        message: "different internal server details",
+        tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+        error: "partial_failure",
+        message: "private server details",
       }),
     );
 
-    const error = await discoverMcpTools("https://litellm.example.com", "sk-test").catch((failure: unknown) => failure);
-    const message = error instanceof Error ? error.message : String(error);
-    const prefix = "MCP discovery reported ";
-    const errorTag = message.slice(prefix.length);
+    const discovery = await discoverMcpToolsRaw("https://litellm.example.com", "sk-test");
 
-    expect(message).toMatch(/^MCP discovery reported [a-zA-Z0-9_.-]+…$/u);
-    expect(message).not.toContain("\n");
-    expect(message).not.toContain("\u001b");
-    expect(Buffer.byteLength(errorTag, "utf8")).toBeLessThanOrEqual(96);
-    expect(message).not.toContain("different internal server details");
+    expect(discovery.partialFailure).toBe(true);
+    expect(discovery.tools.map((tool) => tool.name)).toEqual(["search"]);
+  });
+});
+
+describe("partial discovery diagnostics", () => {
+  it("emits the generated diagnostic again after the incident clears", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    reportMcpPartialDiscovery(true, 3);
+    reportMcpPartialDiscovery(false, 3);
+    reportMcpPartialDiscovery(true, 3);
+
+    expect(stderr.mock.calls.map(([message]) => String(message))).toEqual([
+      "LiteLLM MCP: proxy reported a partial server failure; 3 tools registered.\n",
+      "LiteLLM MCP: proxy reported a partial server failure; 3 tools registered.\n",
+    ]);
   });
 });
 
@@ -450,6 +463,26 @@ describe("executeMcpTool", () => {
 });
 
 describe("createMcpToolDefinitions", () => {
+  it("keeps partial-failure tools available for registration", async () => {
+    vi.resetModules();
+    const { createMcpToolDefinitions: createDefinitionsRaw } = await import("../src/mcp-tools.js");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
+        error: "partial_failure",
+        message: "private server details",
+      }),
+    );
+
+    const { definitions, report } = await createDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definitions.map((definition) => definition.name)).toEqual([named("mcp_server_search")]);
+    expect(report.partialFailure).toBe(true);
+  });
+
   it("reports each drop class separately with counts and sanitized names, and no credential or schema content", async () => {
     vi.resetModules();
     const {
@@ -1668,6 +1701,13 @@ describe("findSchemaHazard", () => {
     expect(
       findSchemaHazard({
         type: "object",
+        dependentRequired: { a: ["b"] },
+        properties: { s: { $ref: "#/dependentRequired/a" } },
+      }),
+    ).toBe("unresolvable-ref");
+    expect(
+      findSchemaHazard({
+        type: "object",
         properties: { s: { $ref: "#/dependencies" } },
         dependencies: { patternProperties: { "^(a+)+$": { type: "string" } } },
       }),
@@ -2115,6 +2155,8 @@ describe("unrecognized discovery body shapes", () => {
   it.each([
     ["an object without tools", { detail: "proxy-owned-error" }],
     ["a non-array tools container", { tools: { a: { name: "x" } } }],
+    ["a partial-failure envelope without tools", { error: "partial_failure" }],
+    ["a partial-failure envelope with non-array tools", { tools: {}, error: "partial_failure" }],
   ])("rejects %s instead of reporting an empty catalog", async (_label, body) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
     await expect(discoverMcpToolsRaw("https://litellm.example.com", "sk-test")).rejects.toThrow(
@@ -2178,6 +2220,25 @@ describe("regex keywords are refused regardless of value type", () => {
     expect(JSON.stringify(definitions.map((definition) => definition.parameters))).not.toContain("(a+)+");
   });
 
+  it("keeps a dependentRequired property named pattern in the supplied schema", async () => {
+    const schema = {
+      type: "object",
+      properties: { enabled: { type: "boolean" }, other: { type: "string" } },
+      dependentRequired: { pattern: ["other"] },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, { tools: [{ name: "dependent-required", server_name: "srv", inputSchema: schema }] }),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(report.enveloped).toBe(0);
+    expect(definitions.map((definition) => definition.parameters)).toEqual([schema]);
+  });
+
   it("drops structurally invalid schema maps and dependencies before the hazard scan sees them", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -2193,6 +2254,11 @@ describe("regex keywords are refused regardless of value type", () => {
             server_name: "srv",
             inputSchema: { type: "object", dependencies: { enabled: ["other", 7] } },
           },
+          {
+            name: "invalid-dependent-required",
+            server_name: "srv",
+            inputSchema: { type: "object", dependentRequired: { enabled: ["other", 7] } },
+          },
         ],
       }),
     );
@@ -2201,7 +2267,7 @@ describe("regex keywords are refused regardless of value type", () => {
       apiKey: "sk-test",
     }));
     expect(definitions).toEqual([]);
-    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 3 });
+    expect(Object.fromEntries(report.dropped.map((e) => [e.reason, e.tools.length]))).toEqual({ "invalid-schema": 4 });
   });
 
   it("accepts schema-valued and string-array dependencies", async () => {
