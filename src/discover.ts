@@ -131,7 +131,15 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
   if (identity?.family !== "openai") return false;
   const adapter = entry.litellm_params?.custom_llm_provider?.trim().toLowerCase();
   const configuredModel = entry.litellm_params?.model?.trim().toLowerCase();
-  const azureAdapter = adapter === "azure" || adapter === "azure_ai" || /^azure(?:_ai)?\//.test(configuredModel ?? "");
+  const reportedProvider = entry.model_info?.litellm_provider?.trim().toLowerCase();
+  const azureAdapter =
+    adapter === "azure" ||
+    adapter === "azure_ai" ||
+    /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
+    reportedProvider === "azure" ||
+    reportedProvider === "azure_ai";
+  // LiteLLM bridges /v1/responses to chat completions when the provider has no native Responses config
+  // (litellm/responses/main.py, _bridges_to_chat_completions), so generic adapters remain eligible for Responses.
   if (!azureAdapter) return true;
 
   const version = entry.litellm_params?.api_version?.trim();

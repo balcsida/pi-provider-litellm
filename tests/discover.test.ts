@@ -114,6 +114,32 @@ describe("modelProtocol", () => {
       }),
     ).toMatchObject({ api: "openai-responses" });
   });
+
+  it("guards Azure API versions when only the reported provider identifies Azure", () => {
+    for (const litellmProvider of ["azure", "azure_ai"]) {
+      const entry = (apiVersion?: string) => ({
+        model_name: "opaque-route",
+        litellm_params: { model: "gpt-5", ...(apiVersion ? { api_version: apiVersion } : {}) },
+        model_info: { litellm_provider: litellmProvider },
+      });
+
+      expect(modelProtocol("opaque-route", entry("2024-12-01-preview"))).toMatchObject({
+        api: "openai-completions",
+      });
+      expect(modelProtocol("opaque-route", entry("2025-03-01-preview"))).toMatchObject({ api: "openai-responses" });
+      expect(modelProtocol("opaque-route", entry())).toMatchObject({ api: "openai-responses" });
+    }
+  });
+
+  it("uses Chat Completions when the model prefix conflicts with custom_llm_provider", () => {
+    expect(
+      modelProtocol("gpt-prod", {
+        model_name: "gpt-prod",
+        litellm_params: { model: "openai/gpt-5", custom_llm_provider: "fireworks_ai" },
+        model_info: { mode: "chat" },
+      }),
+    ).toMatchObject({ api: "openai-completions" });
+  });
 });
 
 describe("buildCompat", () => {
@@ -198,6 +224,25 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", {});
 
     expect(result.models.map((model) => model.id)).toEqual(["local/model"]);
+  });
+
+  it("withholds backend family when the model prefix conflicts with custom_llm_provider", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "gpt-prod",
+            litellm_params: { model: "openai/gpt-5", custom_llm_provider: "fireworks_ai" },
+            model_info: { mode: "chat" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({ id: "gpt-prod", api: "openai-completions" });
+    expect(result.models[0]).not.toHaveProperty("litellmBackendFamily");
   });
 
   it("reduces mixed Azure deployment versions to Chat Completions", async () => {
