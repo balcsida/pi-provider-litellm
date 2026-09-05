@@ -2,7 +2,9 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension, type TestPi } from "./test-helpers.js";
+import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
+
+useHermeticEnv();
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -30,45 +32,125 @@ async function refreshProvider(pi: TestPi, allowNetwork = true, signal?: AbortSi
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
-  delete process.env.LITELLM_BASE_URL;
-  delete process.env.LITELLM_API_KEY;
-  delete process.env.LITELLM_HEADERS;
-  delete process.env.LITELLM_DISCOVERY_TIMEOUT_MS;
-  delete process.env.LITELLM_GCLOUD_TOKEN_AUTH;
-  delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+});
+
+const VALID_ADC = {
+  type: "authorized_user",
+  client_id: "client-id",
+  client_secret: "client-secret",
+  refresh_token: "refresh-token",
+};
+
+// Builds a provider whose only credential source is Google ADC, so `check` and
+// `resolve` can be compared directly for one ADC file shape.
+async function setupAdcProvider(adc: unknown | undefined): Promise<{
+  check: () => Promise<unknown>;
+  resolve: () => Promise<unknown>;
+}> {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+  const adcPath = join(agentDir, "adc.json");
+  if (adc !== undefined) await writeFile(adcPath, JSON.stringify(adc), "utf8");
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+  process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+  process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
+  process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+  const extension = await loadExtension(agentDir);
+  const pi = createPi();
+  await extension(pi);
+  const ctx = {
+    env: async (name: string) => process.env[name],
+    fileExists: async () => false,
+  };
+  const signal = new AbortController().signal;
+
+  // Without these, `pi.providers[0]?.auth...?.()` yields undefined when registration
+  // never happened -- the same value the negative cases assert, so they would pass
+  // against a provider that was never registered at all.
+  const provider = pi.providers[0];
+  expect(pi.providers).toHaveLength(1);
+  expect(typeof provider?.auth.apiKey?.check).toBe("function");
+  expect(typeof provider?.auth.apiKey?.resolve).toBe("function");
+
+  return {
+    check: async () => provider?.auth.apiKey?.check?.({ ctx, signal }),
+    resolve: async () => provider?.auth.apiKey?.resolve?.({ ctx, signal }),
+  };
+}
+
+describe("gcloud ADC provider auth", () => {
+  it("resolves an in-process ADC token and labels both auth paths consistently", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse(200, { access_token: "ya29.minted", expires_in: 3600 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    await expect(provider.check()).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+    expect(resolved.auth.apiKey).toBe("ya29.minted");
+    expect(resolved.source).toBe("gcloud ADC");
+  });
+
+  // ADC outranks the environment key in resolveCredentials, so check must name ADC here.
+  // Nothing covered this state before, and reporting the fallback instead looked correct
+  // in isolation while contradicting what every request actually sends.
+  it("names ADC when it outranks a configured fallback", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse(200, { access_token: "ya29.minted", expires_in: 3600 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    process.env.LITELLM_API_KEY = "sk-env-fallback";
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    const checked = (await provider.check()) as { source: string };
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+
+    expect(resolved.auth.apiKey).toBe("ya29.minted");
+    expect(resolved.source).toBe("gcloud ADC");
+    expect(checked.source).toBe(resolved.source);
+  });
+
+  // The one state where the two legitimately differ: check cannot know the refresh token
+  // is dead without a network call, so resolve reports the credential it fell back to.
+  it("falls back to the environment key when ADC cannot mint", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") return jsonResponse(400, { error: "invalid_grant" });
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.LITELLM_API_KEY = "sk-env-fallback";
+    const provider = await setupAdcProvider(VALID_ADC);
+
+    const resolved = (await provider.resolve()) as { auth: { apiKey: string }; source: string };
+
+    expect(resolved.auth.apiKey).toBe("sk-env-fallback");
+    expect(resolved.source).toBe("LITELLM_API_KEY");
+  });
+
+  it.for([
+    ["an unreadable ADC file", undefined],
+    ["service_account credentials", { type: "service_account", client_email: "a@b.iam.gserviceaccount.com" }],
+    ["external_account credentials", { type: "external_account", audience: "//iam.googleapis.com/x" }],
+    ["a malformed authorized_user file", { type: "authorized_user", client_id: "client-id" }],
+  ] as const)("reports the provider unconfigured for %s", async ([, adc]) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const provider = await setupAdcProvider(adc);
+
+    await expect(provider.check()).resolves.toBeUndefined();
+    await expect(provider.resolve()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("feature parity", () => {
-  it("registers a command-backed gcloud token provider key when ADC auth is enabled", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    const adcPath = join(agentDir, "adc.json");
-    await writeFile(
-      adcPath,
-      JSON.stringify({
-        type: "authorized_user",
-        client_id: "client-id",
-        client_secret: "client-secret",
-        refresh_token: "refresh-token",
-      }),
-      "utf8",
-    );
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
-    process.env.LITELLM_GCLOUD_TOKEN_AUTH = "1";
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
-    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
-
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-    await extension(pi);
-
-    await expect(
-      pi.providers[0]?.auth.apiKey?.check?.({
-        ctx: { env: async (name) => process.env[name], fileExists: async () => false },
-        signal: new AbortController().signal,
-      }),
-    ).resolves.toEqual({ type: "api_key", source: "gcloud ADC" });
-  });
-
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";

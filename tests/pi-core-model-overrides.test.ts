@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPi, loadExtension } from "./test-helpers.js";
+import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
-const ENV_KEYS = ["LITELLM_BASE_URL", "LITELLM_API_KEY"];
-const ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
+useHermeticEnv();
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -24,11 +23,6 @@ async function writeModelsConfig(agentDir: string, modelId: string, name: string
 }
 
 afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const original = ORIGINAL_ENV.get(key);
-    if (original === undefined) delete process.env[key];
-    else process.env[key] = original;
-  }
   vi.restoreAllMocks();
   vi.resetModules();
 });

@@ -1,6 +1,55 @@
 import { readFileSync } from "node:fs";
 import type { Provider } from "@earendil-works/pi-ai";
-import { vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+
+// Every environment variable src/ reads. Tests that assert credential or discovery
+// behavior must start from a known-empty environment, not from the developer's
+// shell, and must not leak into the next test.
+export const MANAGED_ENV_VARS = [
+  "LITELLM_API_KEY",
+  "LITELLM_API_KEY_HELPER",
+  "LITELLM_BASE_URL",
+  "LITELLM_HEADERS",
+  "LITELLM_OFFLINE",
+  "LITELLM_DISCOVERY_TIMEOUT_MS",
+  "LITELLM_VERBOSE_DISCOVERY",
+  "LITELLM_GCLOUD_TOKEN_AUTH",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "PI_OFFLINE",
+  "APPDATA",
+] as const;
+
+// Returns a subprocess environment with every source-read variable cleared before
+// applying explicit overrides.
+export function hermeticChildEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of MANAGED_ENV_VARS) delete env[name];
+  return { ...env, ...overrides };
+}
+
+// Snapshots and clears the managed variables before each test and restores the
+// original values afterwards, so a result never depends on ambient environment or
+// on which test ran first in the file.
+//
+// `extra` adds suite-specific names. HOME is deliberately not in the shared set: clearing
+// it for every suite would break the npm and git subprocesses tests/package.test.ts spawns,
+// so only the suites that exercise ADC path discovery opt into it.
+export function useHermeticEnv(extra: readonly string[] = []): void {
+  const managed = [...MANAGED_ENV_VARS, ...extra];
+  let saved: Array<[string, string | undefined]> = [];
+
+  beforeEach(() => {
+    saved = managed.map((name) => [name, process.env[name]]);
+    for (const name of managed) delete process.env[name];
+  });
+
+  afterEach(() => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+}
 
 type TestCommandContext = {
   ui: {

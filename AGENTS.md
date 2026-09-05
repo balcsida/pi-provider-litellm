@@ -4,8 +4,8 @@
 
 - This package is a Pi extension that registers a `litellm` provider from `src/index.ts`.
 - Source is TypeScript ESM under `src/`; tests are Vitest specs under `tests/`.
-- Build output is `dist/`; do not edit generated output by hand.
-- The package entrypoint is `./dist/index.js`, and the Pi extension registration comes from `package.json` `pi.extensions`.
+- Build output is `dist/`; do not edit generated output by hand or publish it.
+- Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 
 ## Commands
@@ -13,7 +13,7 @@
 - Use `npm ci` when reinstalling dependencies from the lockfile.
 - Use `npm test` for the full test suite.
 - Use `npm test -- tests/<file>.test.ts` for a focused Vitest run.
-- Use `npm run check` before committing code changes; it runs Biome, typecheck, and tests.
+- Use `npm run check` before committing code changes; it runs Biome, typecheck, tests, and the package-content guard.
 - Use `npm run clean && npm run build` when changing exported/runtime code.
 - Use `npm run supply-chain:guard` and `npm pack --dry-run` when package contents, dependency policy, or release packaging change.
 
@@ -24,7 +24,9 @@
 - The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
-- Cache data is stored as `litellm-models.json` under the Pi agent dir with a keyed API-key fingerprint and a 24-hour stale refresh window.
+- Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
+- Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, and service accounts warn and fail closed.
+- `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.
 
 ## LiteLLM Request Hooks
 
@@ -41,19 +43,20 @@
 
 ## Smoke And CI
 
-- CI runs `npm ci` and `npm run prepublishOnly`.
+- CI runs `npm ci` and `npm run prepublishOnly`; release relies on `npm publish` invoking `prepublishOnly`.
 - `.github/workflows/litellm-smoke.yml` uses VidaiMock plus a real LiteLLM proxy; it should not require real provider API keys.
 - Keep smoke readiness probes bounded with `curl --connect-timeout 1 --max-time 3`.
 - `scripts/smoke-runner.ts` exercises discovery and `/v1/chat/completions` through the proxy.
-- The non-interactive Pi CLI smoke uses `./dist/index.js`, so runtime changes need a fresh build before running it.
+- The non-interactive Pi CLI smoke loads the package root (`-e .`) so it exercises `pi.extensions` resolution; the interactive terminal smoke loads `src/index.ts` by path.
+- `--list-models` alone does not prove an extension loaded, because Pi also reports models from its own store. Assert a load-specific side effect instead.
 
 ## Release And Packaging
 
 - The release workflow is tag-driven for `v*.*.*`; it publishes with `npm publish --access public --provenance` and creates a GitHub release.
 - Local release prep should keep `package.json` and `package-lock.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
 - Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag.
-- The npm package should stay limited to `dist`, `README.md`, and `LICENSE`.
-- `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files; update tests before changing that policy.
+- The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only.
+- `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files, and requires every allowlisted source file to ship; update tests before changing that policy.
 
 ## Package Metadata
 

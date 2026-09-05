@@ -53,7 +53,6 @@ jobs:
           cache: 'npm'
 
       - run: npm ci --ignore-scripts
-      - run: npm run build
 
       - name: Install VidaiMock
         shell: bash
@@ -212,19 +211,37 @@ jobs:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: npm test -- tests/terminal-smoke.test.ts
 
+      # `--list-models` also reports models Pi has persisted in its own store, so running it
+      # against the shared agent dir the terminal smoke already refreshed would pass even if
+      # the extension failed to load. Use a dedicated empty agent dir for this leg, and prove
+      # the assertion discriminates by first running it with a manifest entrypoint that does
+      # not exist -- the loader skips a missing entry silently, so the models must be absent.
       - name: Run Pi CLI smoke
         env:
           LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
         run: |
           set -euo pipefail
 
-          ./node_modules/.bin/pi -e ./dist/index.js --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
+          list_models_dir="${{ runner.temp }}/pi-list-models"
+          rm -rf "$list_models_dir" && mkdir -p "$list_models_dir"
+
+          cp package.json /tmp/pi-manifest.bak
+          node -e 'const f="package.json";const p=require(`./${f}`);p.pi.extensions=["./src/does-not-exist.ts"];require("fs").writeFileSync(f,JSON.stringify(p,null,2))'
+          PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-negative.txt || true
+          cp /tmp/pi-manifest.bak package.json
+          if grep -qF "vidaimock-openai" /tmp/pi-negative.txt; then
+            echo "negative control failed: models listed without a loadable entrypoint" >&2
+            exit 1
+          fi
+
+          rm -rf "$list_models_dir" && mkdir -p "$list_models_dir"
+          PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
 
+          export PI_CODING_AGENT_DIR="${{ runner.temp }}/pi-cli-smoke"
           ./node_modules/.bin/pi \
-            -e ./dist/index.js \
+            -e . \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL" \
             --no-tools \
@@ -235,7 +252,7 @@ jobs:
           # Anthropic-backed route: covers the cacheControlFormat "anthropic"
           # compat path through LiteLLM's Anthropic translation.
           ./node_modules/.bin/pi \
-            -e ./dist/index.js \
+            -e . \
             --provider litellm \
             --model "$LITELLM_CLI_SMOKE_MODEL_ANTHROPIC" \
             --no-tools \
