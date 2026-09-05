@@ -109,8 +109,12 @@ export function createPi(): TestPi {
     registerCommand(name, command) {
       this.commands.set(name, command);
     },
+    // Models Pi's real registry: `extension.tools.set(tool.name, ...)` — a synchronous replacement
+    // keyed by name. Appending would let tests assert duplicates that production cannot produce.
     registerTool(tool) {
-      this.tools.push(tool);
+      const existing = this.tools.findIndex((registered) => registered.name === tool.name);
+      if (existing >= 0) this.tools[existing] = tool;
+      else this.tools.push(tool);
     },
     on(event, handler) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);

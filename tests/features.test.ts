@@ -150,6 +150,9 @@ describe("gcloud ADC provider auth", () => {
   });
 });
 
+// Generated MCP tool names carry a 10-hex identity hash; assert the contract, not a digest.
+const named = (base: string) => expect.stringMatching(new RegExp(`^${base}_[a-f0-9]{10}$`));
+
 describe("feature parity", () => {
   it("registers discovered LiteLLM MCP tools as Pi tools", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
@@ -183,7 +186,7 @@ describe("feature parity", () => {
     await extension(pi);
     await refreshProvider(pi);
 
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_brave_search"));
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
   });
 
   it("refreshes the MCP catalog when default-provider auth changes", async () => {
@@ -228,7 +231,7 @@ describe("feature parity", () => {
     process.env.LITELLM_API_KEY = "second-token";
     process.env.LITELLM_HEADERS = '{"x-tenant":"second"}';
     await refreshProvider(pi);
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second"));
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_second_second")));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://first.example.com/mcp-rest/tools/list",
@@ -340,7 +343,7 @@ describe("feature parity", () => {
     await vi.waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("https://second.example.com/mcp-rest/tools/list", expect.anything()),
     );
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContain("mcp_second_second"));
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_second_second")));
   });
 
   it("does not block model refresh on an aborted same-identity MCP waiter", async () => {
@@ -415,8 +418,10 @@ describe("feature parity", () => {
     const pi = createPi();
     await extension(pi);
     await refreshProvider(pi);
-    await vi.waitFor(() => expect(pi.tools.map((candidate) => candidate.name)).toContain("mcp_brave_search"));
-    const tool = pi.tools.find((candidate) => candidate.name === "mcp_brave_search");
+    await vi.waitFor(() =>
+      expect(pi.tools.map((candidate) => candidate.name)).toContainEqual(named("mcp_brave_search")),
+    );
+    const tool = pi.tools.find((candidate) => candidate.name.startsWith("mcp_brave_search_"));
 
     await tool?.execute?.("call-1", { query: "Pi" }, undefined, undefined, {
       modelRegistry: {

@@ -162,7 +162,7 @@ Treat the configured LiteLLM proxy as trusted: Skills can add instructions to th
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_CLI_JWT_EXPIRATION_HOURS` | `24` | CLI SSO token lifetime fallback for older proxies whose poll response omits `expires_in`; mirror a non-default proxy setting locally |
-| `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup); discovery is silent by default |
+| `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup), including MCP prepared/registered/dropped counts. Progress messages are off by default; MCP safety diagnostics (see below) are always reported regardless of this setting |
 
 Only use a trusted `LITELLM_API_KEY_HELPER` or `!command`. Prefer an absolute executable path, keep secrets out of command arguments, and print only the token to stdout without logging it to stderr.
 
@@ -187,7 +187,51 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `GET /mcp-rest/tools/list`
 - `POST /mcp-rest/tools/call`
 
-Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>`, with simple JSON Schema parameters mapped to Pi/TypeBox parameters. Complex schemas fall back to a single `args` object. MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. MCP tools run in Pi's parallel tool mode and retry transient failures once.
+Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>_<hash>`, at most 64 characters, using only `[a-z0-9_]`. The trailing 10-character hash is derived from the tool's identity (`server_id`, `server_name`, `name`) and is always present, so a name depends only on that tool and never on which other tools happen to be in the same catalog — adding or removing a sibling never renames a survivor. When the readable prefix would overflow 64 characters it is truncated from the right, so a long server name can leave little or none of the tool name visible; the hash is what distinguishes such tools. Tools from different servers therefore never overwrite each other, and exact duplicate identities are registered once.
+
+MCP discovery runs after Pi refreshes LiteLLM models or after `/login litellm`; extension activation never waits for it. Discovery accepts at most a 5 MiB response and registers at most 512 tools. The response must be a JSON array of tools or an object with a `tools` array; an `unexpected_error` or unknown non-null `error` in the object envelope, an object without `tools`, and every other shape are reported as discovery failures rather than as empty catalogs. Failure reports use extension-owned text and never include LiteLLM's proxy-supplied tag or `message`. A `partial_failure` envelope keeps and registers the returned tools while reporting one bounded generated diagnostic. Each tool is isolated during normalization, so one bad tool never hides valid siblings. A tool is accepted only when its schema has a root of exactly `"type": "object"` (a bare `properties` object with no `type`, or a type union such as `["object","null"]`, is refused), plain-object `properties`, at most 16 levels of JSON nesting (about eight nested schema objects when each level uses `properties`), and a serialized size of at most 64 KiB. Descriptions are limited to 4 KiB, and tool labels and result metadata to 256 bytes, each with a truncation marker.
+
+### Which schema a tool ends up with
+
+A tool registers with one of two parameter shapes.
+
+- **The extension-owned `args` envelope** — a single object-valued `args` property, required at execution. Used when the proxy supplied no schema at all (absent or `{}`), and used as a safe substitute when the supplied schema could not be proven safe (below). Nothing in this shape originates from the proxy.
+- **The supplied schema, passed through unchanged.** Pi validates arguments against it before the call and may first coerce supported primitive values: omitting a property listed in `required` is rejected, while a value of the wrong type is rejected only when it cannot be coerced to the declared type. Unknown extra properties are accepted by default, but an `additionalProperties` schema can validate and coerce them, and constraints such as `additionalProperties: false` or `unevaluatedProperties: false` can reject them. Passing through is not the same as skipping validation. A schema of exactly `{"type": "object"}` with no `properties` therefore accepts any arguments at the top level rather than nesting them under `args`. Real schema properties named `args`, `properties`, or `required` remain intact.
+
+An `inputSchema` that is present but is not a JSON object (a string, number, or array) is a malformed tool and is dropped as `invalid-schema`. It is not treated as schemaless, so a proxy emitting junk cannot obtain the permissive envelope.
+
+### Regexes and references in supplied schemas
+
+`pattern`, and the keys of `patternProperties`, are compiled into a backtracking regular expression and executed with no time limit, so a proxy-supplied expression can block Pi for minutes on a single tool call. A `$ref` resolves an arbitrary JSON pointer, which means an expression can be parked under any key at all, including data-only positions such as `default` or `examples`. Enumerating "positions where a subschema may appear" is therefore not a sound defence.
+
+Instead, the whole supplied document is walked — every key and every value — and the tool keeps its schema only if that walk completes and finds nothing dangerous. A walk stops short, and the tool is degraded, when it finds a `pattern` or `patternProperties` keyword at all — whatever its value type, since refusing to vouch for it does not depend on an upstream type guard staying as it is — a `$dynamicRef` or `$recursiveRef`, a `$ref` pointing outside the document, or a graph too deep or too large to inspect within budget. A local `#/...` pointer is accepted only when the walk covers its target *and* that target resolves to something usable as a subschema, with the reference chain proven acyclic — covering the document proves no expression hides behind a pointer, but not that the pointer names a schema at all. A pointer to a non-schema (`#/description`), a pointer with no target (`#/$defs/missing`), an `$anchor` reference (`#name`), and a mutual `$defs` cycle are each degraded rather than forwarded, because the validator would otherwise throw, exhaust the stack, or produce a tool that can never accept any argument. A key that is an argument *name* rather than a keyword — a property literally called `pattern` or `patternProperties` — is left alone.
+
+**Degrading replaces the schema, not the tool.** Because regexes are common in real MCP schemas, a tool in this position still registers, with the `args` envelope in place of its schema, and is reported under the `schema-envelope` class. The compatibility cost is real and worth knowing: such a tool loses validation against the proxy-supplied schema but retains Pi's validation of the extension-owned envelope, so its arguments must be passed as an object under `args` and the model sees a less specific contract than the server documents. The server still validates authoritatively, so an argument that violates the proxy-specific contract becomes a server-side tool error rather than a local one.
+
+### What you see when a tool is missing or degraded
+
+Every raw entry the proxy returns is accounted for exactly once, and the counts reconcile: `raw = prepared + dropped + beyond-the-cap`, where *prepared* is what will be registered. If a registration pass is refused partway, the shortfall between prepared and registered is reported separately by that pass's own diagnostic. A tool is **dropped** for one of four reasons — `invalid-tool` (no usable name or server identity), `duplicate-identity`, `invalid-schema`, or `name-collision` — or discarded for being beyond the 512-tool limit (`tool-cap`). A tool is **degraded** rather than dropped under `schema-envelope`. Each class is reported to stderr on its own line with a count and a bounded sample of names, for example:
+
+```text
+LiteLLM MCP: kept 2 MCP tools but replaced their schema with a safe args envelope, because of a schema that could not be proven free of proxy-supplied regexes or references: mcp_srv_lookup_1c97861c1f, mcp_srv_matcher_3ee4c31a5a.
+LiteLLM MCP: dropped 1 MCP tool with a missing name or server identity: entry_3.
+```
+
+A class is re-reported whenever its membership changes, including a change beyond the names shown in the sample, and stays quiet while unchanged — so a stable proxy does not repeat itself across refreshes, while a changing one is always surfaced. A class that stops occurring is cleared, so its recurrence is reported rather than suppressed. These lines never contain the proxy's schema, its response body, its descriptions, or your API key; only generated names, positional placeholders, and counts. They are written regardless of `LITELLM_VERBOSE_DISCOVERY`; set that variable to also see per-refresh raw, prepared, enveloped, and registered counts. The enveloped count covers every tool carrying the envelope, whether because the proxy supplied no schema or because its schema was degraded, so it is the number of tools with no proxy-specific argument contract.
+
+### Registration lifecycle
+
+Pi registers a tool synchronously, replacing any existing tool of the same name, and exposes no way to unregister. It has no notion of rejecting one tool while accepting another: the only failure is a staleness check that fires once the extension instance has been superseded, and that check is never reset. A refused registration therefore ends the whole pass rather than skipping one tool.
+
+So a pass that is refused partway leaves the tools registered up to that point, reports one bounded diagnostic, and makes no further attempt from that extension instance — retrying would re-run discovery on every refresh and could never succeed. A reload creates a fresh instance, which starts clean on its own. Because names are stable and registration replaces by name, any retry that does happen is idempotent.
+
+Network discovery is separate and remains retryable: a catalog that yields no registrable tool is not recorded as settled, so a later refresh tries again, and the empty result is reported rather than passing in silence. A tool that disappears from the proxy's catalog stays registered until Pi restarts.
+
+MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once: timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text to 64 KiB with a truncation marker.
+
+A passed-through schema's `format` keyword is evaluated, using the validator's own built-in expressions rather than anything the proxy supplies.
+
+Tools discovered this way are only as trustworthy as the MCP servers behind your proxy: their descriptions and results are text the model reads.
 
 ## LiteLLM Skill Hub
 
@@ -252,6 +296,7 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
 | MCP tools not showing | Verify the proxy exposes `/mcp-rest/tools/list` and open `/model` after fixing the proxy |
+| Some MCP tools missing or unvalidated | Check pi's stderr for `LiteLLM MCP:` lines. Dropped tools are reported under `invalid-tool`, `duplicate-identity`, `invalid-schema`, `name-collision`, or `tool-cap`, each with a count and a bounded sample of generated names. A tool reported under `schema-envelope` is still present but uses the `args` envelope instead of its own schema. A refused registration pass is reported once. Set `LITELLM_VERBOSE_DISCOVERY=1` for per-refresh raw/prepared/enveloped/registered counts |
 | Skills not affecting prompts | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills |
 
 ### `No models available` at startup

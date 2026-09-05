@@ -322,6 +322,7 @@ describe("pi package compatibility", () => {
     });
     expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.84.2");
     expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.84.2");
+    expect(manifest.devDependencies.typebox).toBe("1.3.7");
   });
 
   it("documents native Provider model persistence and the extension-only package surface", async () => {

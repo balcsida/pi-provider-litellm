@@ -18,7 +18,14 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
-import { createMcpToolDefinitions } from "./mcp-tools.js";
+import {
+  createMcpToolDefinitions,
+  credentialFingerprint,
+  reportMcpCatalogOutcome,
+  reportMcpPartialDiscovery,
+  reportMcpRegistrationFatal,
+  reportMcpRegistrationSuccess,
+} from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { LiteLLMApi, LiteLLMModel, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
@@ -1103,13 +1110,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   let registeredMcpIdentity: string | undefined;
   let mcpRegistration: Promise<void> | undefined;
+  // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
+  // never cleared, so a refusal is fatal for this extension instance rather than a per-tool or
+  // retryable condition. Once seen, stop attempting registration here; a reload creates a fresh
+  // instance with its own state, which starts clean on its own.
+  let mcpRegistrationFatal = false;
   let defaultRuntimeAuth: LiteLLMRuntimeAuth | undefined;
 
+  // Identifies the catalog a set of credentials points at, so a credential change forces
+  // re-registration. The base URL stays readable because it is not secret and is useful when
+  // reasoning about a refresh; everything credential-bearing is reduced to a non-reversible
+  // fingerprint so no key or header value is held in the identity string.
   function mcpCatalogIdentity(auth: LiteLLMRuntimeAuth): string {
     return JSON.stringify({
       baseUrl: normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp),
-      apiKey: auth.apiKey,
-      headers: Object.entries(auth.headers ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      credential: credentialFingerprint(auth.apiKey, auth.headers),
     });
   }
 
@@ -1162,26 +1177,54 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   async function registerMcpTools(auth: LiteLLMRuntimeAuth, signal?: AbortSignal): Promise<void> {
-    if (!mcpEnabled || discoveryDisabledReason()) return;
+    if (!mcpEnabled || discoveryDisabledReason() || mcpRegistrationFatal) return;
     const identity = mcpCatalogIdentity(auth);
     while (mcpRegistration) {
       await waitForMcpRegistration(mcpRegistration, signal);
       signal?.throwIfAborted();
-      if (registeredMcpIdentity === identity) return;
+      if (mcpRegistrationFatal || registeredMcpIdentity === identity) return;
     }
     if (registeredMcpIdentity === identity) return;
 
     const registration = (async () => {
       try {
         signal?.throwIfAborted();
-        const tools = await createMcpToolDefinitions(
+        const { definitions, report } = await createMcpToolDefinitions(
           (ctx) => (ctx?.modelRegistry ? resolveDefaultRuntimeAuth(ctx) : Promise.resolve(auth)),
           isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM MCP: ${message}\n`) : undefined,
           signal,
         );
         signal?.throwIfAborted();
-        for (const tool of tools) pi.registerTool(tool);
-        registeredMcpIdentity = identity;
+        let registered = 0;
+        try {
+          for (const definition of definitions) {
+            // Checked per tool so a cancelled refresh stops promptly instead of driving a full
+            // registry rebuild for every remaining tool.
+            signal?.throwIfAborted();
+            pi.registerTool(definition);
+            registered += 1;
+          }
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          // Fatal for this instance: report once, with a bounded Pi-authored cause and no proxy text,
+          // then stop retrying so a stale instance cannot churn discovery on every later refresh.
+          mcpRegistrationFatal = true;
+          reportMcpRegistrationFatal(registered, definitions.length, error);
+          return;
+        }
+        reportMcpRegistrationSuccess();
+        reportMcpPartialDiscovery(report.partialFailure, registered);
+        if (isVerboseDiscovery()) {
+          process.stderr.write(
+            `LiteLLM MCP: registered ${registered} of ${definitions.length} prepared MCP tools ` +
+              `(${report.discovered} raw, ${report.enveloped} enveloped).\n`,
+          );
+        }
+        // A catalog that produced nothing or came from a partial-failure response is not settled:
+        // leaving the identity unset lets a later refresh retry discovery, which is network-only and
+        // non-blocking. Re-registering surviving tools is safe because Pi replaces tools by name.
+        reportMcpCatalogOutcome(report.discovered, definitions.length);
+        if (definitions.length > 0 && !report.partialFailure) registeredMcpIdentity = identity;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
         process.stderr.write(
