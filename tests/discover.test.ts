@@ -478,6 +478,7 @@ describe("discoverModels via /model/info", () => {
           data: [
             {
               model_name: "anthropic/claude-3-5-sonnet",
+              litellm_params: { model: "anthropic/claude-3-5-sonnet" },
               model_info: {
                 mode: "chat",
                 max_input_tokens: 200000,
@@ -492,6 +493,7 @@ describe("discoverModels via /model/info", () => {
             },
             {
               model_name: "openai/gpt-4o",
+              litellm_params: { model: "openai/gpt-4o" },
               model_info: {
                 mode: "chat",
                 max_input_tokens: 128000,
@@ -607,7 +609,13 @@ describe("discoverModels via /model/info", () => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
-          data: [{ model_name: "opus-4.8", model_info: { mode: "chat" } }],
+          data: [
+            {
+              model_name: "opus-4.8",
+              litellm_params: { model: "opus-4.8" },
+              model_info: { mode: "chat" },
+            },
+          ],
         }),
     });
 
@@ -626,6 +634,28 @@ describe("discoverModels via /model/info", () => {
       maxTokens: 96_000,
     });
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+  });
+
+  it("withholds catalog metadata when /model/info supplies only the public route name", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "opus-4.8", model_info: { mode: "chat" } }],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("model_info");
+    expect(result.models[0]).toMatchObject({
+      id: "opus-4.8",
+      name: "opus-4.8 (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
   });
 
   it("preserves catalog pricing tiers for /model/info models", async () => {
@@ -940,6 +970,38 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "fireworks_ai", catalogModelId: "fireworks_ai/accounts/fireworks/models/kimi-k3" });
   });
 
+  it("uses custom_llm_provider as catalog authority for an unprefixed backend model", () => {
+    expect(
+      resolveModelInfoCatalog({
+        model_name: "kimi-route",
+        litellm_params: { model: "kimi-k3", custom_llm_provider: "moonshot" },
+        model_info: { mode: "chat" },
+      }),
+    ).toMatchObject({ provider: "moonshot", catalogModelId: "moonshot/kimi-k3" });
+  });
+
+  it("withholds catalog authority when custom_llm_provider conflicts with the model prefix", async () => {
+    const entry = {
+      model_name: "openai/gpt-4o",
+      litellm_params: { model: "openai/gpt-4o", custom_llm_provider: "anthropic" },
+      model_info: { mode: "chat" },
+    };
+    expect(resolveModelInfoCatalog(entry)).toBeUndefined();
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({
+      id: "openai/gpt-4o",
+      name: "openai/gpt-4o (incomplete metadata)",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
   it("keeps the D2 provider stable across asymmetric public-catalog hits", () => {
     const hit = {
       source: "models.dev" as const,
@@ -1081,7 +1143,7 @@ describe("discoverModels via /model/info", () => {
     expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
   });
 
-  it("enriches an unqualified OpenAI route through the model-name fallback", async () => {
+  it("does not enrich an unqualified OpenAI public route without backend identity", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
     });
@@ -1090,13 +1152,13 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({
       id: "gpt-4o",
-      name: "gpt-4o",
+      name: "gpt-4o (incomplete metadata)",
       reasoning: false,
-      input: ["text", "image"],
-      contextWindow: 128000,
-      maxTokens: 16384,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     });
-    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
   it("keeps proven display prices while marking any unresolved cost field incomplete", async () => {
@@ -1923,6 +1985,76 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
       }),
     ]);
+  });
+
+  it.each([
+    ["Moonshot", "moonshot/*", true],
+    ["non-Moonshot", "openai/*", false],
+  ] as const)("aggregates %s suppression evidence onto wildcard expansions", async (_case, backend, suppress) => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team/*",
+              litellm_params: { model: backend },
+              model_info: { id: "wildcard", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model-a" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
+  });
+
+  it("does not suppress a forced-thinking id expanded from a Moonshot wildcard", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "*",
+              litellm_params: { model: "moonshot/*" },
+              model_info: { id: "wildcard", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "kimi-k2-thinking" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.id).toBe("kimi-k2-thinking");
+    expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
+  });
+
+  it("requires unanimous suppression evidence across matching wildcard groups", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team/*",
+              litellm_params: { model: "moonshot/*" },
+              model_info: { id: "team-wildcard", mode: "chat" },
+            },
+            {
+              model_name: "*",
+              litellm_params: { model: "openai/*" },
+              model_info: { id: "catch-all-wildcard", mode: "chat" },
+            },
+          ],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model-a" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.id).toBe("team/model-a");
+    expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
   });
 
   it("preserves a wildcard Responses route mode on expanded models", async () => {

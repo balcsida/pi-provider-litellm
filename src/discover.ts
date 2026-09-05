@@ -300,6 +300,10 @@ export function resolveModelInfoCatalog(
   entry: ModelInfoEntry,
   publicCatalog?: PublicCatalog,
 ): CatalogResolution | undefined {
+  const hasBackendIdentity = Boolean(
+    wireString(entry.model_info?.base_model) || wireString(entry.litellm_params?.model),
+  );
+  if (!hasBackendIdentity) return undefined;
   const identity = resolveBackendIdentity(entry);
   if (!identity) return undefined;
   if (identity.provider) {
@@ -563,6 +567,9 @@ function mapFromWildcardExpansion(
     ? intersectThinkingLevelMaps(matches.map((model) => model.thinkingLevelMap))
     : undefined;
   const incomplete = matches.some((model) => model.name.endsWith(" (incomplete metadata)"));
+  const suppressReasoningContent =
+    !FORCED_THINKING_MODEL_PATTERN.test(id) &&
+    aggregateSuppressionEvidence(matches.map((model) => model.suppressReasoningContent === true));
   // Preserve every known tier even when a sibling has incomplete metadata. Omitting
   // a complete sibling's higher tier would understate the known worst-case rate;
   // the incomplete marker continues to signal that the resulting envelope is partial.
@@ -586,6 +593,7 @@ function mapFromWildcardExpansion(
     // Compatibility describes the concrete public id, while every authority-
     // bearing field above remains bounded by all matching wildcard groups.
     compat: buildCompat(id),
+    ...(suppressReasoningContent ? { suppressReasoningContent: true } : {}),
   };
 }
 

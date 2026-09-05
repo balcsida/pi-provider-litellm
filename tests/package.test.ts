@@ -359,7 +359,8 @@ describe("deployment group documentation", () => {
     expect(readme).toContain("IDs that match no surviving wildcard route are discarded");
     expect(readme).toContain("A matched wildcard expansion");
     expect(readme).toContain("catalog tiers remain for unaffected fields");
-    expect(readme).toContain("public `model_name` route as a final fallback");
+    expect(readme).toContain("the public `model_name` route is never backend authority");
+    expect(readme).toContain("`litellm_params.custom_llm_provider` is provider evidence");
     expect(readme).toContain("`/v1/models` and `/health` do not provide deployment-level backend identity");
     expect(readme).toContain("an unqualified ID is resolved only within an explicitly recognized `owned_by` provider");
     expect(readme).toContain("never searched across every Pi provider catalog");

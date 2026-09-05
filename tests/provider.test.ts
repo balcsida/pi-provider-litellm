@@ -258,6 +258,16 @@ describe("discovery and offline cache parity", () => {
           {
             model_name: "openai/gpt-5.5",
             model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "openai/gpt-5.5" },
+          },
+        ],
+        "openai/gpt-5.5",
+      ],
+      [
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
             litellm_params: { model: "openai/gpt-5.5-internal-preview" },
           },
         ],
@@ -289,7 +299,7 @@ describe("discovery and offline cache parity", () => {
           { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
           { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
         ],
-        "openai/gpt-5.5",
+        "openai/gpt-5.5 (incomplete metadata)",
       ],
     ] as const;
 
