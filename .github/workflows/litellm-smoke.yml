@@ -36,8 +36,11 @@ jobs:
       LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database@sha256:8b229a4b48fbe62d7f994b502106c3c1dbab958c07934fb446ac0e048a62745e' || 'docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09' }}
-      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
+      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
+      LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=present vidaimock-responses=present grouped-vidaimock=present
+      LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS: '1'
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
       VIDAIMOCK_BASE_URL: http://127.0.0.1:8100
@@ -130,6 +133,8 @@ jobs:
           cat > .tmp/litellm_config.yaml <<YAML
           model_list:
             - model_name: vidaimock-openai
+              model_info:
+                mode: chat
               litellm_params:
                 model: openai/gpt-4o-mini
                 api_base: http://host.docker.internal:8100/v1
@@ -137,10 +142,41 @@ jobs:
             - model_name: anthropic/vidaimock-claude
               model_info:
                 mode: chat
+                litellm_provider: anthropic
               litellm_params:
-                model: anthropic/claude-3-5-sonnet
+                # Must be a backend the bundled Pi catalog knows: native Messages
+                # selection requires unanimous positive compatibility evidence, so an
+                # uncatalogued Claude (3.5, or anything newer than the catalog)
+                # correctly reduces to Chat Completions and would not exercise
+                # /v1/messages at all.
+                model: anthropic/claude-sonnet-4-6
                 api_base: http://host.docker.internal:8100
                 api_key: sk-vidaimock
+            - model_name: vidaimock-responses
+              model_info:
+                mode: responses
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
+                api_key: sk-vidaimock
+            - model_name: grouped-vidaimock
+              model_info:
+                mode: chat
+                supported_openai_params: [temperature, reasoning_effort]
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
+                api_key: sk-vidaimock
+                allowed_openai_params: [reasoning_effort]
+            - model_name: grouped-vidaimock
+              model_info:
+                mode: responses
+                supported_openai_params: [temperature, thinking]
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
+                api_key: sk-vidaimock
+                allowed_openai_params: [thinking, reasoning_effort]
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
           YAML
@@ -181,6 +217,9 @@ jobs:
           done
           docker logs litellm-smoke >&2 || true
           exit 1
+
+      - name: Capture deployment-group model info
+        run: npx tsx scripts/smoke-deployment-group.ts
 
       - name: Run provider smoke
         env:
@@ -238,6 +277,8 @@ jobs:
           PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
+          grep -F "vidaimock-responses" /tmp/pi-litellm-models.txt
+          grep -F "grouped-vidaimock" /tmp/pi-litellm-models.txt
 
           export PI_CODING_AGENT_DIR="${{ runner.temp }}/pi-cli-smoke"
           ./node_modules/.bin/pi \
@@ -249,8 +290,8 @@ jobs:
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
           grep -F "mock response" /tmp/pi-litellm-response.txt
 
-          # Anthropic-backed route: covers the cacheControlFormat "anthropic"
-          # compat path through LiteLLM's Anthropic translation.
+          # Anthropic-backed route: covers the source extension's native Messages serializer through LiteLLM.
+          messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ./node_modules/.bin/pi \
             -e . \
             --provider litellm \
@@ -259,6 +300,25 @@ jobs:
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response-anthropic.txt
           grep -F "Anthropic mock response" /tmp/pi-litellm-response-anthropic.txt
+          docker logs --since "$messages_log_since" litellm-smoke > .tmp/pi-messages.log 2>&1
+          grep -F 'POST /v1/messages HTTP/1.1" 200' .tmp/pi-messages.log
+
+      - name: Assert captured LiteLLM endpoint logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logs litellm-smoke > .tmp/litellm.log 2>&1
+          # Endpoint coverage: every enabled wire protocol was exercised through the
+          # proxy, proven from captured request logs rather than response text.
+          grep -F 'POST /v1/chat/completions HTTP/1.1" 200' .tmp/litellm.log
+          grep -F 'POST /v1/responses HTTP/1.1" 200' .tmp/litellm.log
+          # The smoke runner posts to /v1/messages itself, so coverage alone cannot
+          # prove the extension's native Messages path. Require both that request and
+          # the Pi CLI request asserted in the scoped grep above.
+          messages_requests="$(grep -c -F 'POST /v1/messages HTTP/1.1" 200' .tmp/litellm.log || true)"
+          messages_requests="${messages_requests:-0}"
+          echo "captured /v1/messages requests: $messages_requests"
+          test "$messages_requests" -ge 2
 
       - name: Dump LiteLLM logs
         if: failure()

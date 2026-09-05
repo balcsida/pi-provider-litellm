@@ -25,7 +25,7 @@ it("preserves multiple image inputs within the model contract", async () => {
     })
     .result();
 
-  expect(requests[0]?.messages[0]?.content).toEqual([
+  expect(requests[0]?.messages?.[0]?.content).toEqual([
     { type: "image_url", image_url: { url: `data:image/png;base64,${RED_CIRCLE_PNG}` } },
     { type: "image_url", image_url: { url: `data:image/png;base64,${SECOND_PIXEL_PNG}` } },
   ]);

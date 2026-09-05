@@ -134,7 +134,7 @@ describe("native provider stream compatibility", () => {
       })
       .result();
 
-    expect(requests[0]?.messages[0]?.content).toContainEqual({
+    expect(requests[0]?.messages?.[0]?.content).toContainEqual({
       type: "image_url",
       image_url: { url: `data:image/png;base64,${RED_CIRCLE_PNG}` },
     });

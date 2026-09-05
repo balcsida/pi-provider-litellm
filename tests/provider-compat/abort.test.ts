@@ -1,6 +1,12 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createCompatibilityHarness, sseChunk } from "./helpers.js";
+import {
+  anthropicSseChunk,
+  anthropicTextResponse,
+  claudeRoute,
+  createCompatibilityHarness,
+  sseChunk,
+} from "./helpers.js";
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
 
@@ -32,8 +38,56 @@ describe("native provider abort compatibility", () => {
     expect(recovered.content).toEqual([{ type: "text", text: "recovered" }]);
   });
 
-  it("handles an already-aborted signal", async () => {
-    const { provider, model } = await createCompatibilityHarness();
+  it("aborts native Messages mid-stream and completes a later request", async () => {
+    const { models, model, respond } = await createCompatibilityHarness(
+      claudeRoute("anthropic", "anthropic/claude-sonnet-4-6"),
+    );
+    const controller = new AbortController();
+    respond(
+      anthropicSseChunk({
+        type: "message_start",
+        message: {
+          id: "msg_abort",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "team-claude",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      anthropicSseChunk({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+      anthropicSseChunk({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } }),
+      anthropicSseChunk(
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " ignored" } },
+        true,
+      ),
+      anthropicSseChunk({ type: "message_stop" }),
+    );
+
+    const stream = models.streamSimple(model, { messages: [user("First")] }, { signal: controller.signal });
+    for await (const event of stream) {
+      if (event.type === "text_delta") controller.abort();
+    }
+    const aborted = await stream.result();
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(aborted.stopReason).toBe("aborted");
+    expect(aborted.content).toEqual([{ type: "text", text: "partial" }]);
+
+    respond(...anthropicTextResponse("recovered"));
+    const recovered = await models.streamSimple(model, { messages: [user("Second")] }).result();
+    expect(recovered.stopReason).toBe("stop");
+    expect(recovered.content).toEqual([{ type: "text", text: "recovered" }]);
+  });
+
+  it.each([
+    ["chunked", false],
+    ["raw", true],
+  ] as const)("handles an already-aborted signal for a %s response", async (_name, raw) => {
+    const { provider, model, respondRaw } = await createCompatibilityHarness();
+    if (raw) respondRaw("data: [DONE]\n\n");
     const signal = AbortSignal.abort();
 
     const message = await provider

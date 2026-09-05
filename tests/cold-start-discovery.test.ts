@@ -34,7 +34,7 @@ afterEach(() => {
 describe("cold start discovery (issue #137)", () => {
   it("populates the catalog from env credentials during Pi's no-network startup", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -78,7 +78,7 @@ describe("cold start discovery (issue #137)", () => {
 
   it("stays offline when PI_OFFLINE is set", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-offline-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     process.env.PI_OFFLINE = "1";
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -93,7 +93,7 @@ describe("cold start discovery (issue #137)", () => {
 
   it("stays offline when LITELLM_OFFLINE is set", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-lloffline-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     process.env.LITELLM_OFFLINE = "1";
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -107,7 +107,7 @@ describe("cold start discovery (issue #137)", () => {
 
   it("registers the provider anyway when the proxy is unreachable", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-fail-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect ECONNREFUSED"));
 
@@ -119,7 +119,7 @@ describe("cold start discovery (issue #137)", () => {
 
   it("gives up quickly when the proxy hangs, whatever the discovery timeout is", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-hang-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     // Deployments raise this per-request timeout; activation must not inherit it, because Pi
     // cannot paint its UI until every extension has activated.
@@ -139,6 +139,8 @@ describe("cold start discovery (issue #137)", () => {
 
   it("does not discover when no credentials are configured", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-nocreds-"));
+    delete process.env.LITELLM_BASE_URL;
+    delete process.env.LITELLM_API_KEY;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       throw new Error("must not reach the network without credentials");
     });

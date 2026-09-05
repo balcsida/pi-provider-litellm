@@ -30,7 +30,7 @@ afterEach(() => {
 describe("Pi core model overrides", () => {
   it("applies reloaded overrides to cached and refreshed LiteLLM models", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-overrides-"));
-    process.env.LITELLM_BASE_URL = "https://litellm.example.com";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     await writeModelsConfig(agentDir, "cached-model", "Cached override");
     await writeFile(
@@ -44,7 +44,7 @@ describe("Pi core model overrides", () => {
               name: "cached-model",
               provider: "litellm",
               api: "openai-completions",
-              baseUrl: "https://litellm.example.com/v1",
+              baseUrl: "https://proxy.example.com/v1",
               reasoning: false,
               input: ["text"],
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

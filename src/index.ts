@@ -19,7 +19,7 @@ import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normaliz
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
-import { createLiteLLMProvider, toNativeModels } from "./provider.js";
+import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type { LiteLLMApi, LiteLLMModel, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
@@ -85,6 +85,33 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
 function cleanConfig(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
   return trimmed && trimmed !== "undefined" ? trimmed : undefined;
+}
+
+function resolveCredentialRoot(
+  definition: ProviderDefinition,
+  credential?: Credential,
+  requestBaseUrl?: string,
+): string | undefined {
+  const credentialBaseUrl =
+    credential?.type === "oauth"
+      ? cleanConfig(typeof credential.baseUrl === "string" ? credential.baseUrl : undefined)
+      : credential?.type === "api_key"
+        ? cleanConfig(credential.env?.[ENV_BASE_URL])
+        : undefined;
+  const baseUrl =
+    credentialBaseUrl ??
+    cleanConfig(requestBaseUrl) ??
+    cleanConfig(definition.baseUrl) ??
+    (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  return baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
+}
+
+function requireCredentialRoot(root: string | undefined, providerName: string): string {
+  if (!root) throw new Error(`no LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
+  if (isPlaceholderHost(new URL(root).hostname)) {
+    throw new Error(`placeholder LiteLLM base URL for ${providerName}. Run /login litellm or set env vars.`);
+  }
+  return root;
 }
 
 function stringSetting(value: unknown): string | undefined {
@@ -763,7 +790,6 @@ async function resolveApiKeyAuth(
   return {
     auth: {
       apiKey: creds.apiKey,
-      baseUrl: creds.baseUrl ? `${creds.baseUrl}/v1` : undefined,
       headers: await resolveHeadersFromContext(definition, ctx.env),
     },
     env: baseUrl ? { [ENV_BASE_URL]: normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) } : undefined,
@@ -771,7 +797,7 @@ async function resolveApiKeyAuth(
   };
 }
 
-function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
+function createProviderAuth(definition: ProviderDefinition, clearOAuthRuntimeRoot?: () => void): ProviderAuth {
   return {
     apiKey: {
       name: `${definition.displayName} API key`,
@@ -806,7 +832,10 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
         const fallback = await fallbackSource();
         return fallback ? { type: "api_key", source: fallback } : undefined;
       },
-      resolve: ({ ctx, credential }) => resolveApiKeyAuth(definition, ctx, credential),
+      resolve: async ({ ctx, credential }) => {
+        clearOAuthRuntimeRoot?.();
+        return resolveApiKeyAuth(definition, ctx, credential);
+      },
     },
     oauth: definition.enableOAuth
       ? {
@@ -819,9 +848,6 @@ function createProviderAuth(definition: ProviderDefinition): ProviderAuth {
           }),
           toAuth: async (credential) => ({
             apiKey: credential.access,
-            baseUrl: credential.baseUrl
-              ? `${normalizeBaseUrl(String(credential.baseUrl), definition.allowInsecureHttp)}/v1`
-              : undefined,
             headers: resolveHeaders(definition),
           }),
         }
@@ -904,7 +930,7 @@ function prepareLiteLLMRequestPayload(
     next[key] = value;
   };
 
-  if (api !== "openai-responses" && model?.suppressReasoningContent === true) {
+  if ((api === undefined || api === "openai-completions") && model?.suppressReasoningContent === true) {
     for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
       if (key !== "thinking") update(key, value);
     }
@@ -913,7 +939,7 @@ function prepareLiteLLMRequestPayload(
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
-    api !== "openai-responses" &&
+    (api === undefined || api === "openai-completions") &&
     modelId &&
     isGpt55Model(modelId) &&
     Array.isArray(payload.tools) &&
@@ -943,7 +969,7 @@ function prepareLiteLLMRequestPayload(
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
   // must carry string content, and tool results must be plain text.
-  if (modelId && isMoonshotModel(modelId)) {
+  if ((api === undefined || api === "openai-completions") && modelId && isMoonshotModel(modelId)) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -954,7 +980,11 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
+  if (
+    (api === undefined || api === "openai-completions" || api === "openai-responses") &&
+    modelId &&
+    GEMINI_MODEL_PATTERN.test(modelId)
+  ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -977,7 +1007,7 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (sessionId) {
+  if ((api === undefined || api === "openai-completions" || api === "openai-responses") && sessionId) {
     next ??= { ...payload };
     next.litellm_session_id = sessionId;
   }
@@ -1056,6 +1086,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
   const providerNames = new Set(definitions.map((definition) => definition.name));
+  const oauthRuntimeRoots = new Map<string, { apiKey: string; root: string }>();
 
   function discoveryDisabledReason(): string | null {
     if (isOffline()) return `${ENV_OFFLINE}=1`;
@@ -1064,19 +1095,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function requestBaseUrl(definition: ProviderDefinition): string {
-    const baseUrl =
-      cleanConfig(definition.baseUrl) ??
-      (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined) ??
-      "https://litellm.example.com";
-    return `${normalizeBaseUrl(baseUrl, definition.allowInsecureHttp)}/v1`;
+    try {
+      return `${resolveCredentialRoot(definition) ?? DEFAULT_LITELLM_BASE_URL}/v1`;
+    } catch {
+      return `${DEFAULT_LITELLM_BASE_URL}/v1`;
+    }
   }
 
   async function authForCredential(definition: ProviderDefinition, credential?: Credential, executeHelpers = true) {
     if (credential?.type === "oauth") {
-      const baseUrl =
-        typeof credential.baseUrl === "string"
-          ? normalizeBaseUrl(credential.baseUrl, definition.allowInsecureHttp)
-          : normalizeBaseUrl(requestBaseUrl(definition), definition.allowInsecureHttp);
+      const baseUrl = requireCredentialRoot(resolveCredentialRoot(definition, credential), definition.name);
       return {
         baseUrl,
         apiKey: credential.access,
@@ -1094,7 +1122,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       throw new Error(`no credentials for ${definition.name}. Run /login litellm or set env vars.`);
     }
     return {
-      baseUrl: normalizeBaseUrl(resolved.auth.baseUrl ?? requestBaseUrl(definition), definition.allowInsecureHttp),
+      baseUrl: requireCredentialRoot(
+        resolveCredentialRoot(definition, credential, resolved.env?.[ENV_BASE_URL]),
+        definition.name,
+      ),
       apiKey: resolved.auth.apiKey,
       headers: resolved.auth.headers,
       allowInsecureHttp: definition.allowInsecureHttp,
@@ -1117,16 +1148,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_NAME);
     if (!auth) return undefined;
     const provider = ctx.modelRegistry.getProvider(PROVIDER_NAME);
-    const baseUrl = auth.auth.baseUrl ?? provider?.baseUrl;
     const apiKey = auth.auth.apiKey;
+    const oauthRuntimeRoot = oauthRuntimeRoots.get(PROVIDER_NAME);
+    const baseUrl =
+      cleanConfig(auth.env?.[ENV_BASE_URL]) ??
+      (oauthRuntimeRoot && oauthRuntimeRoot.apiKey === apiKey ? oauthRuntimeRoot.root : undefined) ??
+      provider?.baseUrl;
     if (!baseUrl || !apiKey) return undefined;
+    const runtimeRoot = requireCredentialRoot(
+      normalizeBaseUrl(baseUrl, definitions[0]?.allowInsecureHttp),
+      PROVIDER_NAME,
+    );
     const headers = Object.fromEntries(
       Object.entries(auth.auth.headers ?? provider?.headers ?? {}).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
     return {
-      baseUrl: normalizeBaseUrl(baseUrl, definitions[0]?.allowInsecureHttp),
+      baseUrl: runtimeRoot,
       apiKey,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
       allowInsecureHttp: definitions[0]?.allowInsecureHttp,
@@ -1207,7 +1246,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
     });
     signal?.throwIfAborted();
-    return { ...result, baseUrl: `${normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp)}/v1` };
+    return { ...result, baseUrl: normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp) };
   }
 
   // Pi's startup path only ever refreshes with allowNetwork:false, and it returns before the
@@ -1221,7 +1260,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       // so helper-backed setups keep waiting for Pi's own refresh.
       const auth = await authForCredential(definition, stored, false);
       const result = await runDiscovery(auth, AbortSignal.timeout(getSeedTimeoutMs()));
-      return toNativeModels(definition.name, result.baseUrl, result.models);
+      return toNativeModels(definition.name, result.baseUrl, result.models, definition.allowInsecureHttp);
     } catch (error) {
       // No credentials yet is the normal unconfigured case; anything else is worth one line.
       if (isVerboseDiscovery()) {
@@ -1236,12 +1275,31 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const seeded = await Promise.all(definitions.map(seedModels));
 
   for (const [index, definition] of definitions.entries()) {
+    const auth = createProviderAuth(definition, () => oauthRuntimeRoots.delete(definition.name));
+    if (auth.oauth) {
+      const toAuth = auth.oauth.toAuth;
+      auth.oauth.toAuth = async (credential) => {
+        const resolved = await toAuth(credential);
+        const root = requireCredentialRoot(resolveCredentialRoot(definition, credential), definition.name);
+        oauthRuntimeRoots.set(definition.name, { apiKey: credential.access, root });
+        return resolved;
+      };
+    }
     const provider = createLiteLLMProvider({
       id: definition.name,
       name: definition.displayName,
       baseUrl: requestBaseUrl(definition),
-      auth: createProviderAuth(definition),
+      auth,
       models: seeded[index],
+      allowInsecureHttp: definition.allowInsecureHttp,
+      resolveCredentialRoot: (credential, requestRoot, apiKey) => {
+        if (credential) return resolveCredentialRoot(definition, credential, requestRoot);
+        const explicit = cleanConfig(requestRoot);
+        if (explicit) return normalizeBaseUrl(explicit, definition.allowInsecureHttp);
+        const oauthRuntimeRoot = oauthRuntimeRoots.get(definition.name);
+        if (apiKey && oauthRuntimeRoot?.apiKey === apiKey) return oauthRuntimeRoot.root;
+        return resolveCredentialRoot(definition);
+      },
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
@@ -1283,7 +1341,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
+    if (ctx.model?.provider !== PROVIDER_NAME) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
     return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel, sessionId);
   });
