@@ -8,8 +8,9 @@ import {
   type ProviderAuth,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 import { enrichCachedModel, normalizeBaseUrl } from "./discover.js";
-import { createLiteLLMProtocolApis, isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
+import { createLiteLLMProtocolApis, isLiteLLMApi, LITELLM_API_NAMES, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, LiteLLMModel } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -39,23 +40,24 @@ export function toNativeModels(
 }
 
 export const DEFAULT_LITELLM_BASE_URL = "https://litellm.example.com";
+const CHAT_TOOL_CAP = 128;
 const PLACEHOLDER_HOSTNAMES = new Set([new URL(DEFAULT_LITELLM_BASE_URL).hostname]);
 
 function refreshRequired(message: string): Error {
   return new Error(`${message}; a network refresh with a valid LiteLLM base URL is required`);
 }
 
-function rootUrl(baseUrl: string, subject: string, allowInsecureHttp = false): URL {
+function rootUrl(baseUrl: string, subject: string, allowInsecureHttp = false, verb = "has"): URL {
   try {
     return new URL(normalizeBaseUrl(baseUrl, allowInsecureHttp));
   } catch {
-    throw refreshRequired(`${subject} has an invalid LiteLLM model URL`);
+    throw refreshRequired(`${subject} ${verb} an invalid LiteLLM model URL`);
   }
 }
 
 function activeCredentialRoot(root: string, allowInsecureHttp = false): { root: string; host: string } {
-  const normalized = normalizeBaseUrl(root, allowInsecureHttp);
-  const active = rootUrl(normalized, "Active credentials", allowInsecureHttp);
+  const active = rootUrl(root, "Active credentials", allowInsecureHttp, "have");
+  const normalized = active.toString().replace(/\/$/, "");
   if (PLACEHOLDER_HOSTNAMES.has(active.hostname.toLowerCase())) {
     throw refreshRequired("Active credentials use a placeholder LiteLLM model host");
   }
@@ -64,7 +66,10 @@ function activeCredentialRoot(root: string, allowInsecureHttp = false): { root: 
 
 function modelHostError(model: Model<LiteLLMApi>, activeHost: string, allowInsecureHttp = false): Error | undefined {
   if (!isLiteLLMApi(model.api)) {
-    return refreshRequired(`Cached model uses unsupported LiteLLM transport ${String(model.api)}`);
+    return new Error(
+      `LiteLLM model ${model.id} declares unsupported protocol "${String(model.api)}"; ` +
+        `set "api" to one of ${LITELLM_API_NAMES.join(", ")} in models.json`,
+    );
   }
   let stored: URL;
   try {
@@ -86,6 +91,7 @@ function modelHostError(model: Model<LiteLLMApi>, activeHost: string, allowInsec
 function requestModel(
   provider: string,
   model: Model<LiteLLMApi>,
+  context: Context,
   credentialRoot: string | undefined,
   allowInsecureHttp = false,
 ): Model<LiteLLMApi> {
@@ -93,6 +99,17 @@ function requestModel(
   const active = activeCredentialRoot(credentialRoot, allowInsecureHttp);
   const error = modelHostError(model, active.host, allowInsecureHttp);
   if (error) throw error;
+  if (
+    model.api === "openai-completions" &&
+    (model as LiteLLMModel).litellmBackendFamily === "openai" &&
+    context.tools &&
+    context.tools.length > CHAT_TOOL_CAP
+  ) {
+    throw new Error(
+      `LiteLLM model ${model.id} uses Chat Completions with ${context.tools.length} tools, exceeding the ` +
+        `${CHAT_TOOL_CAP}-tool cap; route this model via Responses or reduce enabled extensions`,
+    );
+  }
   return { ...model, provider, baseUrl: resolveModelBaseUrl(active.root, model.api, allowInsecureHttp) };
 }
 
@@ -118,7 +135,15 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       let active: { root: string; host: string };
       try {
         const root = options.resolveCredentialRoot(credential);
-        if (!root) return [];
+        if (!root) {
+          if (models.length > 0) {
+            reportUnavailable(
+              `${models.length} model(s) hidden because no LiteLLM base URL is configured; ` +
+                "set LITELLM_BASE_URL or run /login litellm",
+            );
+          }
+          return [];
+        }
         active = activeCredentialRoot(root, options.allowInsecureHttp);
       } catch (error) {
         reportUnavailable(error instanceof Error ? error.message : String(error));
@@ -148,6 +173,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         requestModel(
           options.id,
           model,
+          context,
           options.resolveCredentialRoot(undefined, requestOptions?.env?.LITELLM_BASE_URL, requestOptions?.apiKey),
           options.allowInsecureHttp,
         ),
@@ -159,6 +185,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         requestModel(
           options.id,
           model,
+          context,
           options.resolveCredentialRoot(undefined, requestOptions?.env?.LITELLM_BASE_URL, requestOptions?.apiKey),
           options.allowInsecureHttp,
         ),
@@ -169,10 +196,28 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   if (!refreshModels) return guardedProvider;
   return {
     ...guardedProvider,
-    refreshModels: (context) =>
-      refreshModels({
-        ...context,
-        stored: context.stored && { ...context.stored, models: context.stored.models.map(enrichCachedModel) },
-      }),
+    refreshModels: async (context) => {
+      const storedModels = context.stored?.models ?? [];
+      const legacyModels = storedModels.filter(
+        (model) => (model as LiteLLMModel).litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION,
+      );
+      const models = storedModels.map((model) => (legacyModels.includes(model) ? model : enrichCachedModel(model)));
+      try {
+        await refreshModels({
+          ...context,
+          // The current pi-ai provider has no freshness gate, but force is the documented refresh contract field.
+          force: context.force || (context.allowNetwork && legacyModels.length > 0),
+          stored: context.stored && { ...context.stored, models },
+        });
+      } catch (error) {
+        if (context.allowNetwork && legacyModels.length > 0) {
+          reportUnavailable(
+            `keeping cached models whose discovery metadata version does not match ` +
+              `${LITELLM_DISCOVERY_VERSION} because the required network refresh failed`,
+          );
+        }
+        throw error;
+      }
+    },
   };
 }

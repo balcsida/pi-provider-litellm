@@ -52,8 +52,8 @@ describe("normalizeBaseUrl", () => {
 describe("modelProtocol", () => {
   it("pairs each upstream-selected mode with protocol-specific compatibility", () => {
     expect(modelProtocol("openai/gpt-4o")).toEqual({
-      api: "openai-completions",
-      compat: { supportsStore: false },
+      api: "openai-responses",
+      compat: undefined,
     });
     expect(modelProtocol("openai/gpt-4o", "responses")).toEqual({
       api: "openai-responses",
@@ -73,6 +73,46 @@ describe("modelProtocol", () => {
       api: "openai-responses",
       compat: { supportsDeveloperRole: false },
     });
+  });
+
+  it("uses backend identity, Azure API version, and supported endpoints", () => {
+    expect(
+      modelProtocol("opaque-route", {
+        model_name: "opaque-route",
+        litellm_params: { model: "azure/gpt-5", api_version: "2025-03-01-preview" },
+      }),
+    ).toMatchObject({ api: "openai-responses" });
+    expect(
+      modelProtocol("opaque-route", {
+        model_name: "opaque-route",
+        litellm_params: { model: "azure/gpt-5", api_version: "2024-12-01-preview" },
+      }),
+    ).toMatchObject({ api: "openai-completions" });
+    expect(
+      modelProtocol("opaque-route", {
+        model_name: "opaque-route",
+        litellm_params: { model: "azure/gpt-5" },
+      }),
+    ).toMatchObject({ api: "openai-responses" });
+
+    for (const model of ["azure_ai/kimi-k3", "azure/deepseek-v4", "azure/glm-5"]) {
+      expect(modelProtocol("opaque-route", { model_name: "opaque-route", litellm_params: { model } })).toMatchObject({
+        api: "openai-completions",
+      });
+    }
+
+    expect(
+      modelProtocol("openai/gpt-5", {
+        model_name: "openai/gpt-5",
+        model_info: { supported_endpoints: ["/v1/chat/completions"] },
+      }),
+    ).toMatchObject({ api: "openai-completions" });
+    expect(
+      modelProtocol("opaque-route", {
+        model_name: "opaque-route",
+        model_info: { supported_endpoints: ["/v1/responses"] },
+      }),
+    ).toMatchObject({ api: "openai-responses" });
   });
 });
 
@@ -160,6 +200,34 @@ describe("discoverModels via /model/info", () => {
     expect(result.models.map((model) => model.id)).toEqual(["local/model"]);
   });
 
+  it("reduces mixed Azure deployment versions to Chat Completions", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "gpt-production",
+            litellm_params: { model: "azure/gpt-5", api_version: "2025-04-01-preview" },
+            model_info: { mode: "chat" },
+          },
+          {
+            model_name: "gpt-production",
+            litellm_params: { model: "azure/gpt-5", api_version: "2024-12-01-preview" },
+            model_info: { mode: "chat" },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]).toMatchObject({
+      id: "gpt-production",
+      api: "openai-completions",
+      litellmBackendFamily: "openai",
+      litellmDiscoveryVersion: 2,
+    });
+  });
+
   it("parses a /model/info success response with cost mapping", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof URL ? input.toString() : String(input);
@@ -219,8 +287,9 @@ describe("discoverModels via /model/info", () => {
     const openai = result.models.find((m) => m.id === "openai/gpt-4o");
     expect(openai).toMatchObject({
       id: "openai/gpt-4o",
+      api: "openai-responses",
       input: ["text"],
-      compat: { supportsStore: false },
+      compat: undefined,
     });
   });
 
@@ -609,7 +678,7 @@ describe("discoverModels response-mode models", () => {
       { id: "anthropic/claude-sonnet-4-6", api: "openai-completions" },
       { id: "openai/gpt-5.3-codex-openai", api: "openai-responses" },
     ]);
-    expect(result.models.some((model) => model.api === "anthropic-messages")).toBe(false);
+    expect(result.models.map((model) => model.api)).not.toContain("anthropic-messages");
   });
 
   it("keeps /model/info response-mode models with Responses-specific compatibility", async () => {
@@ -730,7 +799,8 @@ describe("discoverModels fallback to /v1/models", () => {
       input: ["text", "image"],
       contextWindow: 272000,
       maxTokens: 128000,
-      compat: { supportsStore: false },
+      api: "openai-responses",
+      compat: undefined,
     });
   });
 

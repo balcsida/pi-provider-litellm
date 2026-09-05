@@ -70,7 +70,7 @@ export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_API_KEY="sk-..."
 ```
 
-Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`; native Messages plumbing uses the proxy root directly. Discovery keeps its existing Chat/Responses choices and does not select Messages automatically.
+Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`.
 
 ### Multiple LiteLLM provider aliases
 
@@ -255,9 +255,11 @@ Each distinct availability diagnostic is written once per session on stderr. `LI
 
 ### Protocols and prompt caching
 
-Discovery selects Chat Completions by default and Responses when `/model/info` reports `mode: "responses"`. The provider registers Anthropic Messages plumbing, which uses the bare proxy root because its transport appends `/v1/messages`, but discovery does not select it. Under Pi's routing limitation, a Messages model supplied only through configuration takes the global fallback path rather than this provider's host guard. Chat Completions and Responses use `<root>/v1`.
+Discovery selects Responses for OpenAI-family backends and Chat Completions for other OpenAI-compatible backends. An Azure deployment with an explicit `api_version` older than `2025-03-01-preview` stays on Chat Completions; an unset or newer version uses Responses. When `/model/info` supplies `supported_endpoints`, that list takes precedence, and `mode: "responses"` remains an explicit Responses signal. These two protocols are the whole set this provider implements, and both use `<root>/v1`. Anthropic Messages support is a separate change; a protocol is added here only together with the discovery mapping that selects it and routes it through the provider's host guard. A model supplied only through `models.json` whose `api` this provider does not implement takes Pi's global API fallback rather than this provider's host guard.
 
-`cacheControlFormat: "anthropic"` applies only to Chat Completions, where Pi adds Anthropic `cache_control` markers. The Responses transport has a different compatibility type and uses native `prompt_cache_key` (plus supported retention fields), so Responses models must not receive `cacheControlFormat`.
+`cacheControlFormat: "anthropic"` applies only to Chat Completions, where Pi adds Anthropic `cache_control` markers. The Responses transport has a different compatibility type and uses native `prompt_cache_key` (plus supported retention fields), so Responses models must not receive `cacheControlFormat`. Freshly discovered OpenAI-family models forced onto Chat Completions are rejected locally when a request contains more than 128 tools; route them through Responses or reduce enabled extensions.
+
+Discovery policy is versioned in Pi's persisted model catalog. After upgrading, an online refresh replaces legacy entries. If that refresh fails or `LITELLM_OFFLINE=1` disables discovery, legacy entries remain usable and the extension reports the discovery-version mismatch once. To force rediscovery or roll back across this policy change, delete the `litellm` entry from `~/.pi/agent/models-store.json` (or delete the file) and refresh once online.
 
 ## Troubleshooting
 

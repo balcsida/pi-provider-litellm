@@ -872,7 +872,7 @@ describe("feature parity", () => {
     }
   });
 
-  it("leaves synthetic Messages payloads unchanged", async () => {
+  it("leaves payloads for an unregistered API unchanged", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
