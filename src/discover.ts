@@ -92,6 +92,27 @@ function aggregateSuppressionEvidence(evidence: Iterable<boolean>): boolean {
   return hasEvidence;
 }
 
+// Merges two LiteLLM /model/info `model_info` objects for the same model_name
+// across multiple routes (e.g. a cost-based fallback group). Unlike a plain
+// spread, this ignores `null`/`undefined` values from the incoming route so a
+// later route that doesn't report a field (Nebius/nscale return
+// `max_input_tokens: null`; see https://github.com/BerriAI/litellm/issues/27830)
+// cannot clobber a real value already held from an earlier route. Real values
+// from a later route still win.
+function mergeModelInfo(
+  previous: ModelInfoEntry["model_info"] | undefined,
+  next: ModelInfoEntry["model_info"] | undefined,
+): ModelInfoEntry["model_info"] {
+  const merged: ModelInfoEntry["model_info"] = { ...previous };
+  for (const [key, value] of Object.entries(next ?? {})) {
+    if (value !== null && value !== undefined) {
+      // biome will type key as string; assign through a typed record view.
+      (merged as Record<string, unknown>)[key] = value;
+    }
+  }
+  return merged;
+}
+
 export function emitsThinkTags(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
@@ -393,7 +414,7 @@ export async function discoverModels(
       entries.set(entry.model_name, {
         ...previous,
         ...entry,
-        model_info: { ...previous?.model_info, ...entry.model_info },
+        model_info: mergeModelInfo(previous?.model_info, entry.model_info),
       });
     }
     let models = [...entries.entries()]
