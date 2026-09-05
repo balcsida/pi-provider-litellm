@@ -31,6 +31,8 @@
   routes use ` (incomplete metadata)`, which must remain ineligible for route-name cache enrichment.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
+- Pi stores discovered models in `models-store.json`; models.dev enrichment uses `litellm-models-dev.json` with a
+  28-day cache window under the Pi agent dir.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
 - Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, and service accounts warn and fail closed.
 - `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.

@@ -13,7 +13,7 @@ export interface CatalogResolution {
   vision?: boolean;
   contextWindow?: number;
   maxTokens?: number;
-  cost?: DiscoveredModel["cost"];
+  cost?: Partial<DiscoveredModel["cost"]>;
 }
 
 export type CatalogResolver = (entry: ModelInfoEntry) => CatalogResolution | undefined;
@@ -161,6 +161,13 @@ function min(values: readonly number[]): number {
   return Math.min(...values);
 }
 
+function conservativeLimit(explicit: number | undefined, catalog: number | undefined): number | undefined {
+  const valid = [explicitLimit(explicit), explicitLimit(catalog)].filter(
+    (value): value is number => value !== undefined,
+  );
+  return valid.length > 0 ? min(valid) : undefined;
+}
+
 function unanimous<T>(values: readonly (T | undefined)[]): T | undefined {
   const first = values[0];
   return first !== undefined && values.every((value) => value === first) ? first : undefined;
@@ -216,21 +223,39 @@ export function conservativeCostTiers(costs: readonly ModelCost[]): ModelCost["t
   });
 }
 
+interface CanonicalModelInfoDeployments {
+  candidates: ModelInfoEntry[];
+  candidateModes: ReturnType<typeof normalizedMode>[];
+  routable: ModelInfoEntry[];
+}
+
+function canonicalModelInfoDeployments(entries: readonly ModelInfoEntry[]): CanonicalModelInfoDeployments {
+  // A group is addressed by its public route name, so a row without a readable one
+  // cannot participate. Enforce that here so every authority consumer observes the
+  // same filtered and deduplicated set.
+  const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
+  const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
+  return {
+    candidates,
+    candidateModes,
+    routable: candidates.filter((_, index) => candidateModes[index] !== "unsupported"),
+  };
+}
+
+export function routableModelInfoDeployments(entries: readonly ModelInfoEntry[]): ModelInfoEntry[] {
+  return canonicalModelInfoDeployments(entries).routable;
+}
+
 export function reduceModelGroup(
   entries: readonly ModelInfoEntry[],
   resolveCatalog: CatalogResolver,
 ): ReducedModelGroup | undefined {
-  // A group is addressed by its public route name, so a row without a readable one
-  // cannot participate. Enforced here rather than at each caller, so no caller can
-  // leak a non-string id into a discovered model.
-  const candidates = uniqueDeployments(entries.filter((entry) => wireString(entry.model_name)));
+  const { candidates, candidateModes, routable: deployments } = canonicalModelInfoDeployments(entries);
   if (candidates.length === 0) return undefined;
   // Transport votes over every candidate row, so a row this reduction will not
   // otherwise use — an embedding sibling, say — can still force Chat. Capability,
   // limit, price, and identity evidence reduces only over routable rows, so such a
   // row cannot corrupt them or make the group look larger than it is.
-  const candidateModes = candidates.map((entry) => normalizedMode(entry.model_info?.mode));
-  const deployments = candidates.filter((_, index) => candidateModes[index] !== "unsupported");
   if (deployments.length === 0) return undefined;
   const catalogs = deployments.map((entry) => resolveCatalog(entry));
   const catalogProvider = unanimous(catalogs.map((catalog) => catalog?.provider));
@@ -251,13 +276,11 @@ export function reduceModelGroup(
   const visionEvidence = deployments.map(
     (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision,
   );
-  const contextWindowEvidence = deployments.map(
-    (entry, index) =>
-      explicitLimit(entry.model_info?.max_input_tokens) ?? explicitLimit(catalogAuthority[index]?.contextWindow),
+  const contextWindowEvidence = deployments.map((entry, index) =>
+    conservativeLimit(entry.model_info?.max_input_tokens, catalogAuthority[index]?.contextWindow),
   );
-  const maxTokensEvidence = deployments.map(
-    (entry, index) =>
-      explicitLimit(entry.model_info?.max_output_tokens) ?? explicitLimit(catalogAuthority[index]?.maxTokens),
+  const maxTokensEvidence = deployments.map((entry, index) =>
+    conservativeLimit(entry.model_info?.max_output_tokens, catalogAuthority[index]?.maxTokens),
   );
   // Explicit false is authoritative: reasoning controls cannot survive when any
   // deployment says the route does not support reasoning.

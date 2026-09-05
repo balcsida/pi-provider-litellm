@@ -28,6 +28,8 @@ export interface DiscoveryOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   allowInsecureHttp?: boolean;
+  modelsDev?: boolean;
+  modelsDevCachePath?: string;
 }
 
 export interface ModelInfoEntry {

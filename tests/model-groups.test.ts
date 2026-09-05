@@ -4,10 +4,11 @@ import {
   type CatalogResolver,
   conservativeCostTiers,
   reduceModelGroup,
+  routableModelInfoDeployments,
 } from "../src/model-groups.js";
 import type { ModelInfoEntry } from "../src/types.js";
 
-type ModelCost = NonNullable<CatalogResolution["cost"]>;
+type ModelCost = NonNullable<ReturnType<typeof reduceModelGroup>>["cost"];
 
 const catalog = new Map<string, CatalogResolution>([
   [
@@ -130,6 +131,18 @@ describe("conservativeCostTiers", () => {
     expect(conservativeCostTiers([cost])).toEqual([
       { inputTokensAbove: 100, input: 10, output: 20, cacheRead: 30, cacheWrite: 40 },
     ]);
+  });
+});
+
+describe("routableModelInfoDeployments", () => {
+  it("filters unreadable routes and unsupported modes from the canonical set", () => {
+    const chat = row({ model_info: { id: "chat", mode: "chat" } });
+    const unreadable = row({ model_info: { id: "unreadable", mode: "chat" } });
+    Object.assign(unreadable, { model_name: 42 });
+    const unsupported = row({ model_info: { id: "embedding", mode: "embedding" } });
+
+    expect(routableModelInfoDeployments([chat, unreadable, unsupported])).toEqual([chat]);
+    expect(routableModelInfoDeployments([unsupported])).toEqual([]);
   });
 });
 
@@ -428,6 +441,41 @@ describe("reduceModelGroup", () => {
       }),
     );
     expect(reduceModelGroup(deployments, resolveCatalog)?.vision).toBe(expected);
+  });
+
+  it("takes the smaller valid limit when explicit and public catalog values disagree", () => {
+    const largerExplicit = row({
+      model_info: { id: "larger-explicit", mode: "chat", max_input_tokens: 300_000, max_output_tokens: 80_000 },
+    });
+    const smallerExplicit = row({
+      model_info: { id: "smaller-explicit", mode: "chat", max_input_tokens: 100_000, max_output_tokens: 8_000 },
+    });
+
+    expect(reduceModelGroup([largerExplicit], resolveCatalog)).toMatchObject({
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+    });
+    expect(reduceModelGroup([smallerExplicit], resolveCatalog)).toMatchObject({
+      contextWindow: 100_000,
+      maxTokens: 8_000,
+    });
+  });
+
+  it("keeps explicit prices and fills modalities from public catalog metadata", () => {
+    const explicit = row({
+      model_info: {
+        id: "explicit",
+        mode: "chat",
+        supports_vision: undefined,
+        input_cost_per_token: 0.000009,
+        output_cost_per_token: 0.000019,
+      },
+    });
+
+    expect(reduceModelGroup([explicit], resolveCatalog)).toMatchObject({
+      vision: true,
+      cost: { input: 9, output: 19, cacheRead: 0.3, cacheWrite: 3.75 },
+    });
   });
 
   it("resolves deployment limits before taking the safe group minimum", () => {

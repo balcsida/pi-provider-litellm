@@ -34,6 +34,7 @@ const ENV_TIMEOUT = "LITELLM_DISCOVERY_TIMEOUT_MS";
 const ENV_CLI_JWT_EXPIRATION_HOURS = "LITELLM_CLI_JWT_EXPIRATION_HOURS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
 const ENV_VERBOSE_DISCOVERY = "LITELLM_VERBOSE_DISCOVERY";
+const MODELS_DEV_CACHE_FILENAME = "litellm-models-dev.json";
 const DEFAULT_TIMEOUT_MS = 5000;
 const SEED_TIMEOUT_MS = 3000;
 const LOGIN_TIMEOUT_MS = 10_000;
@@ -1203,6 +1204,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       signal,
       headers: auth.headers,
       allowInsecureHttp: auth.allowInsecureHttp,
+      modelsDev: !isHostOffline(),
+      modelsDevCachePath: join(getAgentDir(), MODELS_DEV_CACHE_FILENAME),
       silent: !isVerboseDiscovery(),
       onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
     });

@@ -2,16 +2,18 @@ import { isIP } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
+import { resolveBackendIdentity } from "./backend-identity.js";
 import {
   type CatalogResolution,
   catalogResolution,
   conservativeCostTiers,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
-  normalizedMode,
   reduceModelGroup,
+  routableModelInfoDeployments,
   wireString,
 } from "./model-groups.js";
+import { loadPublicCatalog, type PublicCatalog, type PublicCatalogRecord } from "./public-catalog.js";
 import { intersectThinkingLevelMaps } from "./thinking-levels.js";
 import type {
   DiscoveredModel,
@@ -25,6 +27,14 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const PUBLIC_CATALOG_BUDGET_MS = 1000;
+const PUBLIC_CATALOG_PROVIDER_BY_FAMILY = {
+  claude: "anthropic",
+  deepseek: "deepseek",
+  gemini: "gemini",
+  kimi: "moonshot",
+  openai: "openai",
+} as const;
 const KNOWN_PROVIDER_SET = new Set<string>(getProviders());
 export function normalizeBaseUrl(input: string, allowInsecureHttp = false): string {
   const url = new URL(input);
@@ -58,10 +68,6 @@ export function isGpt55Model(modelId: string): boolean {
   return GPT55_MODEL_PATTERN.test(modelId);
 }
 
-function shouldSuppressReasoningContent(modelId: string): boolean {
-  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
-}
-
 const MOONSHOT_ROUTE_PROVIDERS = new Set(["moonshot", "moonshotai"]);
 
 function isMoonshotRoute(entry: ModelInfoEntry): boolean {
@@ -92,6 +98,10 @@ function aggregateSuppressionEvidence(evidence: Iterable<boolean>): boolean {
     if (!suppress) return false;
   }
   return hasEvidence;
+}
+
+function shouldSuppressReasoningContent(modelId: string): boolean {
+  return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
 export function emitsThinkTags(modelId: string): boolean {
@@ -210,13 +220,16 @@ function findCatalogModelInProvider(provider: BuiltinProvider, lookupIds: string
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
   anthropic: "anthropic",
+  claude: "anthropic",
   azure: "azure-openai-responses",
   azure_ai: "azure-openai-responses",
   bedrock: "amazon-bedrock",
   bedrock_converse: "amazon-bedrock",
   deepseek: "deepseek",
+  "fireworks-ai": "fireworks",
   fireworks_ai: "fireworks",
   gemini: "google",
+  kimi: "moonshotai",
   moonshot: "moonshotai",
   nvidia_nim: "nvidia",
   openai: "openai",
@@ -229,49 +242,112 @@ function adapterCatalogProvider(adapter: unknown): BuiltinProvider | undefined {
   return normalized ? (ADAPTER_CATALOG_PROVIDERS[normalized] ?? toKnownProvider(normalized)) : undefined;
 }
 
-interface ModelInfoCatalogEvidence {
-  catalog?: CatalogResolution;
-  authorityConflict: boolean;
-}
-
-function resolveModelInfoCatalogEvidence(entry: ModelInfoEntry): ModelInfoCatalogEvidence {
-  const adapterProvider = adapterCatalogProvider(entry.model_info?.litellm_provider);
-  const customProvider = adapterCatalogProvider(entry.litellm_params?.custom_llm_provider);
-  const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
-    .map((candidate) => wireString(candidate)?.trim())
-    .filter((candidate): candidate is string => Boolean(candidate));
-  const lookupProvider = adapterProvider ?? customProvider;
-  const candidateResolutions = candidates.map((candidate) => {
-    const resolved = resolveCatalogModel(candidate, lookupProvider);
-    const separator = candidate.indexOf("/");
-    // A recognized prefix remains independent provider-identity evidence even
-    // when adapter-first lookup resolves the same model in the adapter catalog.
-    const prefixProvider = separator > 0 ? adapterCatalogProvider(candidate.slice(0, separator)) : undefined;
-    return { resolved, prefixProvider };
-  });
-  const providers = new Set(
-    [
-      ...(adapterProvider ? [adapterProvider] : []),
-      ...(customProvider ? [customProvider] : []),
-      ...candidateResolutions.flatMap(({ resolved, prefixProvider }) => [resolved?.provider, prefixProvider]),
-    ].filter((provider): provider is BuiltinProvider => provider !== undefined),
-  );
-  const catalogIdentities = new Set(
-    candidateResolutions.flatMap(({ resolved }) => (resolved ? [`${resolved.provider}\0${resolved.model.id}`] : [])),
-  );
-  // Provider agreement alone is insufficient: model and base_model can both
-  // resolve within one provider while naming different concrete catalog models.
-  if (providers.size > 1 || catalogIdentities.size > 1) return { authorityConflict: true };
-  if (providers.size === 0) return { authorityConflict: false };
-  const resolved = candidateResolutions.find((candidate) => candidate.resolved)?.resolved;
+function adaptPublicCatalogRecord(
+  provider: string,
+  catalogModelId: string,
+  record: PublicCatalogRecord | undefined,
+): CatalogResolution {
+  const piProvider = adapterCatalogProvider(record?.provider ?? provider);
+  const resolved = piProvider
+    ? (resolveCatalogModel(record?.modelId ?? catalogModelId, piProvider) ??
+      resolveCatalogModel(catalogModelId, piProvider))
+    : undefined;
+  const piCatalog = resolved ? catalogResolution(resolved.provider, resolved.model) : undefined;
+  const piCost = piCatalog?.cost;
   return {
-    ...(resolved ? { catalog: catalogResolution(resolved.provider, resolved.model) } : {}),
-    authorityConflict: false,
+    provider,
+    catalogModelId,
+    ...(piCatalog?.reasoning !== undefined ? { reasoning: piCatalog.reasoning } : {}),
+    ...(piCatalog?.thinkingLevelMap ? { thinkingLevelMap: piCatalog.thinkingLevelMap } : {}),
+    ...(record?.modalities
+      ? { vision: record.modalities.includes("image") }
+      : piCatalog?.vision !== undefined
+        ? { vision: piCatalog.vision }
+        : {}),
+    ...(record?.limits?.context !== undefined
+      ? { contextWindow: record.limits.context }
+      : piCatalog?.contextWindow !== undefined
+        ? { contextWindow: piCatalog.contextWindow }
+        : {}),
+    ...(record?.limits?.output !== undefined
+      ? { maxTokens: record.limits.output }
+      : piCatalog?.maxTokens !== undefined
+        ? { maxTokens: piCatalog.maxTokens }
+        : {}),
+    ...(record?.cost || piCost
+      ? {
+          cost: {
+            ...((record?.cost?.input ?? piCost?.input) !== undefined
+              ? { input: record?.cost?.input ?? piCost?.input }
+              : {}),
+            ...((record?.cost?.output ?? piCost?.output) !== undefined
+              ? { output: record?.cost?.output ?? piCost?.output }
+              : {}),
+            ...((record?.cost?.cacheRead ?? piCost?.cacheRead) !== undefined
+              ? { cacheRead: record?.cost?.cacheRead ?? piCost?.cacheRead }
+              : {}),
+            ...((record?.cost?.cacheWrite ?? piCost?.cacheWrite) !== undefined
+              ? { cacheWrite: record?.cost?.cacheWrite ?? piCost?.cacheWrite }
+              : {}),
+            ...(piCost?.tiers ? { tiers: piCost.tiers } : {}),
+          },
+        }
+      : {}),
   };
 }
 
-export function resolveModelInfoCatalog(entry: ModelInfoEntry): CatalogResolution | undefined {
-  return resolveModelInfoCatalogEvidence(entry).catalog;
+export function resolveModelInfoCatalog(
+  entry: ModelInfoEntry,
+  publicCatalog?: PublicCatalog,
+): CatalogResolution | undefined {
+  const identity = resolveBackendIdentity(entry);
+  if (!identity) return undefined;
+  if (identity.provider) {
+    const record = publicCatalog?.lookup(identity.provider, identity.modelId);
+    return adaptPublicCatalogRecord(identity.provider, identity.qualifiedId, record);
+  }
+  if (!identity.family) return undefined;
+
+  const record = publicCatalog?.lookup(PUBLIC_CATALOG_PROVIDER_BY_FAMILY[identity.family], identity.modelId);
+  return adaptPublicCatalogRecord(identity.family, identity.qualifiedId, record);
+}
+
+function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function awaitEnrichmentWithinBudget<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  try {
+    return await Promise.race([signal ? awaitWithSignal(promise, signal) : promise, budget]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function fetchJson<T>(
@@ -321,22 +397,14 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
 
 function mapFromModelInfoGroup(
   entries: readonly ModelInfoEntry[],
+  publicCatalog?: PublicCatalog,
   ambiguousRoutes?: string[],
 ): DiscoveredModel | undefined {
-  let hasIntraRowAuthorityConflict = false;
-  const reduced = reduceModelGroup(entries, (entry) => {
-    const evidence = resolveModelInfoCatalogEvidence(entry);
-    if (evidence.authorityConflict) hasIntraRowAuthorityConflict = true;
-    // `model_name` is always a public routing alias, whether qualified or not;
-    // only independent backend fields may authorize catalog metadata.
-    return evidence.catalog;
-  });
+  const reduced = reduceModelGroup(entries, (entry) => resolveModelInfoCatalog(entry, publicCatalog));
   if (!reduced) return undefined;
-  if (reduced.catalogAuthorityAmbiguous || hasIntraRowAuthorityConflict) ambiguousRoutes?.push(reduced.id);
+  if (reduced.catalogAuthorityAmbiguous) ambiguousRoutes?.push(reduced.id);
   const suppressReasoningContent = aggregateSuppressionEvidence(
-    entries
-      .filter((entry) => normalizedMode(entry.model_info?.mode) !== "unsupported")
-      .map((entry) => shouldSuppressRouteReasoningContent(reduced.id, entry)),
+    routableModelInfoDeployments(entries).map((entry) => shouldSuppressRouteReasoningContent(reduced.id, entry)),
   );
   return {
     id: reduced.id,
@@ -356,8 +424,8 @@ function mapFromModelInfoGroup(
   };
 }
 
-function mapFromModelInfo(entry: ModelInfoEntry): DiscoveredModel | undefined {
-  return mapFromModelInfoGroup([entry]);
+function mapFromModelInfo(entry: ModelInfoEntry, publicCatalog?: PublicCatalog): DiscoveredModel | undefined {
+  return mapFromModelInfoGroup([entry], publicCatalog);
 }
 
 function mapFromHealthModelInfo(entry: ModelInfoEntry, fallbackId: string | undefined): DiscoveredModel | undefined {
@@ -540,10 +608,20 @@ export async function discoverModels(
       group.push(entry);
       groups.set(route, group);
     }
+    const publicCatalogPromise = loadPublicCatalog({
+      cachePath: options.modelsDevCachePath,
+      offline: options.modelsDev === false ? true : undefined,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    });
+    const publicCatalog = await awaitEnrichmentWithinBudget(
+      publicCatalogPromise,
+      options.signal,
+      Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, PUBLIC_CATALOG_BUDGET_MS),
+    );
     const ambiguousRoutes: string[] = [];
     const reducedGroups = [...groups.entries()].map(([route, group]) => ({
       route,
-      model: mapFromModelInfoGroup(group, ambiguousRoutes),
+      model: mapFromModelInfoGroup(group, publicCatalog, ambiguousRoutes),
     }));
     let models = reducedGroups
       .map(({ model }) => model)

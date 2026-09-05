@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompat,
@@ -149,6 +152,312 @@ describe("Kimi reasoning compatibility", () => {
 });
 
 describe("discoverModels via /model/info", () => {
+  it("enriches the D2 backend identity from models.dev before synchronous group reduction", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-catalog-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          "fireworks-ai": {
+            models: {
+              "accounts/fireworks/models/kimi-k3": {
+                modalities: { input: ["text", "image"] },
+                limit: { context: 131_072, output: 16_384 },
+                cost: { input: 0.4, output: 2, cache_read: 0.2, cache_write: 0.8 },
+              },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-k3",
+              litellm_params: { model: "azure_ai/FW-Kimi-K3", custom_llm_provider: "azure" },
+              model_info: {
+                id: "deployment-a",
+                mode: "chat",
+                litellm_provider: "azure",
+                base_model: "fireworks_ai/accounts/fireworks/models/kimi-k3",
+                max_input_tokens: 262_144,
+                input_cost_per_token: 0.000001,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({
+      id: "kimi-k3",
+      input: ["text", "image"],
+      contextWindow: 131_072,
+      maxTokens: 16_384,
+      cost: { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0.8 },
+    });
+  });
+
+  it("fills partial models.dev cost from Pi catalog pricing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-cost-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          openai: {
+            models: {
+              "gpt-5.5": { cost: { input: 7 } },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "gpt-route",
+              litellm_params: { model: "openai/gpt-5.5" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({
+      name: "gpt-route",
+      cost: { input: 7, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+    });
+  });
+
+  it("keeps partial models.dev pricing incomplete without a Pi catalog fallback", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-partial-cost-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          private: {
+            models: {
+              "priced-model": {
+                modalities: { input: ["text"] },
+                limit: { context: 64_000, output: 8_000 },
+                cost: { input: 7 },
+              },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-route",
+              litellm_params: { model: "private/priced-model" },
+              model_info: { mode: "chat", supports_reasoning: false },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({
+      name: "private-route (incomplete metadata)",
+      cost: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("does not infer reasoning from models.dev effort levels", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-reasoning-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          private: {
+            models: {
+              reasoner: { reasoning_options: { type: "effort", values: ["low", "high"] } },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-route",
+              litellm_params: { model: "private/reasoner" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
+
+    expect(result.models[0]).toMatchObject({ reasoning: false, name: "private-route (incomplete metadata)" });
+    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+  });
+
+  it("lets initial public-catalog callers abort independently", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-abort-"));
+    const cachePath = join(dir, "models-dev.json");
+    const first = new AbortController();
+    const second = new AbortController();
+    let modelsDevRequests = 0;
+    let resolveModelsDev!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            { model_name: "gpt-route", litellm_params: { model: "openai/gpt-5.5" }, model_info: { mode: "chat" } },
+          ],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests++;
+        return new Promise<Response>((resolve) => {
+          resolveModelsDev = resolve;
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const discover = (signal: AbortSignal) =>
+      discoverModels("https://litellm.example.com", "sk-test", { modelsDevCachePath: cachePath, signal });
+    const firstResult = discover(first.signal);
+    const secondResult = discover(second.signal);
+
+    await vi.waitFor(() => expect(modelsDevRequests).toBe(1));
+    first.abort(new Error("first aborted"));
+    await expect(firstResult).rejects.toThrow("first aborted");
+    resolveModelsDev(
+      jsonResponse(200, {
+        openai: { models: { "gpt-5.5": { limit: { context: 1_050_000 }, cost: { input: 5, output: 30 } } } },
+      }),
+    );
+
+    await expect(secondResult).resolves.toMatchObject({ models: [{ id: "gpt-route", contextWindow: 1_050_000 }] });
+    expect(modelsDevRequests).toBe(1);
+  });
+
+  it("returns the activation seed before its caller signal aborts when models.dev hangs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-seed-timeout-"));
+    const cachePath = join(dir, "models-dev.json");
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(new Error("seed aborted")), 3_000);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-route",
+              litellm_params: { model: "private/catalog-model" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      if (url === "https://models.dev/api.json") return new Promise<Response>(() => {});
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    try {
+      await expect(
+        discoverModels("https://litellm.example.com", "sk-test", {
+          modelsDevCachePath: cachePath,
+          signal: controller.signal,
+          timeoutMs: 5_000,
+        }),
+      ).resolves.toMatchObject({
+        models: [{ id: "private-route", name: "private-route (incomplete metadata)", contextWindow: 128_000 }],
+      });
+      expect(controller.signal.aborted).toBe(false);
+    } finally {
+      clearTimeout(abortTimer);
+    }
+  });
+
+  it("lets each caller stop waiting for best-effort enrichment at its own budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-timeout-"));
+    const cachePath = join(dir, "models-dev.json");
+    let modelsDevRequests = 0;
+    let resolveModelsDev!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "private-route",
+              litellm_params: { model: "private/catalog-model" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      if (url === "https://models.dev/api.json") {
+        modelsDevRequests++;
+        return new Promise<Response>((resolve) => {
+          resolveModelsDev = resolve;
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const short = discoverModels("https://short.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+      timeoutMs: 30,
+    });
+    const long = discoverModels("https://long.example.com", "sk-test", {
+      modelsDevCachePath: cachePath,
+      timeoutMs: 30_000,
+    });
+
+    await vi.waitFor(() => expect(modelsDevRequests).toBe(1));
+    await expect(short).resolves.toMatchObject({
+      models: [{ id: "private-route", name: "private-route (incomplete metadata)", contextWindow: 128_000 }],
+    });
+    resolveModelsDev(
+      jsonResponse(200, {
+        private: { models: { "catalog-model": { limit: { context: 1_050_000 }, cost: { input: 5, output: 30 } } } },
+      }),
+    );
+    await expect(long).resolves.toMatchObject({ models: [{ id: "private-route", contextWindow: 1_050_000 }] });
+    expect(modelsDevRequests).toBe(1);
+  });
+
   it("keeps models with a null mode", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
@@ -156,7 +465,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models.map((model) => model.id)).toEqual(["local/model"]);
   });
@@ -199,7 +508,7 @@ describe("discoverModels via /model/info", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("model_info");
     // embedding model filtered out by mode !== "chat"
@@ -220,8 +529,8 @@ describe("discoverModels via /model/info", () => {
     const openai = result.models.find((m) => m.id === "openai/gpt-4o");
     expect(openai).toMatchObject({
       id: "openai/gpt-4o",
-      name: "openai/gpt-4o (incomplete metadata)",
-      input: ["text"],
+      name: "openai/gpt-4o",
+      input: ["text", "image"],
       compat: { supportsStore: false },
     });
   });
@@ -248,7 +557,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.thinkingLevelMap).toEqual({
       off: "none",
@@ -274,35 +583,49 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: null, max: "max" });
   });
 
-  it("does not use an unqualified public route alias as backend catalog evidence", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = input instanceof URL ? input.toString() : String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, {
+  it("uses family-only identity to look up models.dev under its public provider", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "litellm-model-info-family-catalog-"));
+    const cachePath = join(dir, "models-dev.json");
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: 1,
+        catalog: {
+          anthropic: {
+            models: {
+              "opus-4.8": { limit: { context: 750_000, output: 96_000 } },
+            },
+          },
+        },
+      }),
+    );
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
           data: [{ model_name: "opus-4.8", model_info: { mode: "chat" } }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
+        }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      modelsDev: false,
+      modelsDevCachePath: cachePath,
+    });
 
     expect(result.source).toBe("model_info");
     expect(result.models[0]).toMatchObject({
       id: "opus-4.8",
-      name: "opus-4.8 (incomplete metadata)",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128_000,
-      maxTokens: 16_384,
+      name: "opus-4.8",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 750_000,
+      maxTokens: 96_000,
     });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
   it("preserves catalog pricing tiers for /model/info models", async () => {
@@ -318,7 +641,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.cost?.tiers).toEqual([
       { inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 },
@@ -338,7 +661,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.thinkingLevelMap).toMatchObject({ off: "none", xhigh: "xhigh", max: "max" });
   });
@@ -366,7 +689,7 @@ describe("discoverModels via /model/info", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("model_info");
     expect(result.models).toHaveLength(1);
@@ -414,7 +737,7 @@ describe("discoverModels via /model/info", () => {
     ];
     for (const rows of [deployments, [...deployments].reverse()]) {
       mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
       expect(result.models).toEqual([
         expect.objectContaining({
           id: route,
@@ -448,7 +771,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.name).toBe(`${adapter}-route`);
     expect(result.models[0]?.name).not.toContain("no metadata");
@@ -469,7 +792,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({ name: "spacey", input: ["text", "image"], contextWindow: 128_000 });
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
@@ -495,7 +818,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       name: `${route} (incomplete metadata)`,
@@ -511,11 +834,9 @@ describe("discoverModels via /model/info", () => {
   });
 
   it.each([
-    ["no backend identity", { model_info: {} }],
     ["opaque backend model", { litellm_params: { model: "internal/mystery" }, model_info: {} }],
     ["opaque base model", { model_info: { base_model: "internal/mystery" } }],
-    ["unresolved adapter", { model_info: { litellm_provider: "custom_proxy" } }],
-  ])("withholds route-text catalog metadata for a singleton with %s evidence", async (_case, evidence) => {
+  ])("withholds catalog metadata for a singleton with %s evidence", async (_case, evidence) => {
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -529,7 +850,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.5",
@@ -552,7 +873,7 @@ describe("discoverModels via /model/info", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     for (const data of [[deployment], [deployment, deployment]]) {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, { data }));
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
       expect(result.models[0]).toMatchObject({
         id: "openai/gpt-5.5",
         name: "openai/gpt-5.5",
@@ -577,7 +898,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: "foundry-route",
@@ -602,139 +923,57 @@ describe("discoverModels via /model/info", () => {
         litellm_params: { model: "anthropic/opus-4-7" },
         model_info: { mode: "chat" },
       }),
-    ).toMatchObject({ provider: "anthropic", catalogModelId: "claude-opus-4-7" });
+    ).toMatchObject({ provider: "anthropic", catalogModelId: "anthropic/opus-4-7" });
   });
 
-  it("includes custom_llm_provider in catalog authority conflicts", () => {
+  it("uses base_model as authority over configured model and transport adapter", () => {
     expect(
       resolveModelInfoCatalog({
-        model_name: "custom-provider-conflict",
-        litellm_params: { model: "openai/gpt-4o", custom_llm_provider: "anthropic" },
-        model_info: { mode: "chat" },
+        model_name: "kimi-k3",
+        litellm_params: { model: "azure_ai/FW-Kimi-K3", custom_llm_provider: "azure" },
+        model_info: {
+          mode: "chat",
+          litellm_provider: "azure",
+          base_model: "fireworks_ai/accounts/fireworks/models/kimi-k3",
+        },
       }),
-    ).toBeUndefined();
-
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "custom-provider-agreement",
-        litellm_params: { model: "openai/gpt-4o", custom_llm_provider: "openai" },
-        model_info: { mode: "chat" },
-      }),
-    ).toMatchObject({ provider: "openai", catalogModelId: "gpt-4o" });
-
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "custom-provider-unqualified",
-        litellm_params: { model: "gpt-4o", custom_llm_provider: "openai" },
-        model_info: { mode: "chat" },
-      }),
-    ).toMatchObject({ provider: "openai", catalogModelId: "gpt-4o" });
+    ).toMatchObject({ provider: "fireworks_ai", catalogModelId: "fireworks_ai/accounts/fireworks/models/kimi-k3" });
   });
 
-  it("includes resolved and unresolved known provider prefixes in conflict checks", () => {
+  it("keeps the D2 provider stable across asymmetric public-catalog hits", () => {
+    const hit = {
+      source: "models.dev" as const,
+      provider: "fireworks-ai",
+      modelId: "accounts/fireworks/models/kimi-k3",
+      limits: { context: 131_072 },
+    };
+    const publicCatalog = {
+      lookup: (_provider: string | undefined, id: string) => (id.endsWith("kimi-k3") ? hit : undefined),
+    };
+    const entry = (model: string) => ({
+      model_name: "kimi-route",
+      litellm_params: { model },
+      model_info: { mode: "chat" },
+    });
+
+    expect(
+      resolveModelInfoCatalog(entry("fireworks_ai/accounts/fireworks/models/kimi-k3"), publicCatalog),
+    ).toMatchObject({ provider: "fireworks_ai" });
+    expect(resolveModelInfoCatalog(entry("fireworks_ai/accounts/fireworks/models/other"), publicCatalog)).toMatchObject(
+      {
+        provider: "fireworks_ai",
+      },
+    );
+  });
+
+  it("uses base_model before a conflicting configured model", () => {
     expect(
       resolveModelInfoCatalog({
-        model_name: "adapter-first-prefix-conflict",
+        model_name: "conflicting-evidence",
         litellm_params: { model: "openai/gpt-4o" },
-        model_info: { mode: "chat", litellm_provider: "azure" },
+        model_info: { mode: "chat", litellm_provider: "openai", base_model: "anthropic/opus-4-7" },
       }),
-    ).toBeUndefined();
-
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "conflicting-unresolved-prefix",
-        litellm_params: { model: "openai/not-in-catalog" },
-        model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
-      }),
-    ).toBeUndefined();
-
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "consistent-unresolved-prefix",
-        litellm_params: { model: "anthropic/not-in-catalog" },
-        model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
-      }),
-    ).toMatchObject({ provider: "anthropic" });
-  });
-
-  it.each([
-    ["openai/gpt-4o", "openai/gpt-4.1"],
-    ["openai/gpt-4.1", "openai/gpt-4o"],
-  ])("withholds two different concrete %s and %s catalog identities from one row", (backend, baseModel) => {
-    expect(
-      resolveModelInfoCatalog({
-        model_name: "same-provider-model-conflict",
-        litellm_params: { model: backend },
-        model_info: { mode: "chat", litellm_provider: "openai", base_model: baseModel },
-      }),
-    ).toBeUndefined();
-  });
-
-  it.each(["azure/my-deployment", "my-deployment"])(
-    "resolves the Azure deployment name %s through its concrete base model",
-    (backend) => {
-      expect(
-        resolveModelInfoCatalog({
-          model_name: "azure-deployment-route",
-          litellm_params: { model: backend },
-          model_info: { mode: "chat", litellm_provider: "azure", base_model: "gpt-4o" },
-        }),
-      ).toMatchObject({ provider: "azure-openai-responses" });
-    },
-  );
-
-  it.each([
-    ["anthropic", "openai/gpt-4o", "bedrock/anthropic.claude-sonnet-4-6"],
-    ["anthropic", "bedrock/anthropic.claude-sonnet-4-6", "openai/gpt-4o"],
-    ["openai", "anthropic/opus-4-7", "bedrock/anthropic.claude-sonnet-4-6"],
-    ["openai", "bedrock/anthropic.claude-sonnet-4-6", "anthropic/opus-4-7"],
-    ["bedrock", "anthropic/opus-4-7", "openai/gpt-4o"],
-    ["bedrock", "openai/gpt-4o", "anthropic/opus-4-7"],
-  ])(
-    "withholds catalog authority for the %s adapter with conflicting model %s and base model %s",
-    (adapter, backend, baseModel) => {
-      expect(
-        resolveModelInfoCatalog({
-          model_name: "conflicting-evidence",
-          litellm_params: { model: backend },
-          model_info: { mode: "chat", litellm_provider: adapter, base_model: baseModel },
-        }),
-      ).toBeUndefined();
-    },
-  );
-
-  it("withholds and diagnoses different concrete catalog identities from one provider row", async () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const route = `same-provider-model-conflict-${process.pid}-${Date.now()}-${Math.random()}`;
-    mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            {
-              model_name: route,
-              litellm_params: { model: "openai/gpt-4o" },
-              model_info: { mode: "chat", litellm_provider: "openai", base_model: "openai/gpt-4.1" },
-            },
-          ],
-        }),
-    });
-
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
-
-    expect(result.models[0]).toMatchObject({
-      id: route,
-      name: `${route} (incomplete metadata)`,
-      reasoning: false,
-      input: ["text"],
-      contextWindow: 128_000,
-      maxTokens: 16_384,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
-    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toContain("missing or conflicting deployment provider evidence");
-    expect(diagnostics[0]).toContain(route);
+    ).toMatchObject({ provider: "anthropic", catalogModelId: "anthropic/opus-4-7" });
   });
 
   it("withholds different concrete catalog identities from one provider across a route group", async () => {
@@ -758,41 +997,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
-
-    expect(result.models[0]).toMatchObject({
-      id: route,
-      name: `${route} (incomplete metadata)`,
-      reasoning: false,
-      input: ["text"],
-      contextWindow: 128_000,
-      maxTokens: 16_384,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    });
-    expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
-    const diagnostics = stderr.mock.calls.map(([message]) => String(message));
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toContain("missing or conflicting deployment provider evidence");
-    expect(diagnostics[0]).toContain(route);
-  });
-
-  it("withholds catalog metadata and diagnoses a singleton with contradictory provider signals", async () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    const route = `conflicting-evidence-${process.pid}-${Date.now()}-${Math.random()}`;
-    mockEndpoints({
-      "/model/info": () =>
-        jsonResponse(200, {
-          data: [
-            {
-              model_name: route,
-              litellm_params: { model: "openai/not-in-catalog" },
-              model_info: { mode: "chat", base_model: "anthropic/opus-4-7" },
-            },
-          ],
-        }),
-    });
-
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: route,
@@ -817,7 +1022,7 @@ describe("discoverModels via /model/info", () => {
         litellm_params: { model: "bedrock/anthropic.claude-sonnet-4-6" },
         model_info: { mode: "chat", litellm_provider: "bedrock" },
       }),
-    ).toMatchObject({ provider: "amazon-bedrock" });
+    ).toMatchObject({ provider: "bedrock" });
   });
 
   it("withholds a cross-host Claude route spanning Vertex and Bedrock", async () => {
@@ -857,7 +1062,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual([
       expect.objectContaining({
@@ -876,22 +1081,22 @@ describe("discoverModels via /model/info", () => {
     expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
   });
 
-  it("does not enrich an unqualified route from an unrelated provider catalog", async () => {
+  it("enriches an unqualified OpenAI route through the model-name fallback", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: "gpt-4o",
-      name: "gpt-4o (incomplete metadata)",
+      name: "gpt-4o",
       reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      input: ["text", "image"],
       contextWindow: 128000,
       maxTokens: 16384,
     });
+    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
   it("keeps proven display prices while marking any unresolved cost field incomplete", async () => {
@@ -918,7 +1123,7 @@ describe("discoverModels via /model/info", () => {
     ] as const) {
       mockEndpoints({ "/model/info": () => jsonResponse(200, { data }) });
 
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
       expect(result.models).toHaveLength(1);
       expect(result.models[0]).toMatchObject({
@@ -953,7 +1158,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: route,
@@ -979,7 +1184,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
     expect(result.models[0]?.compat).toEqual({
@@ -999,7 +1204,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({ api: "openai-responses" });
     expect(result.models[0]?.compat).toEqual({ supportsStore: false, cacheControlFormat: "anthropic" });
@@ -1033,7 +1238,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models.map((model) => model.id)).toContain("healthy-route");
     expect(result.models.find((model) => model.id === "healthy-route")?.cost.input).toBeGreaterThan(0);
@@ -1045,7 +1250,7 @@ describe("discoverModels via /model/info", () => {
       "/model/info": () => jsonResponse(403, {}),
       "/v1/models": () => jsonResponse(200, { data: [{ id: 7 }, { id: "gpt-4o", owned_by: 7 }] }),
     });
-    const fallback = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const fallback = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     expect(fallback.models.map((model) => model.id)).toEqual(["gpt-4o"]);
 
     mockEndpoints({
@@ -1053,7 +1258,7 @@ describe("discoverModels via /model/info", () => {
       "/v1/models": () => jsonResponse(404, {}),
       "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: 7 }, { model: "anthropic/claude-opus-4-7" }] }),
     });
-    const health = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const health = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     expect(health.models.map((model) => model.id)).toEqual(["anthropic/claude-opus-4-7"]);
   });
 
@@ -1068,7 +1273,7 @@ describe("discoverModels via /model/info", () => {
       "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "named-route", model_id: "uuid-1" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models.map((model) => model.id)).toEqual(["named-route"]);
@@ -1087,7 +1292,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models.map((model) => model.id)).toEqual(["anthropic/claude-opus-4-7"]);
   });
@@ -1105,7 +1310,7 @@ describe("discoverModels via /model/info", () => {
       "/model/info": () => new Response(payload, { status: 200, headers: { "content-type": "application/json" } }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.id).toBe("deep-route");
   });
@@ -1131,7 +1336,7 @@ describe("discoverModels via /model/info", () => {
 
     for (const data of groups) {
       mockEndpoints({ "/model/info": () => jsonResponse(200, { data }) });
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
       expect(result.models).toHaveLength(1);
       expect(result.models[0]?.name).not.toContain(" (no metadata)");
@@ -1139,9 +1344,9 @@ describe("discoverModels via /model/info", () => {
     }
   });
 
-  it("does not use a public route name as evidence for conflicting duplicate deployment ids", async () => {
+  it("withholds a group whose duplicate deployment id carries conflicting backends", async () => {
     // One deployment id with two disagreeing backends is not a single deployment,
-    // so the catalog-resolvable route name must not enrich the group.
+    // so its catalog authority is ambiguous and cannot enrich the group.
     mockEndpoints({
       "/model/info": () =>
         jsonResponse(200, {
@@ -1156,7 +1361,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: "openai/gpt-5.5",
@@ -1185,7 +1390,7 @@ describe("discoverModels via /model/info", () => {
       "/model/info": () => jsonResponse(200, { data: routes.flatMap(conflicting) }),
     });
 
-    await discoverModels("https://litellm.example.com", "sk-test", {});
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
     expect(diagnostics).toHaveLength(1);
@@ -1210,7 +1415,7 @@ describe("discoverModels via /model/info", () => {
     ];
     const discover = async (routes: string[]) => {
       mockEndpoints({ "/model/info": () => jsonResponse(200, { data: routes.flatMap(conflicting) }) });
-      await discoverModels("https://litellm.example.com", "sk-test", {});
+      await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     };
 
     await discover(routes.slice(0, 2));
@@ -1249,7 +1454,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.name).toBe(`${route} (incomplete metadata)`);
     const diagnostics = stderr.mock.calls.map(([message]) => String(message));
@@ -1275,7 +1480,7 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0]).toMatchObject({
@@ -1288,7 +1493,7 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.cost.input).toBeGreaterThan(0);
   });
 
-  it("stays silent when provider identity is unanimous or wholly unknown", async () => {
+  it("reports groups whose resolved fallback identities disagree", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     mockEndpoints({
       "/model/info": () =>
@@ -1302,9 +1507,10 @@ describe("discoverModels via /model/info", () => {
         }),
     });
 
-    await discoverModels("https://litellm.example.com", "sk-test", {});
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
-    expect(stderr).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0]?.[0])).toContain("unknown");
   });
 
   it("keeps Kimi compatibility on non-Moonshot routes", async () => {
@@ -1320,7 +1526,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.compat).toEqual(buildCompat("kimi-k3"));
   });
@@ -1341,7 +1547,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
   });
@@ -1374,7 +1580,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent === true).toBe(suppress);
   });
@@ -1392,7 +1598,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
   });
@@ -1410,7 +1616,7 @@ describe("discoverModels via /model/info", () => {
       }),
     );
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
   });
@@ -1430,8 +1636,8 @@ describe("discoverModels via /model/info", () => {
       });
     });
 
-    const moonshot = await discoverModels("https://moonshot.example.com", "sk-test", {});
-    const azure = await discoverModels("https://azure.example.com", "sk-test", {});
+    const moonshot = await discoverModels("https://moonshot.example.com", "sk-test", { modelsDev: false });
+    const azure = await discoverModels("https://azure.example.com", "sk-test", { modelsDev: false });
 
     expect(moonshot.models[0]?.suppressReasoningContent).toBe(true);
     expect(azure.models[0]?.suppressReasoningContent).toBeUndefined();
@@ -1458,9 +1664,9 @@ describe("discoverModels via /model/info", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    await discoverModels("https://litellm.example.com", "sk-test", {});
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     fallback = true;
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent).toBeUndefined();
   });
@@ -1483,7 +1689,7 @@ describe("discoverModels via /health", () => {
       return jsonResponse(200, { data: [{ litellm_params: { model: route }, model_info: { mode: "chat" } }] });
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models).toHaveLength(1);
@@ -1507,7 +1713,7 @@ describe("discoverModels via /health", () => {
       });
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.suppressReasoningContent).toBe(true);
   });
@@ -1540,7 +1746,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("model_info");
     expect(result.models.map((m) => m.id).sort()).toEqual([
@@ -1614,7 +1820,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual([
       expect.objectContaining({
@@ -1662,7 +1868,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "kimi-k2.6" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual([
       expect.objectContaining({
@@ -1704,7 +1910,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "openai/gpt-4o", owned_by: "openai" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual([
       expect.objectContaining({
@@ -1738,7 +1944,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual(
       expect.arrayContaining([
@@ -1781,7 +1987,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.thinkingLevelMap).toEqual({ low: null, high: "high", max: null });
   });
@@ -1801,7 +2007,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.cost.tiers).toEqual([
       { inputTokensAbove: 272_000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 },
@@ -1828,7 +2034,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.cost.tiers).toEqual([
       { inputTokensAbove: 272_000, input: 60, output: 270, cacheRead: 1, cacheWrite: 0 },
@@ -1855,7 +2061,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.cost.tiers).toEqual([
       { inputTokensAbove: 200_000, input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
@@ -1890,7 +2096,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/model" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.name).toBe("team/model (incomplete metadata)");
     expect(result.models[0]?.cost).toEqual({
@@ -1949,7 +2155,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         "/v1/models": () => jsonResponse(200, { data: [{ id: "team/claude-sonnet-4-6" }] }),
       });
 
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
       expect(result.models).toEqual([
         {
@@ -1981,7 +2187,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         "/v1/models": () => jsonResponse(200, { data: [{ id: "team/chat" }, { id: "team/embed" }] }),
       });
 
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
       expect(result.models.map((model) => model.id)).toEqual(["team/chat"]);
     },
@@ -1999,7 +2205,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(200, { data: [{ id: "team/chat" }, { id: "blocked/chat" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models.map((model) => model.id)).toEqual(["team/chat"]);
   });
@@ -2010,7 +2216,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       "/v1/models": () => jsonResponse(500, { error: "unavailable" }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual([]);
   });
@@ -2028,7 +2234,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("model_info");
     expect(result.models.map((m) => m.id)).toEqual(["openai/gpt-4o"]);
@@ -2057,7 +2263,7 @@ describe("discoverModels response-mode models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("model_info");
     expect(result.models).toHaveLength(1);
@@ -2092,7 +2298,7 @@ describe("discoverModels response-mode models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models).toHaveLength(1);
@@ -2116,7 +2322,7 @@ describe("discoverModels response-mode models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models[0]).not.toHaveProperty("thinkingLevelMap");
@@ -2131,7 +2337,7 @@ describe("discoverModels response-mode models", () => {
       "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "openai/gpt-5.5" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models[0]).toMatchObject({ id: "openai/gpt-5.5", reasoning: true });
@@ -2161,18 +2367,22 @@ describe("catalog provider candidates", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
-    expect(result.models[0]?.name).not.toContain("metadata");
-    expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+    if (id === "fable-5") {
+      expect(result.models[0]?.name).toContain("incomplete metadata");
+    } else {
+      expect(result.models[0]?.name).not.toContain("metadata");
+      expect(result.models[0]?.cost.input).toBeGreaterThan(0);
+    }
   });
 
-  it.each(["claudia-x", "opusclip-2", "gpt-4o", "haiku"])("does not treat %s as an Anthropic alias", async (id) => {
+  it.each(["claudia-x", "opusclip-2", "haiku"])("does not treat %s as an Anthropic alias", async (id) => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [{ model_name: id, model_info: { mode: "chat" } }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.name).toBe(`${id} (incomplete metadata)`);
     expect(result.models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -2190,7 +2400,7 @@ describe("discoverModels fallback to /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models).toEqual(
       expect.arrayContaining([
@@ -2213,7 +2423,7 @@ describe("discoverModels fallback to /v1/models", () => {
         }
         throw new Error(`unexpected URL: ${url}`);
       });
-      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
       expect(result.source).toBe("models_list");
       expect(result.models.map((m) => m.id).sort()).toEqual(["anthropic/claude-3-5-sonnet", "openai/gpt-4o"]);
       const anthropic = result.models.find((m) => m.id === "anthropic/claude-3-5-sonnet")!;
@@ -2236,7 +2446,7 @@ describe("discoverModels fallback to /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]).toMatchObject({
       id: "gpt-5.5",
@@ -2257,7 +2467,7 @@ describe("discoverModels fallback to /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result).toMatchObject({
       source: "models_list",
@@ -2284,7 +2494,7 @@ describe("discoverModels fallback to /v1/models", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result).toMatchObject({
       source: "models_list",
@@ -2384,7 +2594,7 @@ describe("discoverModels fallback to /health", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(urls).toEqual([
       "https://litellm.example.com/model/info",
@@ -2420,7 +2630,7 @@ describe("discoverModels fallback to /health", () => {
       throw new Error(`unexpected URL: ${url}`);
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(urls).toEqual([
       "https://litellm.example.com/model/info",
@@ -2453,7 +2663,7 @@ describe("discoverModels fallback to /health", () => {
         }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     const [unresolved, resolved] = result.models;
@@ -2478,7 +2688,7 @@ describe("discoverModels fallback to /health", () => {
         jsonResponse(200, { healthy_endpoints: [{ model: "vertex/claude-sonnet", model_id: "uuid-1" }] }),
     });
 
-    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.source).toBe("health");
     expect(result.models[0]?.name).toBe("vertex/claude-sonnet (incomplete metadata)");

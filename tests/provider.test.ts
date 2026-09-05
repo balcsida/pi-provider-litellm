@@ -251,37 +251,49 @@ describe("discovery and offline cache parity", () => {
     fetchSpy = undefined;
   });
 
-  it("preserves withheld singleton and grouped catalog authority", async () => {
+  it("preserves reduced discovery metadata through the provider cache", async () => {
     const cases = [
       [
-        {
-          model_name: "openai/gpt-5.5",
-          model_info: { id: "only", mode: "chat" },
-          litellm_params: { model: "openai/gpt-5.5-internal-preview" },
-        },
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "openai/gpt-5.5-internal-preview" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
       ],
       [
-        {
-          model_name: "openai/gpt-5.5",
-          model_info: { id: "only", mode: "chat" },
-          litellm_params: { model: "internal/mystery" },
-        },
+        [
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "only", mode: "chat" },
+            litellm_params: { model: "internal/mystery" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
       ],
       [
-        { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
-        {
-          model_name: "openai/gpt-5.5",
-          model_info: { id: "b", mode: "chat" },
-          litellm_params: { model: "internal/mystery" },
-        },
+        [
+          { model_name: "openai/gpt-5.5", model_info: { id: "a", mode: "chat" } },
+          {
+            model_name: "openai/gpt-5.5",
+            model_info: { id: "b", mode: "chat" },
+            litellm_params: { model: "internal/mystery" },
+          },
+        ],
+        "openai/gpt-5.5 (incomplete metadata)",
       ],
       [
-        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
-        { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+        [
+          { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat" } },
+          { model_name: "openai/gpt-5.5", model_info: { id: "same", mode: "chat", max_input_tokens: 64_000 } },
+        ],
+        "openai/gpt-5.5",
       ],
-    ];
+    ] as const;
 
-    for (const data of cases) {
+    for (const [data, expectedName] of cases) {
       fetchSpy?.mockRestore();
       fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
         new Response(JSON.stringify({ data }), {
@@ -289,11 +301,11 @@ describe("discovery and offline cache parity", () => {
           headers: { "content-type": "application/json" },
         }),
       );
-      const onlineResult = await discoverModels("https://proxy.example/v1", "sk-test", {});
+      const onlineResult = await discoverModels("https://proxy.example/v1", "sk-test", { modelsDev: false });
       const onlineModels = toNativeModels("litellm", "https://proxy.example/v1", onlineResult.models);
 
       expect(onlineModels).toHaveLength(1);
-      expect(onlineModels[0]?.name).toBe("openai/gpt-5.5 (incomplete metadata)");
+      expect(onlineModels[0]?.name).toBe(expectedName);
 
       const provider = controller();
       await provider.refreshModels?.(context(onlineModels, false));
