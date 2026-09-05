@@ -259,6 +259,11 @@ function mapFromModelInfo(
   if (!isChatStyleMode(info.mode)) return undefined;
   const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
+  if (info.max_input_tokens == null) {
+    console.warn(
+      `LiteLLM: Model "${id}" has no max_input_tokens from /model/info; defaulting contextWindow to ${DEFAULT_CONTEXT_WINDOW}. Set model_info.max_input_tokens (and max_output_tokens) for this route in your LiteLLM config.yaml.`,
+    );
+  }
   const reasoningEffortMap = mapReasoningEfforts(info);
   const thinkingLevelMap =
     catalogModel?.thinkingLevelMap || reasoningEffortMap

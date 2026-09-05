@@ -327,6 +327,66 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("warns when max_input_tokens is missing and defaults the context window", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "nebius/ctx-missing", model_info: { mode: "chat" } }],
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.contextWindow).toBe(128000);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('LiteLLM: Model "nebius/ctx-missing" has no max_input_tokens'),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("defaulting contextWindow to 128000"));
+  });
+
+  it("warns when max_input_tokens is explicitly null", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "nebius/ctx-null", model_info: { mode: "chat", max_input_tokens: null } }],
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.contextWindow).toBe(128000);
+    expect(warnSpy).toHaveBeenCalledOnce();
+  });
+
+  it("does not warn when max_input_tokens is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "ok-model", model_info: { mode: "chat", max_input_tokens: 200000, max_output_tokens: 8192 } },
+        ],
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not warn for non-chat models filtered out by mode", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [{ model_name: "text-embed", model_info: { mode: "embedding" } }],
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("keeps Kimi compatibility on non-Moonshot routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
