@@ -15,7 +15,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
 
-useHermeticEnv();
+useHermeticEnv(["PI_CODING_AGENT_DIR"]);
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -703,6 +703,9 @@ describe("feature parity", () => {
 
   it("sends the Pi session id as a LiteLLM header across runtime request paths", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    // This test loads the extension through Pi's real loader, so getAgentDir() is not
+    // mocked and must be pointed at the temp dir or it reads the developer's settings.
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
