@@ -236,6 +236,27 @@ Dynamic catalogs are persisted by Pi in `~/.pi/agent/models-store.json`. Credent
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle.
 
+### Deployment groups and metadata authority
+
+LiteLLM may load-balance one public `model_name` across deployments with different backends or model versions. The extension reduces `/model/info` rows conservatively before publishing one Pi model:
+
+- Responses is selected only when every row explicitly reports Responses mode; mixed Chat/Responses or unknown groups use Chat. A route that combines a chat-style deployment with an explicitly incompatible mode such as `embedding` is withheld entirely, because LiteLLM could otherwise select a deployment that cannot accept the request.
+- Vision and reasoning are advertised only when every routable deployment resolves them as supported. Standard reasoning-effort levels (`minimal`, `low`, `medium`, and `high`) come from public catalog evidence with explicit LiteLLM `false` values removing them; `xhigh` and `max` require explicit LiteLLM `true` from every deployment. A level with no public or LiteLLM opinion is absent so Pi keeps its default behavior.
+- Context and output limits use the minimum resolved value across deployments.
+- Each displayed price field uses the maximum only when every deployment resolves that field; unresolved fields remain zero and the model name is suffixed with `(incomplete metadata)`.
+- Catalog metadata is accepted only from one unanimous provider identity derived from deployment fields such as `litellm_params.model`, `litellm_params.custom_llm_provider`, `model_info.base_model`, and the LiteLLM adapter. A provider conflict within one deployment withholds public-catalog metadata. A family conflict with a unanimous provider withholds family, generation, and the reasoning controls they enable while keeping provider-derived limits and pricing. Ambiguous groups are likewise not matched across all Pi provider catalogs.
+- In `/health` fallback, a correlated `/model/info` row's public `model_name` takes precedence because the health entry's `model` is its backend string; that health value is used only when detail is absent or does not name a route.
+
+The `(no metadata)` suffix is reserved for evidence-free `/v1/models` fallback entries. Those entries may receive bounded catalog enrichment on a later cache read. The `(incomplete metadata)` suffix marks reduced `/model/info` groups or unresolved `/health` routes and permanently prevents route-name cache enrichment. It means at least one metadata field is unknown, including cache pricing that the proxy omitted; known input/output prices may still be shown alongside the suffix.
+
+### Reasoning compatibility
+
+Reasoning selectors require backend identity and a wire control accepted by every routable deployment; public route names do not authorize them. For `reasoning_effort`, the public catalog supplies `minimal`/`low`/`medium`/`high`, explicit LiteLLM `false` values remove levels, and explicit LiteLLM `true` values may add them. `xhigh` and `max` remain disabled unless every deployment explicitly reports `true`. Levels with no opinion remain absent rather than being denied, so Pi keeps its defaults. The semantic generation contract separately governs whether `off` is possible: an always-thinking generation keeps `off: null` even when D4 supplies its effort levels.
+
+Native `thinking` controls still follow the recognized generation contract: Kimi K2.5/K2.6 can expose `off` and `high`, while Kimi K2.7 Code/Highspeed exposes `high` but never sends a disable control. Kimi K3 and DeepSeek V4 use public/LiteLLM effort evidence when the route accepts `reasoning_effort`; `max` is selectable only with explicit LiteLLM confirmation.
+
+Unknown generations and mixed deployment evidence expose no speculative selector. Kimi K2.7 Code, Kimi K3, and DeepSeek V4 retain assistant reasoning content for tool and multi-turn replay. Inline `<think>` normalization is a separate display policy: when any deployment declares backend evidence, it requires unanimous normal Kimi evidence; when none declares a backend, Kimi-shaped route-name evidence may enable response-only normalization, never generation controls or visibility suppression. Strict Moonshot/Kimi tool-message repair is enabled only when every deployment identifies that family; otherwise discovery emits a bounded warning because tool calls may fail. Gemini effort case normalization likewise requires unanimous deployment-family evidence rather than a Gemini-looking route name. Existing GPT-5.5 Chat tool-request compatibility remains unchanged.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -245,6 +266,12 @@ Opening `/model` refreshes configured provider catalogs in the background using 
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models |
+| `LiteLLM discovery: cached models predate discovery policy v2` | A legacy reasoning cache survived an offline or failed refresh. Retry `/model` with network access; a successful discovery replaces the stored list. |
+| `LiteLLM discovery: ... route group(s) have missing or conflicting deployment provider evidence` | One or more deployments lack a resolvable backend provider or resolve to different providers. Add consistent `litellm_params.model`, `model_info.base_model`, or adapter metadata; catalog-derived limits, pricing, and reasoning metadata are withheld meanwhile. |
+| `LiteLLM discovery: ... route group(s) look Moonshot-backed but not every deployment evidences it` | Strict tool-message repair is withheld, so Moonshot/Kimi tool calls may fail. For `/model/info` groups, identify every deployment consistently through `litellm_params.model`, `model_info.base_model`, or adapter metadata, or split non-Moonshot deployments into a distinct route. For `/health`, expose `model_id` plus detail metadata to enable that remediation; when all rows are endpoint-only, normal Kimi route names may receive route-name-only response display normalization without strict repair, while forced-thinking route names retain raw `<think>` tags as policy dictates. For `/v1/models` fallback, restore `/model/info` access for strict repair or accept route-name-only response display normalization without strict repair. |
+| `LiteLLM discovery: ... route group(s) mix chat-style and explicitly incompatible deployment modes` | The same public `model_name` targets both Chat/Responses and a non-chat mode such as `embedding`. Split those deployments into distinct route names or make their modes consistently chat-compatible; the mixed route is withheld to prevent requests from reaching an incompatible deployment. |
+| A model is marked `(incomplete metadata)` | `/model/info` or `/health` did not provide enough authoritative metadata. Explicit fields remain usable, but unknown cost fields are shown as zero and route-name cache enrichment stays disabled. |
+| Reasoning model has no selectable thinking level | Ensure every deployment accepts `thinking` or `reasoning_effort`. Standard effort levels come from public catalog evidence with LiteLLM overrides; `xhigh` and `max` additionally require explicit LiteLLM `true`. |
 | `401 Token expired` | Set `LITELLM_API_KEY_HELPER`. |
 | No models with gcloud auth | Verify `gcloud auth application-default login` has been run or set `GOOGLE_APPLICATION_CREDENTIALS` to an `authorized_user` ADC file |
 | Enterprise SSO waits for token insertion | The proxy returned 404/405 for `/sso/cli/start`, so Pi used the legacy flow — upgrade LiteLLM or paste the UI token |

@@ -1,5 +1,6 @@
 import { type Credential, createProvider, type Provider, type ProviderAuth } from "@earendil-works/pi-ai";
 import { openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
+import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 import { enrichCachedModel } from "./discover.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, LiteLLMModel } from "./types.js";
 
@@ -42,12 +43,40 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   });
   const refreshModels = provider.refreshModels;
   if (!refreshModels) return provider;
+  let warnedLegacy = false;
   return {
     ...provider,
-    refreshModels: (context) =>
-      refreshModels({
-        ...context,
-        stored: context.stored && { ...context.stored, models: context.stored.models.map(enrichCachedModel) },
-      }),
+    refreshModels: async (context) => {
+      const isLegacyReasoningModel = (model: LiteLLMModel) =>
+        model.litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION &&
+        (model.reasoning || model.thinkingLevelMap !== undefined);
+      const storedModels = context.stored?.models as readonly LiteLLMModel[] | undefined;
+      const hasLegacyReasoningModel = storedModels?.some(isLegacyReasoningModel) ?? false;
+      const stored = context.stored && {
+        ...context.stored,
+        models: context.stored.models.map((model) =>
+          isLegacyReasoningModel(model as LiteLLMModel) ? model : enrichCachedModel(model),
+        ),
+      };
+      let replacedLegacyModels = false;
+      try {
+        await refreshModels({
+          ...context,
+          stored,
+          publish: async (publication) => {
+            const published = await context.publish(publication);
+            if (published && publication.persist) replacedLegacyModels = true;
+            return published;
+          },
+        });
+      } finally {
+        if (context.allowNetwork && hasLegacyReasoningModel && !replacedLegacyModels && !warnedLegacy) {
+          warnedLegacy = true;
+          process.stderr.write(
+            "LiteLLM discovery: cached models predate discovery policy v2; network refresh required to update reasoning compatibility\n",
+          );
+        }
+      }
+    },
   };
 }

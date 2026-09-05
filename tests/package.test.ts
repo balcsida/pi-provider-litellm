@@ -283,12 +283,10 @@ describe("pi package compatibility", () => {
     );
 
     // A scanner bug that returned nothing would make the allowlist vacuously true, so
-    // require every shipped module to yield at least one specifier. The oracle itself is
-    // pinned by tests/import-specifiers.test.ts.
+    // require the shipped source set to yield specifiers. Pure helper modules may have no
+    // imports. The oracle itself is pinned by tests/import-specifiers.test.ts.
     expect(sourceFiles.length).toBeGreaterThan(0);
-    for (const [file, specifiers] of imports) {
-      expect(specifiers.length, `${file}: no module specifiers found`).toBeGreaterThan(0);
-    }
+    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(0);
 
     const allowed = new Set([
       "@earendil-works/pi-ai",

@@ -13,15 +13,21 @@
 - Use `npm ci` when reinstalling dependencies from the lockfile.
 - Use `npm test` for the full test suite.
 - Use `npm test -- tests/<file>.test.ts` for a focused Vitest run.
+- Use `npm run probe:proxy -- --snapshot <fixture> [--src <worktree>]` for snapshot probing, or `npm run probe:proxy -- --live --base-url $LITELLM_DEV_BASE_URL --max-requests 100` for the bounded live matrix.
 - Use `npm run check` before committing code changes; it runs Biome, typecheck, tests, and the package-content guard.
 - Use `npm run clean && npm run build` when changing exported/runtime code.
 - Use `npm run supply-chain:guard` and `npm pack --dry-run` when package contents, dependency policy, or release packaging change.
 
 ## Discovery And Credentials
 
-- Model discovery lives in `src/discover.ts`.
+- Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
 - Prefer `/model/info` for rich metadata; fallback to `/v1/models` only on 401, 403, or 404.
+- Treat `model_name` as a public route group, not backend evidence. Reduce every deployment before choosing transport,
+  capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
+- Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
 - The `/v1/models` fallback enriches metadata from the Pi catalog only; keep fallback metadata tests current.
+- `(no metadata)` is the fallback-only cache enrichment marker. Reduced `/model/info` groups and unresolved `/health`
+  routes use `(incomplete metadata)`, which must remain ineligible for route-name cache enrichment.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models*.json` files are ignored and never deleted.
@@ -32,6 +38,8 @@
 
 - `before_provider_request` is a global Pi hook. Only mutate provider payloads when `ctx.model?.provider === "litellm"`.
 - Do not add user-facing flags or environment variables to hide provider-scoping bugs.
+- Model-scoped request behavior travels on discovered `litellmPolicy` evidence; request hooks must not infer Moonshot or
+  Gemini behavior from public route text.
 - `litellm_session_id` is optional LiteLLM session grouping metadata. If a LiteLLM server rejects it for LiteLLM-routed requests, keep Pi requests working first and document the admin-facing recommendation separately.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization happens in the `message_end` hook and should stay covered by feature tests.
 

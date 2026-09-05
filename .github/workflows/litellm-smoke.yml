@@ -36,7 +36,7 @@ jobs:
       LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database@sha256:8b229a4b48fbe62d7f994b502106c3c1dbab958c07934fb446ac0e048a62745e' || 'docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09' }}
-      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude
+      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
@@ -141,6 +141,20 @@ jobs:
                 model: anthropic/claude-3-5-sonnet
                 api_base: http://host.docker.internal:8100
                 api_key: sk-vidaimock
+            - model_name: grouped-vidaimock
+              model_info:
+                mode: chat
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_base: http://host.docker.internal:8100/v1
+                api_key: sk-vidaimock
+            - model_name: grouped-vidaimock
+              model_info:
+                mode: responses
+              litellm_params:
+                model: anthropic/claude-3-5-sonnet
+                api_base: http://host.docker.internal:8100
+                api_key: sk-vidaimock
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
           YAML
@@ -181,6 +195,53 @@ jobs:
           done
           docker logs litellm-smoke >&2 || true
           exit 1
+
+      - name: Verify deployment-group reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --input-type=module - <<'NODE'
+          const assert = (condition, message) => {
+            if (!condition) throw new Error(message);
+          };
+          const response = await fetch(`${process.env.LITELLM_BASE_URL}/model/info`, {
+            headers: { Authorization: `Bearer ${process.env.LITELLM_API_KEY}` },
+            signal: AbortSignal.timeout(3000),
+          });
+          assert(response.ok, `/model/info returned ${response.status}`);
+          const payload = await response.json();
+          assert(Array.isArray(payload.data), "/model/info response has no data array");
+          const rows = payload.data.filter((row) => row.model_name === "grouped-vidaimock");
+          assert(rows.length === 2, `expected two grouped deployments, received ${rows.length}`);
+          const summary = rows
+            .map((row) => ({ id: row.model_info?.id, mode: row.model_info?.mode }))
+            .sort((left, right) => String(left.mode).localeCompare(String(right.mode)));
+          console.log(JSON.stringify(summary, null, 2));
+          for (const row of summary) assert(row.id, "grouped deployment is missing model_info.id");
+          assert(
+            summary.map((row) => row.mode).join(",") === "chat,responses",
+            `expected one chat and one responses deployment, received ${summary.map((row) => row.mode).join(",")}`,
+          );
+          const { pathToFileURL } = await import("node:url");
+          const { discoverModels } = await import(pathToFileURL("src/discover.ts").href);
+          const result = await discoverModels(process.env.LITELLM_BASE_URL, process.env.LITELLM_API_KEY);
+          const grouped = result.models.filter((model) => model.id === "grouped-vidaimock");
+          console.log(JSON.stringify(grouped, null, 2));
+          assert(grouped.length === 1, `expected one reduced group, received ${grouped.length}`);
+          assert(grouped[0].api === "openai-completions", `mixed group must reduce to Chat, received ${grouped[0].api}`);
+          assert(
+            grouped[0].name === "grouped-vidaimock (incomplete metadata)",
+            `withheld-authority group must carry the permanent marker, received ${grouped[0].name}`,
+          );
+          assert(
+            grouped[0].cost.input > 0 &&
+              grouped[0].cost.output > 0 &&
+              grouped[0].cost.cacheRead === 0 &&
+              grouped[0].cost.cacheWrite === 0,
+            `group must preserve known prices and zero unresolved prices, received ${JSON.stringify(grouped[0].cost)}`,
+          );
+          assert(grouped[0].thinkingLevelMap === undefined, "group must not adopt a catalog thinking-level map");
+          NODE
 
       - name: Run provider smoke
         env:
@@ -238,6 +299,7 @@ jobs:
           PI_CODING_AGENT_DIR="$list_models_dir" ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
           grep -F "vidaimock-openai" /tmp/pi-litellm-models.txt
           grep -F "anthropic/vidaimock-claude" /tmp/pi-litellm-models.txt
+          grep -F "grouped-vidaimock" /tmp/pi-litellm-models.txt
 
           export PI_CODING_AGENT_DIR="${{ runner.temp }}/pi-cli-smoke"
           ./node_modules/.bin/pi \

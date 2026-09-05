@@ -15,13 +15,13 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, emitsThinkTags, isGpt55Model, isMoonshotModel, normalizeBaseUrl } from "./discover.js";
+import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { getSessionIdFromFile } from "./litellm.js";
 import { createMcpToolDefinitions } from "./mcp-tools.js";
 import { createLiteLLMProvider, toNativeModels } from "./provider.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
-import type { LiteLLMApi, LiteLLMModel, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
+import type { LiteLLMApi, LiteLLMModel, LiteLLMModelPolicy, LiteLLMRuntimeAuth, ResolvedCredentials } from "./types.js";
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
@@ -880,23 +880,28 @@ function normalizeStrictToolMessages(messages: any[]): any[] {
   return changed ? normalized : messages;
 }
 
-// Reasoning fields LiteLLM forwards to chat-completions providers. The Moonshot
-// path defaults them off; the gpt-5.5 tool path strips them entirely.
-const REASONING_SUPPRESSION_DEFAULTS: Record<string, unknown> = {
+// Visibility fields suppress duplicate Kimi reasoning without changing the
+// model-specific generation control selected by pi-ai.
+const REASONING_VISIBILITY_DEFAULTS: Record<string, unknown> = {
   include_reasoning: false,
   reasoning_content: false,
   merge_reasoning_content_in_choices: true,
-  thinking: { type: "disabled" },
 };
-const GEMINI_MODEL_PATTERN = /(?:^|[-_/.:])gemini(?=$|[-_/.:])/i;
-
+const REASONING_REQUEST_KEYS = [
+  "reasoning",
+  "reasoning_effort",
+  ...Object.keys(REASONING_VISIBILITY_DEFAULTS),
+  "thinking",
+];
 function prepareLiteLLMRequestPayload(
   payload: Record<string, unknown>,
   model: LiteLLMModel | undefined,
   sessionId: string | undefined,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): Record<string, unknown> | undefined {
   const modelId = model?.id;
   const api = model?.api;
+  const openAIApi = api ?? "openai-completions";
   let next: Record<string, unknown> | undefined;
   const update = (key: string, value: unknown): void => {
     if (payload[key] !== undefined) return;
@@ -904,23 +909,20 @@ function prepareLiteLLMRequestPayload(
     next[key] = value;
   };
 
-  if (api !== "openai-responses" && model?.suppressReasoningContent === true) {
-    for (const [key, value] of Object.entries(REASONING_SUPPRESSION_DEFAULTS)) {
-      if (key !== "thinking") update(key, value);
-    }
+  if (openAIApi === "openai-completions" && modelPolicy?.suppressReasoningVisibility) {
+    for (const [key, value] of Object.entries(REASONING_VISIBILITY_DEFAULTS)) update(key, value);
   }
 
   // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
   // Drop reasoning until the gateway honors /v1/responses for this route.
   if (
-    api !== "openai-responses" &&
+    openAIApi === "openai-completions" &&
     modelId &&
     isGpt55Model(modelId) &&
     Array.isArray(payload.tools) &&
     payload.tools.length > 0
   ) {
-    const reasoningKeys = ["reasoning", "reasoning_effort", ...Object.keys(REASONING_SUPPRESSION_DEFAULTS)];
-    for (const key of reasoningKeys) {
+    for (const key of REASONING_REQUEST_KEYS) {
       if (payload[key] === undefined) continue;
       next ??= { ...payload };
       delete next[key];
@@ -942,8 +944,9 @@ function prepareLiteLLMRequestPayload(
   }
 
   // Moonshot/Kimi applies strict OpenAI schema validation: assistant tool calls
-  // must carry string content, and tool results must be plain text.
-  if (modelId && isMoonshotModel(modelId)) {
+  // must carry string content, and tool results must be plain text. This outbound
+  // rewrite requires the deployment-backed policy; route text is not evidence.
+  if (openAIApi === "openai-completions" && modelPolicy?.normalizeStrictToolMessages) {
     const messages = (next ?? payload).messages;
     if (Array.isArray(messages)) {
       const normalized = normalizeStrictToolMessages(messages);
@@ -954,7 +957,10 @@ function prepareLiteLLMRequestPayload(
     }
   }
 
-  if (modelId && GEMINI_MODEL_PATTERN.test(modelId)) {
+  if (
+    (openAIApi === "openai-completions" || openAIApi === "openai-responses") &&
+    modelPolicy?.normalizeGeminiReasoningEffort
+  ) {
     const currentPayload = next ?? payload;
     if (typeof currentPayload.reasoning_effort === "string") {
       const lower = currentPayload.reasoning_effort.toLowerCase();
@@ -988,8 +994,9 @@ function prepareLiteLLMRequestPayload(
 function normalizeThinkTags(
   message: AssistantMessage,
   litellmProviderNames: Set<string>,
+  modelPolicy: LiteLLMModelPolicy | undefined,
 ): AssistantMessage | undefined {
-  if (!litellmProviderNames.has(message.provider) || !emitsThinkTags(message.model)) return;
+  if (!litellmProviderNames.has(message.provider) || !modelPolicy?.normalizeThinkTags) return;
 
   let changed = false;
   const content: AssistantMessage["content"] = [];
@@ -1285,7 +1292,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("before_provider_request", (event, ctx) => {
     if (!ctx.model?.provider || !providerNames.has(ctx.model.provider)) return;
     if (typeof event.payload !== "object" || event.payload === null) return;
-    return prepareLiteLLMRequestPayload(event.payload as Record<string, unknown>, ctx.model as LiteLLMModel, sessionId);
+    return prepareLiteLLMRequestPayload(
+      event.payload as Record<string, unknown>,
+      ctx.model as LiteLLMModel,
+      sessionId,
+      (ctx.model as LiteLLMModel | undefined)?.litellmPolicy,
+    );
   });
 
   // Skills enrichment is best-effort: an expired credential or an unreachable proxy must not
@@ -1310,9 +1322,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames);
+    // Resolve the discovered model that produced this message so the display
+    // conclusion comes from deployment evidence rather than the route name. An
+    // unresolvable model carries no conclusion and is left untouched.
+    const model = ctx.modelRegistry?.find(event.message.provider, event.message.model);
+    const modelPolicy = (model as (typeof model & { litellmPolicy?: LiteLLMModelPolicy }) | undefined)?.litellmPolicy;
+    const message = normalizeThinkTags(event.message as AssistantMessage, providerNames, modelPolicy);
     if (!message) return;
     return { message };
   });
