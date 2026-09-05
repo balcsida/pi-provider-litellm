@@ -1,4 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai";
+import type { BackendFamily, LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
@@ -11,12 +12,25 @@ export type LiteLLMRuntimeAuth = {
   allowInsecureHttp?: boolean;
 };
 
-export type DiscoveredModel = Omit<Model<"openai-completions">, "provider" | "api" | "baseUrl"> & {
-  api?: LiteLLMApi;
+export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl"> & {
   suppressReasoningContent?: boolean;
+  litellmBackendFamily?: BackendFamily;
+  litellmDiscoveryVersion?: typeof LITELLM_DISCOVERY_VERSION;
 };
 
-export type LiteLLMModel = Model<LiteLLMApi> & { suppressReasoningContent?: boolean };
+export type DiscoveredModel = {
+  [TApi in LiteLLMApi]: DiscoveredModelFor<TApi>;
+}[LiteLLMApi];
+
+export type ModelProtocol = {
+  [TApi in LiteLLMApi]: Pick<DiscoveredModelFor<TApi>, "api" | "compat">;
+}[LiteLLMApi];
+
+export type LiteLLMModel = Model<LiteLLMApi> & {
+  suppressReasoningContent?: boolean;
+  litellmBackendFamily?: BackendFamily;
+  litellmDiscoveryVersion?: typeof LITELLM_DISCOVERY_VERSION;
+};
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];
@@ -35,9 +49,13 @@ export interface ModelInfoEntry {
   litellm_params?: {
     model?: string;
     custom_llm_provider?: string;
+    api_version?: string;
   };
   model_info?: {
     mode?: string | null;
+    base_model?: string;
+    litellm_provider?: string;
+    supported_endpoints?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;
     cache_read_input_token_cost?: number;

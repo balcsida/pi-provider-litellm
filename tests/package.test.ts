@@ -243,7 +243,7 @@ describe("pi package compatibility", () => {
                 name: cachedModelId,
                 provider: "litellm",
                 api: "openai-completions",
-                baseUrl: "https://litellm.example.com/v1",
+                baseUrl: "https://proxy.invalid/v1",
                 reasoning: false,
                 input: ["text"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -283,12 +283,10 @@ describe("pi package compatibility", () => {
     );
 
     // A scanner bug that returned nothing would make the allowlist vacuously true, so
-    // require every shipped module to yield at least one specifier. The oracle itself is
-    // pinned by tests/import-specifiers.test.ts.
+    // require the shipped source set to yield specifiers. Pure helper modules may have no
+    // imports. The oracle itself is pinned by tests/import-specifiers.test.ts.
     expect(sourceFiles.length).toBeGreaterThan(0);
-    for (const [file, specifiers] of imports) {
-      expect(specifiers.length, `${file}: no module specifiers found`).toBeGreaterThan(0);
-    }
+    expect(imports.flatMap(([, specifiers]) => specifiers).length).toBeGreaterThan(0);
 
     const allowed = new Set([
       "@earendil-works/pi-ai",
@@ -337,6 +335,11 @@ describe("pi package compatibility", () => {
     expect(readme).toContain("Opening `/model` refreshes configured provider catalogs");
     expect(readme).not.toContain("/litellm-refresh");
     expect(readme).toContain("Legacy `litellm-models*.json` files are ignored and are not deleted");
+    expect(readme).toContain("### Model host enforcement");
+    expect(readme).toContain("native `Provider` contract has no separate protocol-capability declaration");
+    expect(readme).toContain(
+      "Responses transport has a different compatibility type and uses native `prompt_cache_key`",
+    );
     expect(readme).not.toContain("older than 24 hours");
     expect(readme).not.toContain("enter `2` for SSO");
   });

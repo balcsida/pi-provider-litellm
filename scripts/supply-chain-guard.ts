@@ -66,12 +66,14 @@ const nonRegistrySpecPrefixes = [
 // decision. `tests/supply-chain-guard.test.ts` asserts this list matches `src/`
 // exactly, so an entry for a module this branch does not ship fails the suite.
 export const allowedSourceModules = [
+  "backend-identity",
   "cost",
   "discover",
   "gcloud-token",
   "index",
   "litellm",
   "mcp-tools",
+  "protocols",
   "provider",
   "skills",
   "types",

@@ -2,13 +2,17 @@ import { isIP } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
+import { LITELLM_DISCOVERY_VERSION, resolveBackendIdentity } from "./backend-identity.js";
 import type {
   DiscoveredModel,
+  DiscoveredModelFor,
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
+  LiteLLMApi,
   ModelInfoEntry,
   ModelInfoResponse,
+  ModelProtocol,
   ModelsListEntry,
   ModelsListResponse,
 } from "./types.js";
@@ -96,7 +100,13 @@ export function emitsThinkTags(modelId: string): boolean {
   return isMoonshotModel(modelId) && !FORCED_THINKING_MODEL_PATTERN.test(modelId);
 }
 
-export function buildCompat(modelId: string): DiscoveredModel["compat"] {
+export function responsesCompat(modelId: string): DiscoveredModelFor<"openai-responses">["compat"] {
+  // Pi's Responses transport has no cacheControlFormat setting and uses
+  // Responses-native prompt-cache fields instead of Anthropic cache_control markers.
+  return isMoonshotModel(modelId) ? { supportsDeveloperRole: false } : undefined;
+}
+
+export function completionsCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
   if (isMoonshotModel(modelId)) {
     return {
       supportsStore: false,
@@ -110,6 +120,45 @@ export function buildCompat(modelId: string): DiscoveredModel["compat"] {
     return { supportsStore: false, cacheControlFormat: "anthropic" };
   }
   return { supportsStore: false };
+}
+
+function supportsResponses(entry: ModelInfoEntry): boolean {
+  const endpoints = entry.model_info?.supported_endpoints;
+  if (Array.isArray(endpoints)) return endpoints.some((endpoint) => endpoint === "/v1/responses");
+  if (isResponsesMode(entry.model_info?.mode)) return true;
+
+  const identity = resolveBackendIdentity(entry);
+  if (identity?.family !== "openai") return false;
+  const adapter = entry.litellm_params?.custom_llm_provider?.trim().toLowerCase();
+  const configuredModel = entry.litellm_params?.model?.trim().toLowerCase();
+  const reportedProvider = entry.model_info?.litellm_provider?.trim().toLowerCase();
+  const azureAdapter =
+    adapter === "azure" ||
+    adapter === "azure_ai" ||
+    /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
+    reportedProvider === "azure" ||
+    reportedProvider === "azure_ai";
+  // LiteLLM bridges /v1/responses to chat completions when the provider has no native Responses config
+  // (litellm/responses/main.py, _bridges_to_chat_completions), so generic adapters remain eligible for Responses.
+  if (!azureAdapter) return true;
+
+  const version = entry.litellm_params?.api_version?.trim();
+  const date = version?.match(/^(\d{4}-\d{2}-\d{2})(?:-preview)?$/)?.[1];
+  return date === undefined || date >= "2025-03-01";
+}
+
+export function modelProtocol(modelId: string, modeOrEntry?: string | null | ModelInfoEntry): ModelProtocol {
+  const selectedEntry =
+    typeof modeOrEntry === "object" && modeOrEntry !== null
+      ? modeOrEntry
+      : { model_name: modelId, model_info: { mode: modeOrEntry } };
+  return supportsResponses(selectedEntry)
+    ? { api: "openai-responses", compat: responsesCompat(modelId) }
+    : { api: "openai-completions", compat: completionsCompat(modelId) };
+}
+
+export function buildCompat(modelId: string): DiscoveredModelFor<"openai-completions">["compat"] {
+  return completionsCompat(modelId);
 }
 
 function toKnownProvider(provider: string | undefined): BuiltinProvider | undefined {
@@ -257,8 +306,8 @@ function mapFromModelInfo(
   if (!id) return undefined;
   const info = entry.model_info ?? {};
   if (!isChatStyleMode(info.mode)) return undefined;
-  const responsesMode = isResponsesMode(info.mode);
   const catalogModel = findCatalogModel(id);
+  const backendFamily = resolveBackendIdentity(entry)?.family;
   const reasoningEffortMap = mapReasoningEfforts(info);
   const thinkingLevelMap =
     catalogModel?.thinkingLevelMap || reasoningEffortMap
@@ -273,9 +322,10 @@ function mapFromModelInfo(
     cost: mapModelInfoCost(info, catalogModel?.cost),
     contextWindow: info.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id, entry),
+    ...(backendFamily ? { litellmBackendFamily: backendFamily } : {}),
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
     ...(suppressReasoningContent ? { suppressReasoningContent: true } : {}),
-    ...(responsesMode ? { api: "openai-responses" as const } : {}),
   };
 }
 
@@ -290,6 +340,7 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
   const id = entry.model;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id);
+  const backendFamily = resolveBackendIdentity({ model_name: id })?.family;
   return {
     id,
     name: catalogModel?.name ?? id,
@@ -299,7 +350,9 @@ function mapFromHealthEndpoint(entry: { model?: string }): DiscoveredModel | und
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
+    ...(backendFamily ? { litellmBackendFamily: backendFamily } : {}),
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
   };
 }
 
@@ -307,6 +360,7 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
   const id = entry.id;
   if (!id) return undefined;
   const catalogModel = findCatalogModel(id, entry.owned_by);
+  const backendFamily = resolveBackendIdentity({ model_name: id })?.family;
   return {
     id,
     name: catalogModel?.name ?? `${id} (no metadata)`,
@@ -316,7 +370,9 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
     cost: catalogModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    compat: buildCompat(id),
+    ...modelProtocol(id),
+    ...(backendFamily ? { litellmBackendFamily: backendFamily } : {}),
+    litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
   };
 }
 
@@ -384,12 +440,20 @@ export async function discoverModels(
   if (infoResult.ok) {
     const entries = new Map<string, ModelInfoEntry>();
     const suppressionEvidence = new Map<string, Set<boolean>>();
+    const protocolEvidence = new Map<string, Set<LiteLLMApi>>();
+    const backendFamilyEvidence = new Map<string, Set<string | undefined>>();
     for (const entry of infoResult.data.data ?? []) {
       if (!entry.model_name) continue;
       const previous = entries.get(entry.model_name);
       const suppressions = suppressionEvidence.get(entry.model_name) ?? new Set<boolean>();
       suppressions.add(shouldSuppressReasoningContent(entry.model_name, entry));
       suppressionEvidence.set(entry.model_name, suppressions);
+      const protocols = protocolEvidence.get(entry.model_name) ?? new Set<LiteLLMApi>();
+      protocols.add(modelProtocol(entry.model_name, entry).api);
+      protocolEvidence.set(entry.model_name, protocols);
+      const backendFamilies = backendFamilyEvidence.get(entry.model_name) ?? new Set<string | undefined>();
+      backendFamilies.add(resolveBackendIdentity(entry)?.family);
+      backendFamilyEvidence.set(entry.model_name, backendFamilies);
       entries.set(entry.model_name, {
         ...previous,
         ...entry,
@@ -397,7 +461,16 @@ export async function discoverModels(
       });
     }
     let models = [...entries.entries()]
-      .map(([id, entry]) => mapFromModelInfo(entry, aggregateSuppressionEvidence(suppressionEvidence.get(id)!)))
+      .map(([id, entry]) => {
+        const model = mapFromModelInfo(entry, aggregateSuppressionEvidence(suppressionEvidence.get(id)!));
+        if (!model) return undefined;
+        if (protocolEvidence.get(id)?.has("openai-completions")) {
+          Object.assign(model, { api: "openai-completions", compat: completionsCompat(id) });
+        }
+        const families = backendFamilyEvidence.get(id);
+        if (families?.size !== 1) delete model.litellmBackendFamily;
+        return model;
+      })
       .filter((m): m is DiscoveredModel => m !== undefined);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
