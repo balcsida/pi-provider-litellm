@@ -66,13 +66,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
-    "@earendil-works/pi-ai": "^0.84.2",
-    "@earendil-works/pi-coding-agent": "^0.84.2",
-    "@kitlangton/terminal-control": "1.1.0",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@kitlangton/terminal-control": "1.2.1",
     "@types/node": "^26.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "es-module-lexer": "^2.1.0",
     "tsx": "^4.21.0",
-    "vitest": "^4.1.7"
+    "vitest": "^5.0.0"
   }
 }
