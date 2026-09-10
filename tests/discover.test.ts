@@ -327,6 +327,108 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
+  it("does not let a later null model_info clobber an earlier real value", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "zai-glm-5-2",
+            litellm_params: { model: "mistral/zai-glm-5-2" },
+            model_info: { mode: "chat", max_input_tokens: 1048576, max_output_tokens: 131072 },
+          },
+          {
+            model_name: "zai-glm-5-2",
+            litellm_params: { model: "nebius/zai-org/GLM-5.2" },
+            model_info: { mode: null, max_input_tokens: null, max_output_tokens: null },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.source).toBe("model_info");
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "zai-glm-5-2",
+      contextWindow: 1048576,
+      maxTokens: 131072,
+    });
+  });
+
+  it("still lets a later real value override an earlier one", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          { model_name: "dup-model", model_info: { mode: "chat", max_input_tokens: 200000, max_output_tokens: 8192 } },
+          { model_name: "dup-model", model_info: { mode: "chat", max_input_tokens: 100000, max_output_tokens: 4096 } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    // Later route's real value wins — this is "last real wins", not "max wins":
+    // with 200000 first and 100000 second, last-wins yields 100000/4096, while a
+    // hypothetical max-wins merge would keep 200000/8192.
+    expect(result.models[0]).toMatchObject({
+      id: "dup-model",
+      contextWindow: 100000,
+      maxTokens: 4096,
+    });
+  });
+
+  it("keeps the last real value across an interleaved real/null/real sequence", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "multi-model",
+            model_info: { mode: "chat", max_input_tokens: 200000, max_output_tokens: 8192 },
+          },
+          { model_name: "multi-model", model_info: { mode: null, max_input_tokens: null, max_output_tokens: null } },
+          {
+            model_name: "multi-model",
+            model_info: { mode: "chat", max_input_tokens: 300000, max_output_tokens: 16384 },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "multi-model",
+      contextWindow: 300000,
+      maxTokens: 16384,
+    });
+  });
+
+  it("keeps the first real value when only later routes are null", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "first-real",
+            model_info: { mode: "chat", max_input_tokens: 500000, max_output_tokens: 65536 },
+          },
+          { model_name: "first-real", model_info: { mode: null, max_input_tokens: null, max_output_tokens: null } },
+          { model_name: "first-real", model_info: { mode: null, max_input_tokens: null, max_output_tokens: null } },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: "first-real",
+      contextWindow: 500000,
+      maxTokens: 65536,
+    });
+  });
+
   it("keeps Kimi compatibility on non-Moonshot routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
