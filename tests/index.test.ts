@@ -1463,6 +1463,32 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 
+  it("check() recognises a stored /login credential when no env vars are set", async () => {
+    // Regression test for https://github.com/balcsida/pi-provider-litellm/issues/174:
+    // Pi calls check() at startup with credential=undefined before resolving auth.json.
+    // Without the fix, check() found no env var and no settings baseUrl and returned
+    // undefined, causing Pi core to show "No models available" despite a valid credential.
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: { type: "api_key", key: "sk-stored", env: { LITELLM_BASE_URL: "https://stored.example.com" } },
+      }),
+      "utf8",
+    );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // No env vars set — credential must come from auth.json alone.
+    const result = await pi.providers[0]?.auth.apiKey?.check?.({
+      ctx: { env: async () => undefined, fileExists: async () => false },
+      signal: TEST_SIGNAL,
+    });
+
+    expect(result).toEqual({ type: "api_key", source: "auth.json" });
+  });
+
   it("resolves native auth from the injected context instead of process env", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://process.example.com";
