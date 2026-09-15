@@ -1463,6 +1463,42 @@ describe("extension startup", () => {
     expect(await readHelperCount(agentDir)).toBe(0);
   });
 
+  it("filterModels() does not hide seeded models when no credential has been resolved yet", async () => {
+    // Regression test for https://github.com/balcsida/pi-provider-litellm/issues/174:
+    // Pi calls filterModels() with credential=undefined before resolving auth.json.
+    // Without the fix, resolveCredentialRoot() returns undefined and filterModels() hides
+    // all models, so the model selector appears empty even after a successful seed.
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: { type: "api_key", key: "sk-stored", env: { LITELLM_BASE_URL: "https://stored.example.com" } },
+      }),
+      "utf8",
+    );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const model = {
+      id: "stored-model",
+      name: "Stored model",
+      provider: "litellm",
+      api: "openai-completions" as const,
+      baseUrl: "https://stored.example.com/v1",
+      reasoning: false,
+      input: ["text"] as ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4096,
+    };
+
+    // credential=undefined simulates Pi calling filterModels before the stored credential resolves.
+    const visible = pi.providers[0]?.filterModels?.([model], undefined);
+
+    expect(visible?.map((m) => m.id)).toEqual(["stored-model"]);
+  });
+
   it("resolves native auth from the injected context instead of process env", async () => {
     const agentDir = await makeAgentDir();
     process.env.LITELLM_BASE_URL = "https://process.example.com";
