@@ -1908,7 +1908,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         if (explicit) return normalizeBaseUrl(explicit, definition.allowInsecureHttp);
         const oauthRuntimeRoot = oauthRuntimeRoots.get(definition.name);
         if (apiKey && oauthRuntimeRoot?.apiKey === apiKey) return oauthRuntimeRoot.root;
-        return resolveCredentialRoot(definition);
+        // Same fallback as check(): auth.json supplies the base URL before Pi resolves the credential.
+        const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
+        return resolveCredentialRoot(definition, stored ?? undefined);
       },
       discover: async (credential, signal) => {
         const disabledReason = discoveryDisabledReason();

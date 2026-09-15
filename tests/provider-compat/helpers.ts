@@ -161,6 +161,7 @@ export async function createCompatibilityHarness(
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
     defineTool: (tool: unknown) => tool,
     getAgentDir: () => agentDir,
+    readStoredCredential: () => null,
   }));
   const baseUrl = options.baseUrl ?? "https://proxy.example.com";
   if (options.allowInsecureHttp) {
