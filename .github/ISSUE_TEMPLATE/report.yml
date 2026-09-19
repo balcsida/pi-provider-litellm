@@ -1,0 +1,66 @@
+name: Issue report
+description: Report a bug or request a change to pi-provider-litellm.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please include the versions used when you encountered the issue.
+        Remove API keys, tokens, and other secrets from any configuration or logs you share.
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi version
+      description: Run `pi --version`.
+      placeholder: e.g. 0.85.1
+    validations:
+      required: true
+  - type: input
+    id: extension-version
+    attributes:
+      label: pi-provider-litellm version
+      description: |
+        Read `version` from the installed extension's `package.json`; `pi list` shows managed package paths.
+        For a Git or local source install, also include the commit from `git rev-parse HEAD` in that checkout.
+      placeholder: e.g. 3.1.0 (npm), or 3.1.0 at commit abc1234 (source)
+    validations:
+      required: true
+  - type: input
+    id: litellm-version
+    attributes:
+      label: LiteLLM proxy version
+      description: |
+        Run `litellm --version` in the proxy's environment, or provide its exact container image tag/digest.
+        For a managed proxy, ask its administrator for the deployed version.
+      placeholder: e.g. 1.86.0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the problem or change you are requesting.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: For bugs, include the steps, model or route name, and relevant configuration.
+      placeholder: |
+        1. Configure ...
+        2. Select model ...
+        3. Send ...
+        4. Observe ...
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste error messages or logs with secrets removed.
+      render: text
