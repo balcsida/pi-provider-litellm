@@ -1644,6 +1644,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   let registeredMcpIdentity: string | undefined;
+  let mcpSeeded = false;
   let mcpRegistration: Promise<void> | undefined;
   // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
   // never cleared, so a refusal is fatal for this extension instance rather than a per-tool or
@@ -2046,6 +2047,37 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
     if (!section) return;
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
+  });
+
+  // MCP tools otherwise register only from refreshModels' `finally`, which needs
+  // context.allowNetwork. Pi core sets that solely for the interactive TUI and the RPC
+  // background refresh, so `-p` and `--list-models` register no MCP tool at all, even when
+  // credentials resolve and the proxy is reachable — the defect #136 fixed for models.
+  //
+  // Seeding here rather than at activation is deliberate: registerMcpTools serialises callers
+  // through `mcpRegistration`, so an activation-time call would become an in-flight registration
+  // that Pi's own refresh then waits on. Running once before the first turn keeps that ordering
+  // intact, still precedes any tool use, and leaves startup latency untouched.
+  pi.on("before_agent_start", async () => {
+    if (!mcpEnabled || mcpSeeded || discoveryDisabledReason() || isHostOffline()) return;
+    mcpSeeded = true;
+    const definition = definitions.find((candidate) => candidate.name === PROVIDER_NAME);
+    if (!definition) return;
+    try {
+      const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
+      // executeHelpers:false — seeding must never run the user's key helper as a side effect.
+      const auth = await authForCredential(definition, stored, false);
+      // An env-configured provider has no stored credential and must still seed. The credential
+      // only derives the pause identity, so the resolved key reproduces the stored api_key scope.
+      const credential: Credential = stored ?? { type: "api_key", key: auth.apiKey };
+      await registerMcpTools(auth, credential, AbortSignal.timeout(getSeedTimeoutMs()));
+    } catch (error) {
+      if (isVerboseDiscovery()) {
+        process.stderr.write(
+          `LiteLLM (${definition.name}): MCP seeding skipped (${error instanceof Error ? error.message : String(error)}).\n`,
+        );
+      }
+    }
   });
 
   pi.on("message_end", (event, ctx) => {
