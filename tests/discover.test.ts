@@ -162,71 +162,33 @@ describe("modelProtocol", () => {
     });
   });
 
-  it("uses backend identity, Azure API version, and supported endpoints", () => {
-    expect(
-      modelProtocol("opaque-route", {
-        model_name: "opaque-route",
-        litellm_params: { model: "azure/gpt-5", api_version: "2025-03-01-preview" },
-      }),
-    ).toMatchObject({ api: "openai-responses" });
-    expect(
-      modelProtocol("opaque-route", {
-        model_name: "opaque-route",
-        litellm_params: { model: "azure/gpt-5", api_version: "2024-12-01-preview" },
-      }),
-    ).toMatchObject({ api: "openai-completions" });
-    expect(
-      modelProtocol("opaque-route", {
-        model_name: "opaque-route",
-        litellm_params: { model: "azure/gpt-5" },
-      }),
-    ).toMatchObject({ api: "openai-responses" });
-    expect(
-      modelProtocol("opaque-route", {
-        model_name: "opaque-route",
-        litellm_params: {
-          model: "azure/codex-mini-latest",
-          custom_llm_provider: "azure",
-          api_version: "2025-03-01-preview",
+  it.each(["azure", "azure_ai"])("requires explicit Responses evidence for %s deployments", (provider) => {
+    for (const api_version of [undefined, "2024-12-01-preview", "2025-03-01", "2025-04-01-preview", "v1"]) {
+      for (const evidence of [
+        { litellm_params: { model: `${provider}/gpt-5`, api_version } },
+        { litellm_params: { model: "gpt-5", custom_llm_provider: provider, api_version } },
+        {
+          litellm_params: { model: "gpt-5", api_version },
+          model_info: { mode: "chat", litellm_provider: provider },
         },
-        model_info: { mode: "chat" },
-      }),
-    ).toMatchObject({ api: "openai-responses" });
-
-    for (const model of ["azure_ai/kimi-k3", "azure/deepseek-v4", "azure/glm-5"]) {
-      expect(modelProtocol("opaque-route", { model_name: "opaque-route", litellm_params: { model } })).toMatchObject({
-        api: "openai-completions",
-      });
+      ]) {
+        expect(modelProtocol("opaque-route", evidence)).toMatchObject({ api: "openai-completions" });
+      }
     }
-
-    expect(
-      modelProtocol("openai/gpt-5", {
-        model_name: "openai/gpt-5",
-        model_info: { supported_endpoints: ["/v1/chat/completions"] },
-      }),
-    ).toMatchObject({ api: "openai-completions" });
-    expect(
-      modelProtocol("opaque-route", {
-        model_name: "opaque-route",
-        model_info: { supported_endpoints: ["/v1/responses"] },
-      }),
-    ).toMatchObject({ api: "openai-responses" });
   });
 
-  it("guards Azure API versions when only the reported provider identifies Azure", () => {
-    for (const litellmProvider of ["azure", "azure_ai"]) {
-      const entry = (apiVersion?: string) => ({
-        model_name: "opaque-route",
-        litellm_params: { model: "gpt-5", ...(apiVersion ? { api_version: apiVersion } : {}) },
-        model_info: { litellm_provider: litellmProvider },
-      });
-
-      expect(modelProtocol("opaque-route", entry("2024-12-01-preview"))).toMatchObject({
-        api: "openai-completions",
-      });
-      expect(modelProtocol("opaque-route", entry("2025-03-01-preview"))).toMatchObject({ api: "openai-responses" });
-      expect(modelProtocol("opaque-route", entry())).toMatchObject({ api: "openai-responses" });
-    }
+  it.each([
+    { info: { mode: "responses" }, api: "openai-responses" },
+    { info: { mode: "chat", supported_endpoints: ["/v1/responses"] }, api: "openai-responses" },
+    { info: { mode: "responses", supported_endpoints: ["/v1/chat/completions"] }, api: "openai-completions" },
+    { info: { mode: "responses", supported_endpoints: [] }, api: "openai-completions" },
+  ])("honors explicit Azure transport evidence: $info", ({ info, api }) => {
+    expect(
+      modelProtocol("opaque-route", {
+        litellm_params: { model: "azure/gpt-5", api_version: "2025-04-01-preview" },
+        model_info: info,
+      }),
+    ).toMatchObject({ api });
   });
 
   it("uses Chat Completions when the model prefix conflicts with custom_llm_provider", () => {
@@ -891,6 +853,60 @@ describe("discoverModels via /model/info", () => {
 
     expect(result.models[0]).toMatchObject({ id: "gpt-prod", api: "openai-completions" });
     expect(result.models[0]).not.toHaveProperty("litellmBackendFamily");
+  });
+
+  it.each([false, true])(
+    "keeps an Azure group on Chat when a sibling lacks Responses evidence (%s)",
+    async (explicitSibling) => {
+      mockEndpoints({
+        "/model/info": () =>
+          jsonResponse(200, {
+            data: [false, explicitSibling].map((responses, index) => ({
+              model_name: "azure-chat-route",
+              litellm_params: { model: "azure/gpt-5", api_version: "2025-04-01-preview" },
+              model_info: {
+                id: `deployment-${index}`,
+                mode: responses ? "responses" : "chat",
+                supports_reasoning: true,
+                supported_openai_params: ["reasoning_effort"],
+              },
+            })),
+          }),
+      });
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+      expect(result.models[0]).toMatchObject({
+        api: "openai-completions",
+        reasoning: true,
+        compat: { supportsReasoningEffort: true },
+      });
+      expect(getSupportedThinkingLevels(result.models[0] as never)).toContain("medium");
+    },
+  );
+
+  it.each(["azure", "azure_ai"])("preserves %s-specific context limits through discovery", async (provider) => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "large-context-route",
+              litellm_params: { model: `${provider}/gpt-5.6-sol` },
+              model_info: {
+                mode: "chat",
+                litellm_provider: provider,
+                max_input_tokens: 1_050_000,
+                max_output_tokens: 128_000,
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]).toMatchObject({ contextWindow: 1_050_000, maxTokens: 128_000 });
   });
 
   it("reduces mixed Azure deployment versions to Chat Completions", async () => {
@@ -2728,7 +2744,7 @@ describe("discoverModels via /model/info", () => {
       });
 
       expect(result.models[0]).toMatchObject({
-        api: "openai-responses",
+        api: "openai-completions",
         thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null },
       });
     },

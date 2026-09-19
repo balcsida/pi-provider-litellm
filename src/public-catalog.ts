@@ -73,6 +73,7 @@ const PROVIDER_ALIASES: Readonly<Record<string, readonly string[]>> = {
 const PI_PROVIDER_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "amazon-bedrock": ["amazon-bedrock"],
   azure: ["azure-openai-responses"],
+  azure_ai: ["azure-openai-responses"],
   chatgpt: ["openai-codex"],
   "fireworks-ai": ["fireworks"],
   openai: ["openai"],
@@ -245,6 +246,7 @@ export async function loadPublicCatalog(options: LoadPublicCatalogOptions = {}):
       const providers = providerCandidates(provider);
       const ids = lookupIds(id);
       const vendor = providers.find((candidate) => candidate !== "azure") ?? providers[0];
+      const adapter = provider?.trim().toLowerCase();
       for (const candidate of providers) {
         const models = catalog?.[candidate]?.models;
         for (const modelId of ids) {
@@ -252,20 +254,25 @@ export async function loadPublicCatalog(options: LoadPublicCatalogOptions = {}):
           if (!model) continue;
           const record = mapModelsDev(candidate, modelId, model);
           if (candidate === providers[0] || !vendor) return record;
-          return { ...record, piProvider: (PI_PROVIDER_ALIASES[vendor] ?? [vendor])[0] };
+          const fallback =
+            adapter && (PI_PROVIDER_ALIASES[adapter] ?? [adapter]).some((piProvider) => findPiModel(piProvider, ids))
+              ? adapter
+              : vendor;
+          return { ...record, piProvider: (PI_PROVIDER_ALIASES[fallback] ?? [fallback])[0] };
+        }
+      }
+      // Provider-specific limits and pricing must not be replaced by the generic
+      // vendor's entry just because both catalogs recognize the model id.
+      if (adapter && adapter !== vendor) {
+        for (const piProvider of PI_PROVIDER_ALIASES[adapter] ?? [adapter]) {
+          const model = findPiModel(piProvider, ids);
+          if (model) return toPiRecord("pi-adapter", piProvider, model);
         }
       }
       if (vendor) {
         for (const piProvider of PI_PROVIDER_ALIASES[vendor] ?? [vendor]) {
           const model = findPiModel(piProvider, ids);
           if (model) return toPiRecord("pi-vendor", piProvider, model);
-        }
-      }
-      const adapter = provider?.trim().toLowerCase();
-      if (adapter) {
-        for (const piProvider of PI_PROVIDER_ALIASES[adapter] ?? [adapter]) {
-          const model = findPiModel(piProvider, ids);
-          if (model) return toPiRecord("pi-adapter", piProvider, model);
         }
       }
       return undefined;

@@ -1,9 +1,11 @@
 import { mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getModels } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPublicCatalog } from "../src/public-catalog.js";
 
+vi.mock("@earendil-works/pi-ai/compat", { spy: true });
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -40,7 +42,10 @@ async function loadWithFreshCache() {
   return loadPublicCatalog({ cachePath: join(dir, "models-dev.json") });
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.mocked(getModels).mockReset();
+});
 
 describe("loadPublicCatalog", () => {
   it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
@@ -59,16 +64,75 @@ describe("loadPublicCatalog", () => {
     },
   );
 
-  it("falls back from the Azure adapter to the OpenAI vendor catalog", async () => {
+  it.each(["azure", "azure_ai"])(
+    "prefers the %s-specific Pi catalog over the generic OpenAI catalog",
+    async (provider) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => response({})),
+      );
+      const catalog = await loadWithFreshCache();
+
+      expect(catalog.lookup(provider, "gpt-5.6-sol")).toMatchObject({
+        source: "pi-adapter",
+        provider: "azure-openai-responses",
+        limits: { context: 1_050_000, output: 128_000 },
+      });
+    },
+  );
+
+  it.each(["azure", "azure_ai"])(
+    "keeps %s as the Pi fallback for a sparse OpenAI models.dev record",
+    async (provider) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          response({
+            openai: { models: { "gpt-5.6-sol": { reasoning_options: [{ type: "effort", values: ["low", "high"] }] } } },
+          }),
+        ),
+      );
+      const catalog = await loadWithFreshCache();
+
+      expect(catalog.lookup(provider, "gpt-5.6-sol")).toMatchObject({
+        source: "models.dev",
+        provider: "openai",
+        piProvider: "azure-openai-responses",
+        effortLevels: ["low", "high"],
+      });
+    },
+  );
+
+  it("falls back to OpenAI when the Azure catalog does not know the model", async () => {
+    vi.mocked(getModels).mockReturnValueOnce([]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => response({})),
     );
     const catalog = await loadWithFreshCache();
+
     expect(catalog.lookup("azure", "gpt-4")).toMatchObject({
       source: "pi-vendor",
       provider: "openai",
-      limits: { context: 8192, output: 8192 },
+      limits: { context: 8192 },
+    });
+  });
+
+  it("keeps the vendor fallback for sparse enrichment when the adapter has no catalog entry", async () => {
+    vi.mocked(getModels).mockReturnValueOnce([]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        response({
+          openai: { models: { "gpt-4": { cost: { input: 30 } } } },
+        }),
+      ),
+    );
+    const catalog = await loadWithFreshCache();
+
+    expect(catalog.lookup("azure", "gpt-4")).toMatchObject({
+      source: "models.dev",
+      piProvider: "openai",
     });
   });
 

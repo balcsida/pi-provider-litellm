@@ -236,15 +236,21 @@ function allowedReasoning(row: BackendIdentityRow): boolean {
 export function protocolPrediction(row: BackendIdentityRow): string {
   const identity = resolveBackendIdentity(row);
   const info = row.model_info as JsonObject | undefined;
+  if (Array.isArray(info?.supported_endpoints)) {
+    return info.supported_endpoints.includes("/v1/responses") ? "openai-responses" : "openai-completions";
+  }
   if (isResponsesMode(info?.mode)) return "openai-responses";
   if (identity?.family !== "openai") return "openai-completions";
   const params = row.litellm_params as JsonObject | undefined;
-  const version = typeof params?.api_version === "string" ? params.api_version : undefined;
-  const adapter = typeof info?.litellm_provider === "string" ? info.litellm_provider : undefined;
-  if ((adapter === "azure" || adapter === "azure_ai") && version && version.slice(0, 10) < "2025-03-01") {
-    return "openai-completions";
-  }
-  return "openai-responses";
+  const providers = [
+    params?.custom_llm_provider,
+    info?.litellm_provider,
+    typeof params?.model === "string" ? params.model.trim().split("/")[0] : undefined,
+  ];
+  const azure = providers.some(
+    (provider) => typeof provider === "string" && ["azure", "azure_ai"].includes(provider.trim().toLowerCase()),
+  );
+  return azure ? "openai-completions" : "openai-responses";
 }
 
 export function reasoningPrediction(

@@ -149,16 +149,11 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
     /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
     reportedProvider === "azure" ||
     reportedProvider === "azure_ai";
-  // LiteLLM bridges /v1/responses to chat completions when the provider has no native Responses config
-  // (litellm/responses/main.py, _bridges_to_chat_completions), so generic adapters remain eligible for Responses.
-  if (!azureAdapter) return true;
-
-  const apiVersion = entry.litellm_params?.api_version;
-  if (apiVersion != null && typeof apiVersion !== "string") return false;
-  const version = apiVersion?.trim();
-  if (!version) return true;
-  const date = version.match(/^(\d{4}-\d{2}-\d{2})(?:-preview)?$/)?.[1];
-  return date !== undefined && date >= "2025-03-01";
+  // An Azure API version describes the API surface, not whether this deployment
+  // serves Responses. Require the explicit mode/endpoint evidence above instead
+  // of promoting a working Chat route to an unavailable endpoint.
+  // Generic adapters remain eligible for LiteLLM's Responses-to-Chat bridge.
+  return !azureAdapter;
 }
 
 export function modelProtocol(modelId: string, modeOrEntry?: string | null | ModelInfoEntry): ModelProtocol {

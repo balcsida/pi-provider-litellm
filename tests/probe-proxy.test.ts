@@ -105,14 +105,29 @@ describe("readSnapshot", () => {
 });
 
 describe("predictions", () => {
-  it("treats the Azure GA boundary as Responses-compatible", () => {
+  it.each(["azure", "azure_ai"])("does not predict Responses from a recent %s API version", (provider) => {
+    for (const evidence of [
+      { litellm_params: { model: `${provider}/gpt-5`, api_version: "2025-03-01" } },
+      { litellm_params: { model: "gpt-5", custom_llm_provider: provider } },
+      { litellm_params: { model: "gpt-5" }, model_info: { litellm_provider: provider } },
+    ]) {
+      expect(protocolPrediction({ model_name: "route-gpt", ...evidence })).toBe("openai-completions");
+    }
+  });
+
+  it("gives declared endpoints precedence over mode in protocol predictions", () => {
     expect(
       protocolPrediction({
-        model_name: "route-gpt",
-        litellm_params: { model: "azure/gpt-5", api_version: "2025-03-01" } as never,
-        model_info: { base_model: "openai/gpt-5", litellm_provider: "azure" },
+        litellm_params: { model: "azure/gpt-5" },
+        model_info: { mode: "chat", supported_endpoints: ["/v1/responses"] } as never,
       }),
     ).toBe("openai-responses");
+    expect(
+      protocolPrediction({
+        litellm_params: { model: "azure/gpt-5" },
+        model_info: { mode: "responses", supported_endpoints: ["/v1/chat/completions"] } as never,
+      }),
+    ).toBe("openai-completions");
   });
 
   it.each(["responses", "response", "Responses"])("predicts Responses for a %s mode row", (mode) => {
@@ -468,10 +483,10 @@ describe("probeDiscovery", () => {
       deployments: 1,
       identity: { provider: "openai", modelId: "gpt-5", family: "openai" },
       liteLLMFlags: { supports_low_reasoning_effort: true },
-      api: "openai-responses",
+      api: "openai-completions",
       reasoning: true,
       limits: { context: 1000, output: 100 },
-      predictions: { protocol: "openai-responses", reasoning: { low: true, medium: true, high: true } },
+      predictions: { protocol: "openai-completions", reasoning: { low: true, medium: true, high: true } },
     });
   });
 });
