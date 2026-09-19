@@ -137,6 +137,66 @@ describe("cold start discovery (issue #137)", () => {
     expect(Date.now() - startedAt).toBeLessThan(15_000);
   }, 70_000);
 
+  it("seeds MCP tools before the first turn, not during activation", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-mcp-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    // Long enough to separate the two phases, short enough not to weigh on the suite.
+    const DELAY_MS = 120;
+    const delayed = async (body: unknown): Promise<Response> => {
+      await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+      return jsonResponse(200, body);
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return delayed({ data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
+      }
+      if (url.endsWith("/mcp-rest/tools/list")) {
+        return delayed({
+          tools: [
+            {
+              name: "echo",
+              description: "Echo a message",
+              inputSchema: { type: "object", properties: {} },
+              mcp_info: { server_name: "demo", server_id: "demo-server" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    const pi = createPi();
+    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
+    const beforeAgentStart: Array<(event: unknown, ctx: unknown) => Promise<unknown> | unknown> = [];
+    const on = pi.on.bind(pi);
+    pi.on = (event, handler) => {
+      if (event === "before_agent_start") beforeAgentStart.push(handler);
+      on(event, handler);
+    };
+
+    const startedAt = Date.now();
+    await (await loadExtension(agentDir))(pi);
+    const activationMs = Date.now() - startedAt;
+
+    // Seeding is not paid at activation: registerMcpTools serialises callers through
+    // `mcpRegistration`, so registering here would be in-flight when Pi runs its own refresh.
+    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_demo_echo_"))).toBe(false);
+    expect(activationMs).toBeLessThan(DELAY_MS * 2);
+
+    for (const handler of beforeAgentStart) await handler({}, {});
+
+    // Pi core sets allowNetwork only for the TUI and the RPC background refresh, so without this
+    // seeding `-p` and --list-models register no MCP tool at all (issue #136, fixed for models).
+    // Registered names carry a server-identity suffix, so match the stable prefix.
+    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_demo_echo_"))).toBe(true);
+  });
+
   it("does not discover when no credentials are configured", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-nocreds-"));
     delete process.env.LITELLM_BASE_URL;
