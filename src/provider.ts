@@ -215,6 +215,8 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       ),
   };
   if (!refreshModels) return guardedProvider;
+  const seedKey = (model: { id: string; baseUrl: string }) => `${model.id}\0${model.baseUrl}`;
+  const seeded = new Map((options.models ?? []).map((model) => [seedKey(model), model]));
   return {
     ...guardedProvider,
     refreshModels: async (context) => {
@@ -222,6 +224,10 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
       let legacyCount = 0;
       const models = storedModels.map((model) => {
         if ((model as LiteLLMModel).litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION) {
+          // Pi applies stored models over the seed, so a stale entry would otherwise mask what
+          // startup discovery just proved for the same route.
+          const fresh = seeded.get(seedKey(model));
+          if (fresh) return fresh;
           legacyCount++;
           return restoreCachedModelPolicy(model);
         }

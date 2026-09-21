@@ -250,12 +250,136 @@ describe("Anthropic Messages wire compatibility", () => {
     );
   });
 
-  it("uses the generation fallback compatibility for the probed Fable minor", async () => {
-    const { model } = await createCompatibilityHarness(
+  it("keeps Fable Messages and thinking on a Bedrock route while omitting strict tools", async () => {
+    const baseRoute = probedRoute("claude-fable-5-1", "bedrock/us.anthropic.claude-fable-5-1");
+    const route = {
+      ...baseRoute,
+      model_info: {
+        ...baseRoute.model_info,
+        supports_native_structured_output: false,
+        supports_response_schema: true,
+      },
+    };
+    const { models, model, requests, respond } = await createCompatibilityHarness(route);
+    respond(...anthropicTextResponse("ready"));
+
+    await models
+      .streamSimple(
+        model,
+        {
+          messages: [user("Use a tool if needed")],
+          tools: [
+            {
+              name: "lookup",
+              description: "Look up a value",
+              parameters: {
+                type: "object",
+                properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+              constrainedSampling: { type: "json_schema", strict: "prefer" },
+            },
+          ],
+        },
+        { reasoning: "high" },
+      )
+      .result();
+
+    expect(model).toMatchObject({ api: "anthropic-messages", compat: { forceAdaptiveThinking: true } });
+    expect(model.compat).not.toHaveProperty("supportsStrictTools");
+    expect(requests[0]).toMatchObject({
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+      tools: [
+        {
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: { key: { type: "string" } },
+            required: ["key"],
+          },
+          eager_input_streaming: true,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    });
+    const serializedTools = requests[0]?.tools as Array<Record<string, unknown>>;
+    expect(serializedTools[0]).not.toHaveProperty("strict");
+    // Without strict, pi-ai's ordinary tool serialization forwards only type/properties/required.
+    expect(serializedTools[0]?.input_schema).toEqual({
+      type: "object",
+      properties: { key: { type: "string" } },
+      required: ["key"],
+    });
+  });
+
+  it("serializes strict tools for an affirmatively supported direct Anthropic route", async () => {
+    const route = {
+      ...probedRoute("claude-fable-5-1", "anthropic/claude-fable-5-1"),
+      model_info: {
+        ...probedRoute("claude-fable-5-1", "anthropic/claude-fable-5-1").model_info,
+        litellm_provider: "anthropic",
+        supports_native_structured_output: false,
+        supports_response_schema: false,
+      },
+    };
+    const { models, model, requests, respond } = await createCompatibilityHarness(route);
+    respond(...anthropicTextResponse("ready"));
+
+    await models
+      .streamSimple(model, {
+        messages: [user("Use a tool if needed")],
+        tools: [
+          {
+            name: "lookup",
+            description: "Look up a value",
+            parameters: {
+              type: "object",
+              properties: { key: { type: "string" } },
+              required: ["key"],
+              additionalProperties: false,
+            },
+            constrainedSampling: { type: "json_schema", strict: "prefer" },
+          },
+        ],
+      })
+      .result();
+
+    expect(model.compat).toMatchObject({ supportsStrictTools: true });
+    expect(requests[0]?.tools).toEqual([
+      expect.objectContaining({
+        name: "lookup",
+        strict: true,
+        input_schema: expect.objectContaining({ type: "object" }),
+      }),
+    ]);
+  });
+
+  it("rejects required strict tools before HTTP on a route without strict-tool evidence", async () => {
+    const { models, model, requests } = await createCompatibilityHarness(
       probedRoute("claude-fable-5-1", "bedrock/us.anthropic.claude-fable-5-1"),
     );
 
-    expect(model.compat).toEqual({ forceAdaptiveThinking: true, supportsStrictTools: true });
+    const message = await models
+      .streamSimple(model, {
+        messages: [user("Use the tool")],
+        tools: [
+          {
+            name: "lookup",
+            description: "Look up a value",
+            parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+            constrainedSampling: { type: "json_schema", strict: "require" },
+          },
+        ],
+      })
+      .result();
+
+    expect(requests).toHaveLength(0);
+    expect(message).toMatchObject({
+      stopReason: "error",
+      errorMessage: expect.stringContaining("strict tools are unsupported"),
+    });
   });
 
   it("ignores router OpenAI effort additions on native Messages", async () => {
@@ -304,7 +428,7 @@ describe("Anthropic Messages wire compatibility", () => {
       expect(model.compat).toEqual({
         forceAdaptiveThinking: true,
         supportsTemperature: false,
-        supportsStrictTools: true,
+        ...(adapter === "anthropic" ? { supportsStrictTools: true } : {}),
       });
       expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
       expect(requests[0]?.thinking).not.toHaveProperty("budget_tokens");
@@ -343,6 +467,23 @@ describe("Anthropic Messages wire compatibility", () => {
     });
   });
 
+  it("does not infer strict tools from generic JSON-output flags on an unproven hosted route", async () => {
+    const baseRoute = claudeRoute("bedrock", "bedrock/us.anthropic.claude-opus-4-7-v1:0");
+    const route = {
+      ...baseRoute,
+      model_info: {
+        ...baseRoute.model_info,
+        supports_native_structured_output: true,
+        supports_response_schema: true,
+      },
+    };
+
+    const { model } = await createCompatibilityHarness(route);
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.compat).not.toHaveProperty("supportsStrictTools");
+  });
+
   it("omits temperature for a decorated Opus backend that rejects it", async () => {
     const [, adapter, backend] = decoratedAdaptiveRoutes[1];
     const { models, model, requests, respond } = await createCompatibilityHarness(claudeRoute(adapter, backend));
@@ -371,7 +512,6 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(model.compat).toEqual({
       forceAdaptiveThinking: true,
       supportsTemperature: false,
-      supportsStrictTools: true,
     });
   });
 
@@ -397,17 +537,29 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(requestUrls).toEqual(["https://proxy.example.com/v1/chat/completions"]);
   });
 
-  it("rehydrates the same Messages API, URL, and body from the offline model store", async () => {
+  it("rehydrates Fable's non-strict tool request from the offline model store", async () => {
     const modelsStore = new InMemoryModelsStore();
-    const online = await createCompatibilityHarness(anthropicRoute, { modelsStore });
+    const route = probedRoute("claude-fable-5-1", "bedrock/us.anthropic.claude-fable-5-1");
+    const context = {
+      messages: [user("Hello")],
+      tools: [
+        {
+          name: "lookup",
+          description: "Look up a value",
+          parameters: { type: "object" as const, properties: { key: { type: "string" as const } } },
+          constrainedSampling: { type: "json_schema" as const, strict: "prefer" as const },
+        },
+      ],
+    };
+    const online = await createCompatibilityHarness(route, { modelsStore });
     online.respond(...anthropicTextResponse("online"));
-    await online.models.streamSimple(online.model, { messages: [user("Hello")] }, { reasoning: "high" }).result();
+    await online.models.streamSimple(online.model, context, { reasoning: "high" }).result();
 
     vi.restoreAllMocks();
     vi.resetModules();
-    const offline = await createCompatibilityHarness(anthropicRoute, { modelsStore, allowNetwork: false });
+    const offline = await createCompatibilityHarness(route, { modelsStore, allowNetwork: false });
     offline.respond(...anthropicTextResponse("offline"));
-    await offline.models.streamSimple(offline.model, { messages: [user("Hello")] }, { reasoning: "high" }).result();
+    await offline.models.streamSimple(offline.model, context, { reasoning: "high" }).result();
 
     expect(offline.model.api).toBe("anthropic-messages");
     expect(offline.model).toEqual(online.model);
@@ -416,7 +568,17 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(offline.requests[0]).toMatchObject({
       thinking: { type: "adaptive" },
       output_config: { effort: "high" },
+      tools: [
+        expect.objectContaining({
+          name: "lookup",
+          input_schema: expect.objectContaining({
+            type: "object",
+            properties: { key: { type: "string" } },
+          }),
+        }),
+      ],
     });
+    expect(offline.requests[0]?.tools).toEqual([expect.not.objectContaining({ strict: true })]);
   });
 
   it("reports a non-overflow Anthropic error envelope", async () => {

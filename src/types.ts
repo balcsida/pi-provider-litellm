@@ -91,6 +91,10 @@ export interface ModelInfoEntry {
     max_input_tokens?: number;
     max_output_tokens?: number;
     supports_reasoning?: boolean;
+    // LiteLLM JSON-output capabilities are intentionally not treated as strict-tool
+    // evidence; they describe different request features.
+    supports_native_structured_output?: boolean;
+    supports_response_schema?: boolean;
     reasoning_effort_levels?: string[];
     supports_none_reasoning_effort?: boolean;
     supports_minimal_reasoning_effort?: boolean;

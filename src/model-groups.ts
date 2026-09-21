@@ -37,7 +37,7 @@ type FamilyEvidence = SemanticFamily | "conflicting";
 
 export type MessagesBackendCompat = Pick<
   NonNullable<Model<"anthropic-messages">["compat"]>,
-  "forceAdaptiveThinking" | "supportsTemperature" | "supportsStrictTools"
+  "forceAdaptiveThinking" | "supportsTemperature"
 >;
 
 type OpenAICompat = NonNullable<Model<"openai-completions">["compat"]>;
@@ -57,6 +57,9 @@ export interface CatalogResolution {
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
   messagesCompat?: MessagesBackendCompat;
+  // Evidence for the actual Messages route, kept separate from model-generation
+  // serializer policy so strict-tool disagreement cannot change the transport.
+  messagesStrictTools?: boolean;
   messagesThinkingLevelMap?: DiscoveredModel["thinkingLevelMap"];
   reasoning?: boolean;
   effortLevels?: string[];
@@ -86,6 +89,7 @@ export interface ReducedModelGroup {
   semanticModel?: SemanticModel;
   semanticFamily?: FamilyEvidence;
   messagesCompat?: MessagesBackendCompat;
+  messagesStrictTools?: boolean;
   // Set when deployments disagreed on catalog provider identity, so catalog
   // limits, pricing, and reasoning metadata were withheld for the whole group.
   catalogAuthorityAmbiguous?: boolean;
@@ -798,6 +802,9 @@ export function reduceModelGroup(
   const semanticModel = unanimous(catalogs.map((catalog) => catalog?.semanticModel));
   const semanticFamily = unanimous(catalogs.map((catalog) => catalog?.semanticFamily));
   const messagesCompat = unanimous(catalogs.map((catalog) => stableJson(catalog?.messagesCompat)));
+  // Strict tools require affirmative evidence from every routable deployment.
+  const messagesStrictTools =
+    catalogs.length > 0 && catalogs.every((catalog) => catalog?.messagesStrictTools === true) ? true : undefined;
   const messagesEndpointAllowed = deployments.every((entry) => {
     const endpoints = entry.model_info?.supported_endpoints;
     return endpoints === undefined || (Array.isArray(endpoints) && endpoints.includes("/v1/messages"));
@@ -968,6 +975,7 @@ export function reduceModelGroup(
     ...(semanticModel ? { semanticModel } : {}),
     ...(semanticFamily ? { semanticFamily } : {}),
     ...(messagesCompat ? { messagesCompat: JSON.parse(messagesCompat) } : {}),
+    ...(messagesStrictTools !== undefined ? { messagesStrictTools } : {}),
     ...(catalogAuthorityAmbiguous ? { catalogAuthorityAmbiguous: true } : {}),
     deploymentFamilies: catalogs.map((catalog) => catalog?.semanticFamily),
     normalizeThinkTags: unanimousNormalKimi,
