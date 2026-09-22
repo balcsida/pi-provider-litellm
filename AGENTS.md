@@ -29,6 +29,9 @@
   identity when a non-generic provider conflicts with the model prefix. Reduce every deployment before choosing
   transport, capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
 - Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
+- `supported_endpoints` pins transport except for `azure_ai` deployments, which LiteLLM bridges to Chat Completions
+  regardless of that cost-map list; they take Responses only from an explicit `mode: "responses"`. Keep
+  `scripts/probe-proxy.ts` `protocolPrediction` in step with `supportsResponses` in `src/discover.ts`.
 - Evidence-free `/v1/models` and wholly health-only `/health` groups take protocol and presentation metadata from
   the bounded Pi catalog lookup. `openai-responses` selects Responses; other or missing catalog APIs select Chat.
   A health-only row mixed with deployment details grants no catalog authority to that group.
