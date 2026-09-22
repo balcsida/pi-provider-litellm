@@ -236,12 +236,21 @@ function allowedReasoning(row: BackendIdentityRow): boolean {
 export function protocolPrediction(row: BackendIdentityRow): string {
   const identity = resolveBackendIdentity(row);
   const info = row.model_info as JsonObject | undefined;
-  if (Array.isArray(info?.supported_endpoints)) {
-    return info.supported_endpoints.includes("/v1/responses") ? "openai-responses" : "openai-completions";
-  }
-  if (isResponsesMode(info?.mode)) return "openai-responses";
-  if (identity?.family !== "openai") return "openai-completions";
   const params = row.litellm_params as JsonObject | undefined;
+  const listsResponses = Array.isArray(info?.supported_endpoints)
+    ? info.supported_endpoints.includes("/v1/responses")
+    : undefined;
+  if (listsResponses === false) return "openai-completions";
+  if (isResponsesMode(info?.mode)) return "openai-responses";
+  // Mirrors discovery: azure_ai has no native LiteLLM Responses config, so its
+  // cost-map `supported_endpoints` cannot authorize the crashing Chat bridge.
+  const azureAi =
+    (typeof params?.custom_llm_provider === "string" &&
+      params.custom_llm_provider.trim().toLowerCase() === "azure_ai") ||
+    (typeof params?.model === "string" && /^azure_ai\//i.test(params.model.trim()));
+  if (azureAi) return "openai-completions";
+  if (listsResponses === true) return "openai-responses";
+  if (identity?.family !== "openai") return "openai-completions";
   const providers = [
     params?.custom_llm_provider,
     info?.litellm_provider,

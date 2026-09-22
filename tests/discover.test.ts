@@ -177,6 +177,44 @@ describe("modelProtocol", () => {
     }
   });
 
+  // LiteLLM bridges every azure_ai Responses call through Chat Completions (no native
+  // AZURE_AI Responses config) and that bridge fails streaming with "list index out of
+  // range" before v1.103.0. The cost-map `supported_endpoints` list describes the model,
+  // not that bridge, so it must not promote the route; only an explicit mode may.
+  it.each([
+    { litellm_params: { model: "azure_ai/gpt-6-astra" } },
+    { litellm_params: { model: "gpt-6-astra", custom_llm_provider: "azure_ai" } },
+    { litellm_params: { model: "azure_ai/gpt-5.5", api_version: "2025-04-01-preview" } },
+  ])("keeps azure_ai deployments on Chat despite a /v1/responses endpoint list: %o", (params) => {
+    for (const litellm_provider of ["azure", "azure_ai", undefined]) {
+      expect(
+        modelProtocol("gpt-6-astra", {
+          ...params,
+          model_info: {
+            mode: "chat",
+            supported_endpoints: ["/v1/chat/completions", "/v1/responses"],
+            ...(litellm_provider ? { litellm_provider } : {}),
+          },
+        }),
+      ).toMatchObject({ api: "openai-completions" });
+    }
+    expect(
+      modelProtocol("gpt-6-astra", {
+        ...params,
+        model_info: { mode: "responses", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+      }),
+    ).toMatchObject({ api: "openai-responses" });
+  });
+
+  it("still lets a native azure deployment pin Responses through supported_endpoints", () => {
+    expect(
+      modelProtocol("gpt-6-astra", {
+        litellm_params: { model: "azure/gpt-6-astra" },
+        model_info: { mode: "chat", litellm_provider: "azure_ai", supported_endpoints: ["/v1/responses"] },
+      }),
+    ).toMatchObject({ api: "openai-responses" });
+  });
+
   it.each([
     { info: { mode: "responses" }, api: "openai-responses" },
     { info: { mode: "chat", supported_endpoints: ["/v1/responses"] }, api: "openai-responses" },

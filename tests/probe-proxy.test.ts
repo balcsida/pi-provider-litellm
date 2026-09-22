@@ -130,6 +130,26 @@ describe("predictions", () => {
     ).toBe("openai-completions");
   });
 
+  it("keeps azure_ai rows on Chat despite a cost-map /v1/responses endpoint", () => {
+    for (const litellm_params of [
+      { model: "azure_ai/gpt-6-astra" },
+      { model: "gpt-6-astra", custom_llm_provider: "azure_ai" },
+    ]) {
+      expect(
+        protocolPrediction({
+          litellm_params,
+          model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] } as never,
+        }),
+      ).toBe("openai-completions");
+      expect(
+        protocolPrediction({
+          litellm_params,
+          model_info: { mode: "responses", supported_endpoints: ["/v1/responses"] } as never,
+        }),
+      ).toBe("openai-responses");
+    }
+  });
+
   it.each(["responses", "response", "Responses"])("predicts Responses for a %s mode row", (mode) => {
     expect(protocolPrediction({ model_name: "route", model_info: { mode } as never })).toBe("openai-responses");
   });

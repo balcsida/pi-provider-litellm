@@ -140,10 +140,31 @@ export function completionsCompat(
   return { supportsStore: false };
 }
 
+// LiteLLM has no native Responses config for the `azure_ai` provider (utils.py,
+// `_get_python_responses_config` lists AZURE but not AZURE_AI), so every
+// azure_ai deployment reaches `/v1/responses` through the Chat Completions
+// bridge. That bridge crashes on Azure's empty-`choices` stream chunks with
+// "list index out of range" (fixed upstream in BerriAI/litellm#34455, first in
+// v1.103.0), while the same deployment streams fine on `/v1/chat/completions`.
+// Its `supported_endpoints` list is copied from the model cost map and describes
+// the model, not the transport LiteLLM actually uses, so it cannot authorize
+// Responses here; only an explicit `mode: "responses"` does. A list that omits
+// `/v1/responses` still denies, as for every other deployment.
+function isAzureAiDeployment(entry: ModelInfoEntry): boolean {
+  const adapter = wireString(entry.litellm_params?.custom_llm_provider)?.trim().toLowerCase();
+  const configuredModel = wireString(entry.litellm_params?.model)?.trim().toLowerCase();
+  return adapter === "azure_ai" || /^azure_ai\//.test(configuredModel ?? "");
+}
+
 function supportsResponses(entry: ModelInfoEntry): boolean {
   const endpoints = entry.model_info?.supported_endpoints;
-  if (Array.isArray(endpoints)) return endpoints.some((endpoint) => endpoint === "/v1/responses");
+  const listsResponses = Array.isArray(endpoints)
+    ? endpoints.some((endpoint) => endpoint === "/v1/responses")
+    : undefined;
+  if (listsResponses === false) return false;
   if (normalizedMode(entry.model_info?.mode) === "responses") return true;
+  if (isAzureAiDeployment(entry)) return false;
+  if (listsResponses === true) return true;
 
   const identity = resolveBackendIdentity(entry);
   if (identity?.family !== "openai") return false;
@@ -152,8 +173,7 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
   const reportedProvider = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   const azureAdapter =
     adapter === "azure" ||
-    adapter === "azure_ai" ||
-    /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
+    /^azure\//.test(configuredModel ?? "") ||
     reportedProvider === "azure" ||
     reportedProvider === "azure_ai";
   // An Azure API version describes the API surface, not whether this deployment
