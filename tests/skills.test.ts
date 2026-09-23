@@ -116,12 +116,12 @@ describe("listSkills", () => {
 });
 
 describe("skill helpers", () => {
-  it("rejects legacy skills without code", async () => {
+  it("rejects skills without Skill Hub source metadata", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    await expect(createSkill("https://litellm.example.com", "sk-test", { name: "terraform" })).rejects.toThrow(
-      "code is required when source is omitted",
-    );
+    await expect(
+      createSkill("https://litellm.example.com", "sk-test", { name: "terraform" } as Parameters<typeof createSkill>[2]),
+    ).rejects.toThrow("source is required");
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -150,22 +150,17 @@ describe("skill helpers", () => {
     );
   });
 
-  it("creates legacy skills through the LiteLLM Skills Gateway", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { id: "skill-1" }));
+  it("does not fall back to the Anthropic Skills API when the Skill Hub is missing", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404 }));
 
     await expect(
       createSkill("https://litellm.example.com", "sk-test", {
         name: "terraform",
-        description: "Terraform conventions",
-        code: "Use Terraform conventions.",
+        source: { type: "git", url: "https://github.com/acme/skills.git" },
       }),
-    ).resolves.toEqual({ id: "skill-1" });
+    ).rejects.toThrow("LiteLLM skill create failed: HTTP 404");
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://litellm.example.com/v1/skills",
-      expect.objectContaining({ method: "POST" }),
-    );
   });
 
   it("deletes skills by id", async () => {
