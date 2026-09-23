@@ -59,75 +59,38 @@ export async function listSkills(
   return skills;
 }
 
+// Only the Skill Hub creates skills from JSON. LiteLLM's POST /v1/skills is Anthropic's multipart
+// Skills API, so a JSON code skill sent there never becomes a listable skill.
 export async function createSkill(
   baseUrl: string,
   apiKey: string,
-  input: {
-    name: string;
-    description?: string;
-    source?: Record<string, unknown>;
-    code?: string;
-    inputSchema?: Record<string, unknown>;
-  },
+  input: { name: string; description?: string; source: Record<string, unknown> },
   headers?: Record<string, string>,
   allowInsecureHttp = false,
 ): Promise<unknown> {
-  if (!input.source && !input.code) throw new Error("code is required when source is omitted");
+  if (!input.source) throw new Error("source is required: skills are created through the LiteLLM Skill Hub");
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl, allowInsecureHttp);
-  let usedSkillHub = input.source !== undefined;
-  const skillHubPayload = input.source
-    ? {
-        name: input.name,
-        description: input.description,
-        source: input.source,
-      }
-    : {
-        name: input.name,
-        description: input.description,
-        code: input.code,
-        input_schema: input.inputSchema ?? { type: "object", properties: {} },
-      };
-  let response = await fetch(`${normalizedBaseUrl}${input.source ? "/claude-code/plugins" : "/v1/skills"}`, {
+  const response = await fetch(`${normalizedBaseUrl}/claude-code/plugins`, {
     method: "POST",
     headers: {
       ...headers,
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(skillHubPayload),
+    body: JSON.stringify({ name: input.name, description: input.description, source: input.source }),
     signal: AbortSignal.timeout(10_000),
   });
-  if (input.source && response.status === 404) {
-    usedSkillHub = false;
-    response = await fetch(`${normalizedBaseUrl}/v1/skills`, {
-      method: "POST",
-      headers: {
-        ...headers,
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: input.name,
-        description: input.description,
-        code: input.code,
-        input_schema: input.inputSchema ?? { type: "object", properties: {} },
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-  }
   if (!response.ok) throw new Error(`LiteLLM skill create failed: HTTP ${response.status}`);
   skillsCache = undefined;
-  if (usedSkillHub) {
-    const enableResponse = await fetch(
-      `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(input.name)}/enable`,
-      {
-        method: "POST",
-        headers: { ...headers, Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    if (!enableResponse.ok) throw new Error(`LiteLLM skill enable failed: HTTP ${enableResponse.status}`);
-  }
+  const enableResponse = await fetch(
+    `${normalizedBaseUrl}/claude-code/plugins/${encodeURIComponent(input.name)}/enable`,
+    {
+      method: "POST",
+      headers: { ...headers, Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (!enableResponse.ok) throw new Error(`LiteLLM skill enable failed: HTTP ${enableResponse.status}`);
   return response.json().catch(() => ({}));
 }
 
@@ -191,9 +154,7 @@ function formatSkills(skills: LiteLLMSkill[]): string {
 const CreateSkillParams = Type.Object({
   name: Type.String({ description: "Skill name" }),
   description: Type.Optional(Type.String({ description: "Skill description" })),
-  sourceJson: Type.Optional(Type.String({ description: "Optional Skill Hub source metadata JSON object" })),
-  code: Type.Optional(Type.String({ description: "Legacy Skills Gateway implementation or prompt code" })),
-  inputSchemaJson: Type.Optional(Type.String({ description: "Optional JSON Schema string for skill inputs" })),
+  sourceJson: Type.String({ description: "Skill Hub source metadata JSON object" }),
 });
 
 const DeleteSkillParams = Type.Object({
@@ -227,24 +188,15 @@ export function createSkillToolDefinitions(
     defineTool({
       name: "litellm_skill_create",
       label: "Create LiteLLM Skill",
-      description: "Create a skill on the LiteLLM proxy Skills Gateway.",
+      description: "Create and enable a skill on the LiteLLM proxy Skill Hub from source metadata.",
       parameters: CreateSkillParams,
       async execute(_toolCallId, params: Static<typeof CreateSkillParams>, _signal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
-        const source = params.sourceJson ? parseJsonObject(params.sourceJson, "sourceJson") : undefined;
-        const inputSchema = params.inputSchemaJson
-          ? parseJsonObject(params.inputSchemaJson, "inputSchemaJson")
-          : undefined;
+        const source = parseJsonObject(params.sourceJson, "sourceJson");
         const result = await createSkill(
           auth.baseUrl,
           auth.apiKey,
-          {
-            name: params.name,
-            description: params.description,
-            source,
-            code: params.code,
-            inputSchema,
-          },
+          { name: params.name, description: params.description, source },
           auth.headers,
           auth.allowInsecureHttp,
         );
