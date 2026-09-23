@@ -42,24 +42,19 @@ export async function listSkills(
     return skillsCache.skills;
   }
 
-  const fetchSkills = async (path: string): Promise<LiteLLMSkill[]> => {
+  const fetchSkills = async (path: string): Promise<LiteLLMSkill[] | undefined> => {
     try {
       const response = await fetch(`${normalizedBaseUrl}${path}`, {
         headers: { ...headers, Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
         signal: AbortSignal.timeout(10_000),
       });
-      return response.ok ? getSkillsFromBody(await response.json()) : [];
+      return response.ok ? getSkillsFromBody(await response.json()) : undefined;
     } catch {
-      return [];
+      return undefined;
     }
   };
 
-  const [skillHub, legacy] = await Promise.all([
-    fetchSkills("/claude-code/marketplace.json"),
-    fetchSkills("/v1/skills"),
-  ]);
-  const skillHubNames = new Set(skillHub.map((skill) => skill.name));
-  const skills = [...skillHub, ...legacy.filter((skill) => !skillHubNames.has(skill.name))];
+  const skills = (await fetchSkills("/claude-code/marketplace.json")) ?? (await fetchSkills("/v1/skills")) ?? [];
   skillsCache = { baseUrl: normalizedBaseUrl, apiKey, fetchedAt: Date.now(), skills };
   return skills;
 }

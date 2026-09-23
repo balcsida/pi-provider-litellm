@@ -46,22 +46,24 @@ describe("listSkills", () => {
     );
   });
 
-  it("includes legacy skills when the LiteLLM Skill Hub marketplace is available", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse(200, { plugins: [{ name: "hub", description: "Hub guidance" }] }))
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          data: [
-            { id: "duplicate", name: "hub", description: "Legacy guidance" },
-            { id: "skill-1", name: "legacy" },
-          ],
-        }),
-      );
+  it("does not query the legacy endpoint when the Skill Hub marketplace is available", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { plugins: [{ name: "hub", description: "Hub guidance" }] }));
 
     await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual([
       { name: "hub", description: "Hub guidance" },
-      { id: "skill-1", name: "legacy" },
     ]);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not query the legacy endpoint when the Skill Hub marketplace is empty", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(200, { plugins: [] }));
+
+    await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("falls back to the LiteLLM Skills Gateway list endpoint", async () => {
@@ -77,6 +79,17 @@ describe("listSkills", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse(500, { error: "skill hub unavailable" }))
+      .mockResolvedValueOnce(jsonResponse(200, { data: [{ name: "legacy" }] }));
+
+    await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual([{ name: "legacy" }]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back when the LiteLLM Skill Hub returns malformed JSON", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{", { status: 200, headers: { "content-type": "application/json" } }))
       .mockResolvedValueOnce(jsonResponse(200, { data: [{ name: "legacy" }] }));
 
     await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual([{ name: "legacy" }]);
@@ -111,7 +124,7 @@ describe("listSkills", () => {
     await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual(skills);
     await expect(listSkills("https://litellm.example.com", "sk-test")).resolves.toEqual(skills);
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 
