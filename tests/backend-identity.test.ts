@@ -132,7 +132,7 @@ describe("resolveBackendIdentity", () => {
     for (const id of ["azure/kimi-k3", "deepseek-v4", "glm-5"]) {
       expect(isOpenAIBackend(id)).toBe(false);
     }
-    expect(LITELLM_DISCOVERY_VERSION).toBe(2);
+    expect(LITELLM_DISCOVERY_VERSION).toBe(3);
   });
 
   it("classifies codex-mini-latest as an OpenAI backend", () => {
