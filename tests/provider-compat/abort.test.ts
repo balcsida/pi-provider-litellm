@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, normalizeContext } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   anthropicSseChunk,
@@ -91,7 +91,7 @@ describe("native provider abort compatibility", () => {
     const signal = AbortSignal.abort();
 
     const message = await provider
-      .streamSimple(model, { messages: [user("Stop")] }, { apiKey: "sk-test", signal })
+      .streamSimple(model, normalizeContext({ messages: [user("Stop")] }), { apiKey: "sk-test", signal })
       .result();
 
     expect(message.stopReason).toBe("aborted");

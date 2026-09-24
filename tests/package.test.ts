@@ -327,9 +327,9 @@ describe("pi package compatibility", () => {
       "@earendil-works/pi-ai": { optional: true },
       "@earendil-works/pi-coding-agent": { optional: true },
     });
-    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.85.1");
-    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.85.1");
-    expect(manifest.devDependencies.typebox).toBe("1.3.30");
+    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^0.86.1");
+    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^0.86.1");
+    expect(manifest.devDependencies.typebox).toBe("1.3.34");
   });
 
   it("documents native Provider model persistence and the extension-only package surface", async () => {
@@ -410,11 +410,7 @@ describe("dependency security overrides", () => {
     expect(Object.values(copiesOf("basic-ftp")).every((version) => version === "6.0.1")).toBe(true);
     expect(Object.values(copiesOf("brace-expansion"))).toEqual(["5.0.9"]);
     expect(Object.values(copiesOf("nanoid"))).toEqual(["3.3.18"]);
-    expect(Object.values(copiesOf("undici"))).toEqual(["8.9.0"]);
-    // Pi 0.84.2 still ships a nested protobufjs 7.x copy.
-    expect(copiesOf("protobufjs")).toEqual({
-      "node_modules/protobufjs": "8.7.1",
-      "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs": "7.6.5",
-    });
+    expect(Object.values(copiesOf("undici"))).toEqual(["8.10.2"]);
+    expect(Object.values(copiesOf("protobufjs"))).toEqual(["8.7.1"]);
   });
 });

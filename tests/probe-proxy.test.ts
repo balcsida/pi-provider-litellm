@@ -922,7 +922,8 @@ describe("live outcomes", () => {
     );
 
     expect(compareLive(oracle, report.models)).toEqual({
-      mismatches: [],
+      // pi-ai 0.86 denies medium in the Fireworks kimi-k3 catalog map; the explicit denial wins.
+      mismatches: ["kimi-k3 chat medium: accepted but not predicted selectable"],
       informational: [
         "o3 chat xhigh: accepted but not offered",
         "deepseek-v4-flash chat xhigh: accepted but not offered",
