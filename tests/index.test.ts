@@ -12,6 +12,7 @@ import {
   InMemoryModelsStore,
   type ModelsStore,
   type ModelsStoreEntry,
+  normalizeContext,
   type Provider,
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
@@ -1873,7 +1874,7 @@ describe("extension startup", () => {
           contextWindow: 4096,
           maxTokens: 1024,
         },
-        { messages: [] },
+        normalizeContext({ messages: [] }),
         { apiKey: "shared-key" },
       ),
     ).not.toThrow();
@@ -1929,7 +1930,7 @@ describe("extension startup", () => {
           contextWindow: 4096,
           maxTokens: 1024,
         },
-        { messages: [] },
+        normalizeContext({ messages: [] }),
         { apiKey: "sk-sso", env: { LITELLM_BASE_URL: "https://oauth.example.com" } },
       ),
     ).not.toThrow();

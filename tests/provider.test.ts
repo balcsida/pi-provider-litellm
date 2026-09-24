@@ -1,13 +1,14 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  Api,
-  Credential,
-  Model,
-  ModelsPublication,
-  ProviderAuth,
-  RefreshModelsContext,
+import {
+  type Api,
+  type Credential,
+  type Model,
+  type ModelsPublication,
+  normalizeContext,
+  type ProviderAuth,
+  type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { discoverModels } from "../src/discover.js";
@@ -402,7 +403,9 @@ describe("createLiteLLMProvider", () => {
     const value = controller({ resolveCredentialRoot: () => "https://gateway.example/team-b" });
 
     expect(value.filterModels?.([model], credential)).toEqual([]);
-    expect(() => value.stream(model, { messages: [] })).toThrow(/stale LiteLLM model root.*network refresh/i);
+    expect(() => value.stream(model, normalizeContext({ messages: [] }))).toThrow(
+      /stale LiteLLM model root.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
@@ -439,7 +442,9 @@ describe("createLiteLLMProvider", () => {
     const value = controller();
     const model = { ...native("placeholder"), baseUrl: "https://litellm.example.com:8443/v1" };
 
-    expect(() => value.stream(model, { messages: [] })).toThrow(/placeholder LiteLLM model host.*network refresh/i);
+    expect(() => value.stream(model, normalizeContext({ messages: [] }))).toThrow(
+      /placeholder LiteLLM model host.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
@@ -452,10 +457,10 @@ describe("createLiteLLMProvider", () => {
       parameters: { type: "object" as const, properties: {} },
     }));
 
-    expect(() => value.stream(staleModel, { messages: [], tools: oversizedTools })).toThrow(
+    expect(() => value.stream(staleModel, normalizeContext({ messages: [], tools: oversizedTools }))).toThrow(
       /stale LiteLLM model root.*network refresh/i,
     );
-    expect(() => value.streamSimple(native("stale"), { messages: [] })).toThrow(
+    expect(() => value.streamSimple(native("stale"), normalizeContext({ messages: [] }))).toThrow(
       /stale LiteLLM model root.*network refresh/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -469,12 +474,12 @@ describe("createLiteLLMProvider", () => {
       resolveCredentialRoot: () => "http://host.docker.internal",
     });
 
-    value.stream(model, { messages: [] });
+    value.stream(model, normalizeContext({ messages: [] }));
 
     expect(model.baseUrl).toBe("http://host.docker.internal/v1");
     expect(apiSpies.completions).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "http://host.docker.internal/v1" }),
-      { messages: [] },
+      normalizeContext({ messages: [] }),
       undefined,
     );
   });
@@ -485,14 +490,10 @@ describe("createLiteLLMProvider", () => {
       const resolveCredentialRoot = vi.fn(() => "https://proxy.example");
       const value = controller({ resolveCredentialRoot });
 
-      value[method](
-        native(method),
-        { messages: [] },
-        {
-          apiKey: "resolved-key",
-          env: { LITELLM_BASE_URL: "https://auth-result.example" },
-        },
-      );
+      value[method](native(method), normalizeContext({ messages: [] }), {
+        apiKey: "resolved-key",
+        env: { LITELLM_BASE_URL: "https://auth-result.example" },
+      });
 
       expect(resolveCredentialRoot).toHaveBeenCalledWith(undefined, "https://auth-result.example", "resolved-key");
     },
@@ -507,7 +508,7 @@ describe("createLiteLLMProvider", () => {
     }));
     const value = controller();
 
-    expect(() => value.stream(model, { messages: [], tools })).toThrow(
+    expect(() => value.stream(model, normalizeContext({ messages: [], tools }))).toThrow(
       "LiteLLM model opaque-gpt-route uses Chat Completions with 129 tools, exceeding the 128-tool cap; route this model via Responses or reduce enabled extensions",
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -523,14 +524,14 @@ describe("createLiteLLMProvider", () => {
     }));
     const value = controller();
 
-    expect(() => value.stream(model, { messages: [], tools })).not.toThrow();
+    expect(() => value.stream(model, normalizeContext({ messages: [], tools }))).not.toThrow();
     expect(apiSpies.completions).toHaveBeenCalledOnce();
   });
 
   it("blocks requests when active credentials have no model host", () => {
     const value = controller({ resolveCredentialRoot: () => undefined });
 
-    expect(() => value.stream(native("missing-root"), { messages: [] })).toThrow(
+    expect(() => value.stream(native("missing-root"), normalizeContext({ messages: [] }))).toThrow(
       /Active credentials do not identify a LiteLLM model host.*network refresh/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -540,10 +541,10 @@ describe("createLiteLLMProvider", () => {
     const model = foreignApiModel("messages");
     const value = controller();
 
-    expect(() => value.stream(model, { messages: [] })).toThrow(
+    expect(() => value.stream(model, normalizeContext({ messages: [] }))).toThrow(
       /declares unsupported protocol "google-generative-ai".*set "api" to one of anthropic-messages, openai-completions, openai-responses/i,
     );
-    expect(() => value.streamSimple(model, { messages: [] })).toThrow(
+    expect(() => value.streamSimple(model, normalizeContext({ messages: [] }))).toThrow(
       /declares unsupported protocol "google-generative-ai".*models\.json/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -553,7 +554,7 @@ describe("createLiteLLMProvider", () => {
   it("blocks malformed active credential roots with guided refresh advice", () => {
     const value = controller({ resolveCredentialRoot: () => "not a URL" });
 
-    expect(() => value.stream(native("invalid-root"), { messages: [] })).toThrow(
+    expect(() => value.stream(native("invalid-root"), normalizeContext({ messages: [] }))).toThrow(
       /Active credentials have an invalid LiteLLM model URL.*network refresh/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -563,7 +564,9 @@ describe("createLiteLLMProvider", () => {
     const model = { ...native("invalid-url"), baseUrl: "not a URL" };
     const value = controller();
 
-    expect(() => value.stream(model, { messages: [] })).toThrow(/invalid LiteLLM model URL.*network refresh/i);
+    expect(() => value.stream(model, normalizeContext({ messages: [] }))).toThrow(
+      /invalid LiteLLM model URL.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
@@ -611,10 +614,10 @@ describe("createLiteLLMProvider", () => {
       { api: "openai-completions", baseUrl: "https://proxy.example/team-a/v1" },
       { api: "anthropic-messages", baseUrl: "https://proxy.example/team-a" },
     ]);
-    expect(() => value.stream(models[0], { messages: [] })).not.toThrow();
+    expect(() => value.stream(models[0], normalizeContext({ messages: [] }))).not.toThrow();
     expect(apiSpies.completions).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "https://proxy.example/team-a/v1" }),
-      { messages: [] },
+      normalizeContext({ messages: [] }),
       undefined,
     );
   });
@@ -624,7 +627,9 @@ describe("createLiteLLMProvider", () => {
     const value = controller({ resolveCredentialRoot: () => "https://gateway.example/team-a" });
 
     expect(value.filterModels?.(models, credential)).toEqual([]);
-    expect(() => value.stream(models[0], { messages: [] })).toThrow(/stale LiteLLM model root.*network refresh/i);
+    expect(() => value.stream(models[0], normalizeContext({ messages: [] }))).toThrow(
+      /stale LiteLLM model root.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
@@ -637,10 +642,10 @@ describe("createLiteLLMProvider", () => {
     const value = controller({ resolveCredentialRoot: () => "https://gateway.example/team-b" });
 
     expect(value.filterModels?.(models, credential)).toEqual([]);
-    expect(() => value.stream(models[0], { messages: [] })).toThrow(
+    expect(() => value.stream(models[0], normalizeContext({ messages: [] }))).toThrow(
       /stale LiteLLM model root https:\/\/gateway\.example\/team-a.*https:\/\/gateway\.example\/team-b.*network refresh/i,
     );
-    expect(() => value.stream(models[1], { messages: [] })).toThrow(
+    expect(() => value.stream(models[1], normalizeContext({ messages: [] }))).toThrow(
       /stale LiteLLM model root https:\/\/gateway\.example\/team-a.*https:\/\/gateway\.example\/team-b.*network refresh/i,
     );
     expect(apiSpies.completions).not.toHaveBeenCalled();
@@ -665,8 +670,8 @@ describe("createLiteLLMProvider", () => {
       resolveCredentialRoot: () => "http://host.docker.internal",
     });
 
-    value.stream(models[0], { messages: [] });
-    value.stream(models[1], { messages: [] });
+    value.stream(models[0], normalizeContext({ messages: [] }));
+    value.stream(models[1], normalizeContext({ messages: [] }));
 
     expect(models.map(({ api, baseUrl }) => ({ api, baseUrl }))).toEqual([
       { api: "anthropic-messages", baseUrl: "http://host.docker.internal" },
@@ -674,12 +679,12 @@ describe("createLiteLLMProvider", () => {
     ]);
     expect(apiSpies.anthropic).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "http://host.docker.internal" }),
-      { messages: [] },
+      normalizeContext({ messages: [] }),
       undefined,
     );
     expect(apiSpies.completions).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "http://host.docker.internal/v1" }),
-      { messages: [] },
+      normalizeContext({ messages: [] }),
       undefined,
     );
   });
@@ -694,7 +699,9 @@ describe("createLiteLLMProvider", () => {
     const value = controller({ resolveCredentialRoot: () => "http://host.docker.internal" });
 
     expect(value.filterModels?.([model], credential)).toEqual([]);
-    expect(() => value.stream(model, { messages: [] })).toThrow(/invalid LiteLLM model URL.*network refresh/i);
+    expect(() => value.stream(model, normalizeContext({ messages: [] }))).toThrow(
+      /invalid LiteLLM model URL.*network refresh/i,
+    );
     expect(apiSpies.completions).not.toHaveBeenCalled();
   });
 
@@ -705,7 +712,7 @@ describe("createLiteLLMProvider", () => {
     ])[0];
     const value = controller();
 
-    value.stream(messagesModel, { messages: [] });
+    value.stream(messagesModel, normalizeContext({ messages: [] }));
 
     expect(messagesModel.baseUrl).toBe("https://proxy.example");
     expect(apiSpies.anthropic).toHaveBeenCalledOnce();
@@ -717,7 +724,7 @@ describe("createLiteLLMProvider", () => {
     apiSpies.completions.mockReturnValueOnce({});
     const value = controller();
 
-    value.stream(native("chat"), { messages: [] });
+    value.stream(native("chat"), normalizeContext({ messages: [] }));
 
     expect(apiSpies.completions).toHaveBeenCalledOnce();
     expect(apiSpies.responses).not.toHaveBeenCalled();
@@ -730,7 +737,7 @@ describe("createLiteLLMProvider", () => {
     ])[0];
     const value = controller();
 
-    value.stream(responseModel, { messages: [] });
+    value.stream(responseModel, normalizeContext({ messages: [] }));
 
     expect(apiSpies.responses).toHaveBeenCalledOnce();
     expect(apiSpies.completions).not.toHaveBeenCalled();
