@@ -692,7 +692,8 @@ function mapFromModelInfoGroup(
       : {}),
     ...(families.size === 1 && family ? { litellmBackendFamily: family } : {}),
     ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),
-  };
+    // closeSerializerPolicy derives compat from `api`, a correlation its return type cannot carry.
+  } as DiscoveredModel;
 }
 
 // An evidence-free fallback entry has no deployment or adapter evidence. Its route name
@@ -926,7 +927,7 @@ function applyWildcardEvidence(
     ...(selected.litellmBackendFamily ? { litellmBackendFamily: selected.litellmBackendFamily } : {}),
     ...(combinedPolicy ? { litellmPolicy: combinedPolicy } : {}),
     ...(selected.litellmResponsesReasoningControl ? { litellmResponsesReasoningControl: true as const } : {}),
-  };
+  } as DiscoveredModel;
 }
 
 function mapFromWildcardExpansion(
