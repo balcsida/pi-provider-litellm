@@ -3778,6 +3778,11 @@ describe("direct OIDC login", () => {
     ["a non-exact issuer", { claims: { iss: `${issuer}/` } }, "OIDC id_token has invalid iss"],
     ["an audience mismatch", { claims: { aud: "other-client" } }, "OIDC id_token has invalid aud"],
     ["an audience array mismatch", { claims: { aud: ["other-client"] } }, "OIDC id_token has invalid aud"],
+    [
+      "an authorized party for another client",
+      { claims: { aud: [clientId, "other-client"], azp: "other-client" } },
+      "OIDC id_token has invalid azp",
+    ],
     ["an expired token", { claims: { exp: Math.floor(Date.now() / 1000) - 60 } }, "OIDC id_token has invalid exp"],
     ["a non-numeric expiry", { claims: { exp: "4102444800" } }, "OIDC id_token has invalid exp"],
     ["a missing subject", { claims: { sub: undefined } }, "OIDC id_token has invalid sub"],

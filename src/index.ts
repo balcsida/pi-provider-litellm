@@ -1083,6 +1083,8 @@ async function requestOidcToken(
   });
   if (claims.iss !== expected.issuer) return invalid("iss");
   if (!(Array.isArray(claims.aud) ? claims.aud : [claims.aud]).includes(expected.clientId)) return invalid("aud");
+  // OIDC Core §3.1.3.7 (errata set 2): azp is optional, even with several audiences, but when present it must name us.
+  if (claims.azp !== undefined && claims.azp !== expected.clientId) return invalid("azp");
   if (typeof claims.sub !== "string" || !claims.sub) return invalid("sub");
   if (expected.subject !== undefined && claims.sub !== expected.subject) return invalid("sub");
   const expiresAt = typeof claims.exp === "number" ? Math.floor(claims.exp * 1_000) : NaN;
