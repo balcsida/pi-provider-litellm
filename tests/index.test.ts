@@ -3881,6 +3881,154 @@ describe("direct OIDC login", () => {
     expect(error?.message).toMatch(new RegExp(`^Invalid LiteLLM ${field.replace(".", "\\.")} setting: `));
     expect(requests).toEqual([]);
   });
+
+  describe("refresh", () => {
+    const now = 1_800_000_000_000;
+    const exp = now / 1000 + 3600;
+    const freshIdToken = (sub = "user-123") => idToken({ iss: issuer, aud: clientId, sub, exp });
+    const oidcCredential = (overrides: Record<string, unknown> = {}) => ({
+      type: "oauth" as const,
+      litellmMcpSession: "existing-mcp-session",
+      access: idToken({ iss: issuer, aud: clientId, sub: "user-123", exp: now / 1000 + 60 }),
+      refresh: "refresh-old",
+      expires: now + 60_000,
+      baseUrl: proxyUrl,
+      flow: "oidc_pkce",
+      issuer,
+      clientId,
+      tokenEndpoint,
+      subject: "user-123",
+      ...overrides,
+    });
+
+    async function refreshOidc(
+      credential: ReturnType<typeof oidcCredential>,
+      respond: () => Response | Promise<Response>,
+      agentDir?: string,
+    ) {
+      process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+      process.env.LITELLM_HEADERS = '{"x-gateway-secret":"gateway-secret"}';
+      const extension = await loadExtension(agentDir ?? (await makeAgentDir()));
+      const pi = createPi();
+      await extension(pi);
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => respond());
+      const result = await pi.providers[0]!.auth.oauth!.refresh(credential, TEST_SIGNAL).then(
+        (refreshed) => ({ refreshed, error: undefined }),
+        (error: Error) => ({ refreshed: undefined, error }),
+      );
+      return { ...result, fetchMock };
+    }
+
+    it("rotates the id_token and refresh token", async () => {
+      const credential = oidcCredential();
+      const fresh = freshIdToken();
+      const { refreshed, error, fetchMock } = await refreshOidc(credential, () =>
+        jsonResponse(200, { id_token: fresh, refresh_token: "refresh-new", token_type: "Bearer", expires_in: 3600 }),
+      );
+
+      expect(error).toBeUndefined();
+      expect(refreshed).toEqual({
+        ...credential,
+        access: fresh,
+        refresh: "refresh-new",
+        expires: exp * 1000 - 300_000,
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [input, init] = fetchMock.mock.calls[0]!;
+      expect(String(input)).toBe(tokenEndpoint);
+      expect(Object.fromEntries(new URLSearchParams(String(init?.body)))).toEqual({
+        grant_type: "refresh_token",
+        refresh_token: "refresh-old",
+        client_id: clientId,
+      });
+      expect(init?.redirect).toBe("manual");
+      expect(new Headers(init?.headers).get("x-gateway-secret")).toBeNull();
+    });
+
+    it("keeps the refresh token when the IdP does not rotate it", async () => {
+      const credential = oidcCredential();
+      const fresh = freshIdToken();
+      const { refreshed } = await refreshOidc(credential, () => jsonResponse(200, { id_token: fresh }));
+
+      expect(refreshed).toEqual({ ...credential, access: fresh, expires: exp * 1000 - 300_000 });
+    });
+
+    it.each<[string, () => Response, string]>([
+      ["a changed subject", () => jsonResponse(200, { id_token: freshIdToken("user-456") }), "invalid sub"],
+      [
+        "a missing id_token",
+        () => jsonResponse(200, { access_token: "idp-access-token", token_type: "Bearer" }),
+        "no valid id_token",
+      ],
+      [
+        "an id_token for another client",
+        () => jsonResponse(200, { id_token: idToken({ iss: issuer, aud: "other-client", sub: "user-123", exp }) }),
+        "invalid aud",
+      ],
+      [
+        "invalid_grant",
+        () => jsonResponse(400, { error: "invalid_grant", error_description: "refresh-old secret-description" }),
+        "OIDC token exchange rejected (invalid_grant)",
+      ],
+      ["a redirect", () => new Response(null, { status: 302, headers: { location: "/next" } }), "(HTTP 302)"],
+    ])("requires a new login after %s", async (_name, respond, message) => {
+      const { refreshed, error } = await refreshOidc(oidcCredential(), respond);
+
+      expect(refreshed).toBeUndefined();
+      expect(error?.message).toContain(message);
+      expect(error?.message).toMatch(/; run \/login litellm again$/);
+      expect(error?.message).not.toContain("refresh-old");
+      expect(error?.message).not.toContain("secret-description");
+    });
+
+    it.each([429, 503, "network"])("keeps the credential before expiry after %s", async (failure) => {
+      const credential = oidcCredential();
+      const { refreshed } = await refreshOidc(credential, () => {
+        if (failure === "network") throw new TypeError("network unavailable");
+        return jsonResponse(failure as number, {});
+      });
+
+      expect(refreshed).toEqual(credential);
+    });
+
+    it("requires a new login after a 503 once the id_token has expired", async () => {
+      const { error } = await refreshOidc(oidcCredential({ expires: now }), () => jsonResponse(503, {}));
+
+      expect(error?.message).toBe("OIDC token exchange failed (HTTP 503); run /login litellm again");
+    });
+
+    it.each<Record<string, unknown>>([
+      { refresh: "" },
+      { tokenEndpoint: "http://idp.example.com/token" },
+      { tokenEndpoint: "https://user@idp.example.com/token" },
+      { clientId: "" },
+      { issuer: undefined },
+      { subject: "" },
+    ])("requires a new login without contacting the IdP when stored %j", async (override) => {
+      const { error, fetchMock } = await refreshOidc(oidcCredential(override), () => jsonResponse(200, {}));
+
+      expect(error?.message).toMatch(/; run \/login litellm again$/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("never executes a refresh token that starts with !", async () => {
+      const agentDir = await makeAgentDir();
+      const helperPath = await writeHelper(agentDir, ["executed-token"]);
+      const credential = oidcCredential({ refresh: `!${helperPath}` });
+      const fresh = freshIdToken();
+
+      const refreshed = await refreshOidc(credential, () => jsonResponse(200, { id_token: fresh }), agentDir);
+      const rejected = await refreshOidc(credential, () => jsonResponse(400, { error: "invalid_grant" }), agentDir);
+
+      expect(refreshed.refreshed).toMatchObject({ access: fresh, refresh: `!${helperPath}` });
+      expect(new URLSearchParams(String(refreshed.fetchMock.mock.calls[0]?.[1]?.body)).get("refresh_token")).toBe(
+        `!${helperPath}`,
+      );
+      expect(rejected.error?.message).toBe("OIDC token exchange rejected (invalid_grant); run /login litellm again");
+      expect(await readHelperCount(agentDir)).toBe(0);
+    });
+  });
 });
 
 describe("login base URL reuse", () => {

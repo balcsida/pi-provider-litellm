@@ -1339,6 +1339,24 @@ async function loginOAuth(interaction: AuthInteraction, definition: ProviderDefi
 // still-failing token endpoint (e.g. during an outage or rate limit).
 const pkceTransientRefreshBackoff = new Map<string, number>();
 
+async function refreshWithBackoff(
+  credentials: OAuthCredentials,
+  request: () => Promise<PkceTokenResult | OidcTokenResult>,
+): Promise<OAuthCredentials> {
+  if (Date.now() < credentials.expires) {
+    const backoffUntil = pkceTransientRefreshBackoff.get(credentials.refresh);
+    if (backoffUntil !== undefined && Date.now() < backoffUntil) return credentials;
+  }
+  const result = await request();
+  if (!result.ok && result.transient && Date.now() < credentials.expires) {
+    pkceTransientRefreshBackoff.set(credentials.refresh, Date.now() + PKCE_TRANSIENT_REFRESH_BACKOFF_MS);
+    return credentials;
+  }
+  pkceTransientRefreshBackoff.delete(credentials.refresh);
+  if (!result.ok) throw new Error(`${result.message}; run /login litellm again`);
+  return { ...credentials, ...result.token };
+}
+
 async function refreshLiteLLM(
   credentials: OAuthCredentials,
   definition: ProviderDefinition,
@@ -1346,46 +1364,61 @@ async function refreshLiteLLM(
 ): Promise<OAuthCredentials> {
   signal?.throwIfAborted();
   if (credentials.flow === PKCE_FLOW) {
+    const { baseUrl, clientId } = credentials;
     if (
-      typeof credentials.baseUrl !== "string" ||
-      !isAuthToken(credentials.clientId) ||
+      typeof baseUrl !== "string" ||
+      !isAuthToken(clientId) ||
       !isAuthToken(credentials.access) ||
       !isAuthToken(credentials.refresh) ||
       !Number.isSafeInteger(credentials.expires)
     ) {
       throw new Error("Invalid LiteLLM PKCE credential; run /login litellm again");
     }
-    if (Date.now() < credentials.expires) {
-      const backoffUntil = pkceTransientRefreshBackoff.get(credentials.refresh);
-      if (backoffUntil !== undefined && Date.now() < backoffUntil) return credentials;
+    return refreshWithBackoff(credentials, () => {
+      const root = requireCredentialRoot(normalizeBaseUrl(baseUrl, definition.allowInsecureHttp), definition.name);
+      canonicalIssuer(root);
+      const issuer = new URL(root);
+      const tokenEndpoint = sameOriginUrl(credentials.tokenEndpoint, issuer, "token endpoint");
+      const resource = sameOriginUrl(credentials.resource, issuer, "resource");
+      return requestPkceToken(
+        tokenEndpoint,
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: credentials.refresh,
+          client_id: clientId,
+          resource,
+        }),
+        signal,
+        resolveHeaders(definition),
+        credentials.refresh,
+      );
+    });
+  }
+  // Must precede the `!command` fallthrough below: an IdP refresh token is never executed.
+  if (credentials.flow === OIDC_FLOW) {
+    const { refresh, issuer, clientId, subject } = credentials;
+    const tokenEndpoint = httpsUrl(credentials.tokenEndpoint, { allowQuery: true });
+    if (!isAuthToken(refresh))
+      throw new Error("LiteLLM OIDC credential has no refresh token; run /login litellm again");
+    if (
+      !tokenEndpoint ||
+      typeof issuer !== "string" ||
+      !isAuthToken(clientId) ||
+      typeof subject !== "string" ||
+      !subject ||
+      !Number.isSafeInteger(credentials.expires)
+    ) {
+      throw new Error("Invalid LiteLLM OIDC credential; run /login litellm again");
     }
-    const baseUrl = requireCredentialRoot(
-      normalizeBaseUrl(credentials.baseUrl, definition.allowInsecureHttp),
-      definition.name,
+    return refreshWithBackoff(credentials, () =>
+      requestOidcToken(
+        tokenEndpoint,
+        new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: clientId }),
+        signal,
+        { issuer, clientId, subject },
+        refresh,
+      ),
     );
-    canonicalIssuer(baseUrl);
-    const issuer = new URL(baseUrl);
-    const tokenEndpoint = sameOriginUrl(credentials.tokenEndpoint, issuer, "token endpoint");
-    const resource = sameOriginUrl(credentials.resource, issuer, "resource");
-    const result = await requestPkceToken(
-      tokenEndpoint,
-      new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: credentials.refresh,
-        client_id: credentials.clientId,
-        resource,
-      }),
-      signal,
-      resolveHeaders(definition),
-      credentials.refresh,
-    );
-    if (!result.ok && result.transient && Date.now() < credentials.expires) {
-      pkceTransientRefreshBackoff.set(credentials.refresh, Date.now() + PKCE_TRANSIENT_REFRESH_BACKOFF_MS);
-      return credentials;
-    }
-    pkceTransientRefreshBackoff.delete(credentials.refresh);
-    if (!result.ok) throw new Error(`${result.message}; run /login litellm again`);
-    return { ...credentials, ...result.token };
   }
   if (!credentials.refresh.startsWith("!")) {
     if (credentials.expires < PERMANENT_TOKEN_EXPIRES_AT) {
