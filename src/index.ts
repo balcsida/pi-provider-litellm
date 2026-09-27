@@ -61,6 +61,9 @@ const CLI_SSO_EXPIRES_IN_SECONDS = 600;
 const CLI_AUTH_DISCOVERY_PATH = "/.well-known/litellm-cli-auth";
 const PKCE_CALLBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const PKCE_FLOW = "litellm_cli_pkce";
+// Persisted in auth.json; never rename.
+const OIDC_FLOW = "oidc_pkce";
+const OIDC_DISCOVERY_PATH = "/.well-known/openid-configuration";
 const DEFAULT_CLI_JWT_EXPIRATION_HOURS = 24;
 const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const PERMANENT_TOKEN_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
@@ -74,6 +77,7 @@ type RawProviderSettings = {
   headers?: unknown;
   enabled?: unknown;
   allowInsecureHttp?: unknown;
+  oidc?: unknown;
 };
 
 type McpRuntimeAuth = LiteLLMRuntimeAuth & { mcpPauseSource?: string };
@@ -88,6 +92,8 @@ type ProviderDefinition = {
   useGcloudTokenAuth: boolean;
   enableOAuth: boolean;
   allowInsecureHttp: boolean;
+  /** Raw `oidc` setting, validated at login so a bad value never breaks startup. */
+  oidc?: unknown;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -507,6 +513,7 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
     useGcloudTokenAuth: isDefault,
     enableOAuth: isDefault,
     allowInsecureHttp: raw?.allowInsecureHttp === true,
+    oidc: isDefault ? raw?.oidc : undefined,
   });
 
   const definitions = [makeDefinition(PROVIDER_NAME, defaultSettings, true)];
@@ -644,12 +651,17 @@ function isAuthToken(value: unknown): value is string {
   return typeof value === "string" && /^[\x21-\x7e]+$/.test(value);
 }
 
+/** The OAuth `error` code when it is a plain code; descriptions and other fields are never echoed. */
+function oauthErrorCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-z_]{1,64}$/.test(value) ? value : undefined;
+}
+
 async function readAuthJson(response: Response, signal: AbortSignal | undefined, stage: string): Promise<unknown> {
   try {
     return await response.json();
   } catch {
     if (signal?.aborted) throw signal.reason;
-    throw new Error(`LiteLLM CLI auth ${stage} returned invalid JSON`);
+    throw new Error(`${stage} returned invalid JSON`);
   }
 }
 
@@ -666,7 +678,7 @@ async function discoverPkce(
   });
   if (response.status === 404) return undefined;
   if (!response.ok) throw new Error(`LiteLLM CLI auth discovery failed (HTTP ${response.status})`);
-  const data = await readAuthJson(response, signal, "discovery");
+  const data = await readAuthJson(response, signal, "LiteLLM CLI auth discovery");
   if (!isPlainObject(data) || data.contract_version !== 1)
     throw new Error("LiteLLM CLI auth discovery has unsupported contract version");
   if (!Array.isArray(data.code_challenge_methods_supported) || !data.code_challenge_methods_supported.includes("S256"))
@@ -723,13 +735,13 @@ async function postTokenForm(
   }
   signal?.throwIfAborted();
   if (!response.ok) {
+    const code = oauthErrorCode(data?.error);
     return {
       ok: false,
       transient: response.status === 429 || response.status >= 500,
-      message:
-        data?.error === "invalid_grant"
-          ? `${label} token exchange rejected (invalid_grant)`
-          : `${label} token exchange failed (HTTP ${response.status})`,
+      message: code
+        ? `${label} token exchange rejected (${code})`
+        : `${label} token exchange failed (HTTP ${response.status})`,
     };
   }
   return { ok: true, data: data ?? {} };
@@ -771,8 +783,8 @@ async function requestPkceToken(
   };
 }
 
-function constantTimeEqual(value: string | null, expected: string): boolean {
-  if (value === null) return false;
+function constantTimeEqual(value: unknown, expected: string): boolean {
+  if (typeof value !== "string") return false;
   const left = Buffer.from(value);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
@@ -787,6 +799,7 @@ type LoopbackCallback = { redirectUri: string; state: string; code: () => Promis
 async function withLoopbackCallback<T>(
   signal: AbortSignal | undefined,
   label: string,
+  ports: readonly number[],
   run: (callback: LoopbackCallback) => Promise<T>,
 ): Promise<T> {
   const state = randomBytes(32).toString("base64url");
@@ -816,7 +829,8 @@ async function withLoopbackCallback<T>(
     const error = url.searchParams.get("error");
     if (error) {
       response.writeHead(400).end("OAuth login failed");
-      settleCallback?.({ error: new Error(`${label} login was denied`) });
+      const code = oauthErrorCode(error);
+      settleCallback?.({ error: new Error(`${label} login was denied${code ? ` (${code})` : ""}`) });
       return;
     }
     const code = url.searchParams.get("code");
@@ -832,14 +846,23 @@ async function withLoopbackCallback<T>(
     settleCallback?.({ code });
   });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => reject(error);
-      server.once("error", onError);
-      server.listen(0, "127.0.0.1", () => {
-        server.off("error", onError);
-        resolve();
-      });
-    });
+    // Try each pre-registered port in order; without any, the OS assigns one (RFC 8252 §7.3).
+    const candidates = ports.length > 0 ? ports : [0];
+    for (const [index, port] of candidates.entries()) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (error: Error) => reject(error);
+          server.once("error", onError);
+          server.listen(port, "127.0.0.1", () => {
+            server.off("error", onError);
+            resolve();
+          });
+        });
+        break;
+      } catch (error) {
+        if (index === candidates.length - 1) throw error;
+      }
+    }
     const address = server.address();
     if (!address || typeof address === "string") throw new Error(`${label} callback failed to start`);
     const code = () =>
@@ -876,6 +899,7 @@ async function loginPkce(
   return withLoopbackCallback(
     interaction.signal,
     "LiteLLM PKCE",
+    [],
     async ({ redirectUri, state, code: callbackCode }) => {
       const registrationResponse = await fetch(discovery.registrationEndpoint, {
         method: "POST",
@@ -892,7 +916,11 @@ async function loginPkce(
       });
       if (!registrationResponse.ok)
         throw new Error(`LiteLLM PKCE client registration failed (HTTP ${registrationResponse.status})`);
-      const registration = await readAuthJson(registrationResponse, interaction.signal, "registration");
+      const registration = await readAuthJson(
+        registrationResponse,
+        interaction.signal,
+        "LiteLLM CLI auth registration",
+      );
       if (
         !isPlainObject(registration) ||
         !isAuthToken(registration.client_id) ||
@@ -944,6 +972,184 @@ async function loginPkce(
         resource: discovery.resource,
         userId: result.token.userId,
         teamId: result.token.teamId,
+      };
+      return { ...credential, type: "oauth" };
+    },
+  );
+}
+
+type OidcConfig = { issuer: string; clientId: string; scope: string; redirectPorts: number[] };
+
+type OidcDiscovery = { issuer: string; authorizationEndpoint: string; tokenEndpoint: string };
+
+type OidcCredentials = OAuthCredentials & {
+  flow: typeof OIDC_FLOW;
+  baseUrl: string;
+  issuer: string;
+  clientId: string;
+  tokenEndpoint: string;
+  subject: string;
+};
+
+type OidcTokenResult =
+  | { ok: true; token: { access: string; refresh: string; expires: number; subject: string } }
+  | TokenFailure;
+
+/** An https URL without credentials or fragment, returned verbatim. */
+function httpsUrl(value: unknown, { allowQuery }: { allowQuery: boolean }): string | undefined {
+  if (typeof value !== "string" || value.includes("#") || (!allowQuery && value.includes("?"))) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseOidcConfig(raw: unknown): OidcConfig {
+  const invalid = (field: string, expected: string) =>
+    new Error(`Invalid LiteLLM ${field} setting: expected ${expected}`);
+  if (!isPlainObject(raw)) throw invalid("oidc", "an object");
+  const issuer = httpsUrl(raw.issuer, { allowQuery: false });
+  if (!issuer) throw invalid("oidc.issuer", "an https URL without credentials, query, or fragment");
+  if (!isAuthToken(raw.clientId)) throw invalid("oidc.clientId", "a non-empty string without spaces");
+  const scope = raw.scope ?? "openid";
+  if (typeof scope !== "string" || !scope.split(" ").includes("openid"))
+    throw invalid("oidc.scope", 'a space-separated scope list that includes "openid"');
+  const redirectPorts = raw.redirectPorts ?? [];
+  if (
+    !Array.isArray(redirectPorts) ||
+    !redirectPorts.every((port) => Number.isInteger(port) && port >= 1 && port <= 65535)
+  )
+    throw invalid("oidc.redirectPorts", "an array of port numbers from 1 to 65535");
+  return { issuer, clientId: raw.clientId, scope, redirectPorts };
+}
+
+// IdP requests never carry the proxy's headers: LITELLM_HEADERS and provider headers can hold gateway credentials.
+async function discoverOidc(issuer: string, signal?: AbortSignal): Promise<OidcDiscovery> {
+  const withoutSlash = (value: string) => value.replace(/\/+$/, "");
+  const response = await fetch(`${withoutSlash(issuer)}${OIDC_DISCOVERY_PATH}`, {
+    headers: authRequestHeaders(),
+    redirect: "manual",
+    signal: boundedLoginSignal(signal),
+  });
+  if (!response.ok) throw new Error(`OIDC discovery failed (HTTP ${response.status})`);
+  const data = await readAuthJson(response, signal, "OIDC discovery");
+  if (!isPlainObject(data) || typeof data.issuer !== "string" || withoutSlash(data.issuer) !== withoutSlash(issuer))
+    throw new Error("OIDC discovery issuer does not match the configured issuer");
+  const methods = data.code_challenge_methods_supported;
+  if (methods !== undefined && (!Array.isArray(methods) || !methods.includes("S256")))
+    throw new Error("OIDC discovery does not support S256");
+  const authorizationEndpoint = httpsUrl(data.authorization_endpoint, { allowQuery: true });
+  if (!authorizationEndpoint) throw new Error("OIDC discovery has invalid authorization_endpoint");
+  const tokenEndpoint = httpsUrl(data.token_endpoint, { allowQuery: true });
+  if (!tokenEndpoint) throw new Error("OIDC discovery has invalid token_endpoint");
+  return { issuer: data.issuer, authorizationEndpoint, tokenEndpoint };
+}
+
+function jwtClaims(token: string): Record<string, unknown> | undefined {
+  const [, payload, ...rest] = token.split(".");
+  if (rest.length !== 1 || !payload || !/^[\w-]+$/.test(payload)) return undefined;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return isPlainObject(claims) ? claims : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Exchanges a grant for an id_token and checks its claims (OIDC Core §3.1.3.7). The signature is
+ * deliberately not verified here: the proxy verifies it against the IdP's JWKS before honouring the
+ * bearer, so these checks only stop Pi from storing a token meant for another client or login.
+ */
+async function requestOidcToken(
+  endpoint: string,
+  form: URLSearchParams,
+  signal: AbortSignal | undefined,
+  expected: { issuer: string; clientId: string; nonce?: string; subject?: string },
+  existingRefreshToken = "",
+): Promise<OidcTokenResult> {
+  const response = await postTokenForm(endpoint, form, signal, undefined, "OIDC");
+  if (!response.ok) return response;
+  const { id_token: idToken, refresh_token: refreshToken } = response.data;
+  const claims = isAuthToken(idToken) ? jwtClaims(idToken) : undefined;
+  if (!isAuthToken(idToken) || !claims)
+    return { ok: false, transient: false, message: "OIDC token response has no valid id_token" };
+  const invalid = (claim: string): TokenFailure => ({
+    ok: false,
+    transient: false,
+    message: `OIDC id_token has invalid ${claim}`,
+  });
+  if (claims.iss !== expected.issuer) return invalid("iss");
+  if (!(Array.isArray(claims.aud) ? claims.aud : [claims.aud]).includes(expected.clientId)) return invalid("aud");
+  if (typeof claims.sub !== "string" || !claims.sub) return invalid("sub");
+  if (expected.subject !== undefined && claims.sub !== expected.subject) return invalid("sub");
+  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp) || claims.exp * 1_000 <= Date.now())
+    return invalid("exp");
+  if (expected.nonce !== undefined && !constantTimeEqual(claims.nonce, expected.nonce)) return invalid("nonce");
+  return {
+    ok: true,
+    token: {
+      access: idToken,
+      // The refresh token is optional, and an IdP that does not rotate it keeps the existing one valid.
+      refresh: isAuthToken(refreshToken) ? refreshToken : existingRefreshToken,
+      expires: tokenExpiresAt(idToken),
+      subject: claims.sub,
+    },
+  };
+}
+
+async function loginOidc(interaction: AuthInteraction, baseUrl: string, config: OidcConfig): Promise<OAuthCredential> {
+  const discovery = await discoverOidc(config.issuer, interaction.signal);
+  const verifier = randomBytes(32).toString("base64url");
+  const nonce = randomBytes(32).toString("base64url");
+  return withLoopbackCallback(
+    interaction.signal,
+    "OIDC",
+    config.redirectPorts,
+    async ({ redirectUri, state, code }) => {
+      const authorizationUrl = new URL(discovery.authorizationEndpoint);
+      for (const [key, value] of Object.entries({
+        response_type: "code",
+        client_id: config.clientId,
+        redirect_uri: redirectUri,
+        scope: config.scope,
+        state,
+        nonce,
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256",
+      }))
+        authorizationUrl.searchParams.set(key, value);
+      interaction.notify({
+        type: "auth_url",
+        url: authorizationUrl.toString(),
+        instructions: "Open this URL in a browser to sign in with your identity provider.",
+      });
+      const result = await requestOidcToken(
+        discovery.tokenEndpoint,
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          code: await code(),
+          redirect_uri: redirectUri,
+          client_id: config.clientId,
+          code_verifier: verifier,
+        }),
+        interaction.signal,
+        { issuer: discovery.issuer, clientId: config.clientId, nonce },
+      );
+      if (!result.ok) throw new Error(result.message);
+      const credential: OidcCredentials = {
+        type: "oauth",
+        access: result.token.access,
+        refresh: result.token.refresh,
+        expires: result.token.expires,
+        baseUrl,
+        flow: OIDC_FLOW,
+        issuer: discovery.issuer,
+        clientId: config.clientId,
+        tokenEndpoint: discovery.tokenEndpoint,
+        subject: result.token.subject,
       };
       return { ...credential, type: "oauth" };
     },
@@ -1099,8 +1305,12 @@ async function loginWithPastedToken(
 }
 
 async function loginOAuth(interaction: AuthInteraction, definition: ProviderDefinition): Promise<OAuthCredential> {
-  const headers = resolveHeaders(definition);
+  const oidc = definition.oidc === undefined ? undefined : parseOidcConfig(definition.oidc);
   const baseUrl = await promptBaseUrl(interaction, definition);
+  // Direct OIDC sends nothing to the proxy. The IdP is never derived from it either: the proxy's own OAuth
+  // metadata describes LiteLLM's authorization server, not the IdP that signs the JWTs it accepts.
+  if (oidc) return loginOidc(interaction, baseUrl, oidc);
+  const headers = resolveHeaders(definition);
   const discovery = await discoverPkce(baseUrl, interaction.signal, headers);
   if (discovery) return loginPkce(interaction, baseUrl, discovery, headers);
   const cliSso = await startCliSso(baseUrl, interaction.signal, headers);

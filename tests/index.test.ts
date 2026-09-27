@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -3551,6 +3552,334 @@ describe("extension startup", () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toThrow("SSO token is required");
+  });
+});
+
+describe("direct OIDC login", () => {
+  const issuer = "https://idp.example.com";
+  const clientId = "example-client-id";
+  const discoveryUrl = `${issuer}/.well-known/openid-configuration`;
+  const tokenEndpoint = `${issuer}/token`;
+  const proxyUrl = "https://proxy.example.com";
+
+  type OidcLoginOptions = {
+    oidc?: unknown;
+    providerSettings?: Record<string, unknown>;
+    discovery?: Record<string, unknown>;
+    discoveryResponse?: () => Response;
+    claims?: Record<string, unknown>;
+    tokenBody?: Record<string, unknown>;
+    token?: () => Response;
+    callbackQuery?: (state: string) => string;
+  };
+
+  function idToken(claims: Record<string, unknown>): string {
+    const encode = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+    return `${encode({ alg: "RS256", typ: "JWT" })}.${encode(claims)}.sig`;
+  }
+
+  async function runOidcLogin(options: OidcLoginOptions = {}) {
+    const agentDir = await makeAgentDir();
+    const oidc = "oidc" in options ? options.oidc : { issuer, clientId };
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { providers: { litellm: { ...options.providerSettings, oidc } } } }),
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+    process.env.LITELLM_HEADERS = '{"x-gateway-secret":"gateway-secret"}';
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const requests: Array<{ url: string; method: string; redirect?: string; headers: Headers; body?: string }> = [];
+    const issued: string[] = [];
+    let authorizationUrl: URL | undefined;
+    let callbackResponse: Promise<Response> | undefined;
+    const nativeFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      requests.push({
+        url,
+        method: String(init?.method ?? "GET"),
+        redirect: init?.redirect,
+        headers: new Headers(init?.headers),
+        body: init?.body === undefined ? undefined : String(init.body),
+      });
+      if (url === discoveryUrl)
+        return (
+          options.discoveryResponse?.() ??
+          jsonResponse(200, {
+            issuer,
+            authorization_endpoint: `${issuer}/authorize?tenant=alpha&client_id=wrong`,
+            token_endpoint: tokenEndpoint,
+            code_challenge_methods_supported: ["S256"],
+            ...options.discovery,
+          })
+        );
+      if (url === tokenEndpoint) {
+        if (options.token) return options.token();
+        const token = idToken({
+          iss: issuer,
+          aud: clientId,
+          sub: "user-123",
+          exp: Math.floor(Date.now() / 1000) + 3600,
+          nonce: authorizationUrl?.searchParams.get("nonce"),
+          ...options.claims,
+        });
+        issued.push(token);
+        return jsonResponse(200, {
+          id_token: token,
+          refresh_token: "refresh-new",
+          access_token: "idp-access-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+          ...options.tokenBody,
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const login = pi.providers[0]!.auth.oauth!.login(
+      interaction(
+        async (prompt) => ("placeholder" in prompt && prompt.placeholder ? proxyUrl : ""),
+        (event) => {
+          if (event.type !== "auth_url") return;
+          authorizationUrl = new URL(event.url);
+          const state = authorizationUrl.searchParams.get("state")!;
+          const query = options.callbackQuery?.(state) ?? `code=authorization-code&state=${state}`;
+          callbackResponse = nativeFetch(`${authorizationUrl.searchParams.get("redirect_uri")}?${query}`);
+        },
+        new AbortController().signal,
+      ),
+    );
+    const outcome = await login.then(
+      (credential) => ({ credential, error: undefined }),
+      (error: Error) => ({ credential: undefined, error }),
+    );
+    return { ...outcome, pi, requests, issued, authorizationUrl, callbackResponse };
+  }
+
+  async function listenOnFreePort(): Promise<Server> {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return server;
+  }
+
+  function portOf(server: Server): number {
+    return (server.address() as AddressInfo).port;
+  }
+
+  it("signs in with the identity provider and stores its id_token", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const { credential, error, pi, requests, issued, authorizationUrl, callbackResponse } = await runOidcLogin({
+      claims: { exp },
+    });
+
+    expect(error).toBeUndefined();
+    // Only the IdP is contacted, without redirects: no CLI-auth discovery, /sso/* or /key/generate on the proxy.
+    expect(requests.map(({ url, method, redirect }) => ({ url, method, redirect }))).toEqual([
+      { url: discoveryUrl, method: "GET", redirect: "manual" },
+      { url: tokenEndpoint, method: "POST", redirect: "manual" },
+    ]);
+    for (const { headers } of requests) {
+      expect(headers.get("x-gateway-secret")).toBeNull();
+      expect(headers.get("authorization")).toBeNull();
+    }
+    const redirectUri = authorizationUrl!.searchParams.get("redirect_uri")!;
+    expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+    expect(`${authorizationUrl!.origin}${authorizationUrl!.pathname}`).toBe(`${issuer}/authorize`);
+    expect(Object.fromEntries(authorizationUrl!.searchParams)).toEqual({
+      tenant: "alpha",
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: expect.stringMatching(/^[\w-]{43}$/),
+      nonce: expect.stringMatching(/^[\w-]{43}$/),
+      code_challenge: expect.stringMatching(/^[\w-]{43}$/),
+      code_challenge_method: "S256",
+    });
+    expect(authorizationUrl!.searchParams.getAll("client_id")).toEqual([clientId]);
+    const tokenForm = Object.fromEntries(new URLSearchParams(requests[1]!.body));
+    // No client_secret: the exact form proves a public client.
+    expect(tokenForm).toEqual({
+      grant_type: "authorization_code",
+      code: "authorization-code",
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: expect.stringMatching(/^[\w-]{43}$/),
+    });
+    expect(createHash("sha256").update(tokenForm.code_verifier!).digest("base64url")).toBe(
+      authorizationUrl!.searchParams.get("code_challenge"),
+    );
+    expect((await callbackResponse)?.status).toBe(200);
+    expect((await callbackResponse)?.headers.get("cache-control")).toBe("no-store");
+    expect(credential).toEqual({
+      type: "oauth",
+      access: issued[0],
+      refresh: "refresh-new",
+      expires: exp * 1000 - 5 * 60 * 1000,
+      baseUrl: proxyUrl,
+      flow: "oidc_pkce",
+      issuer,
+      clientId,
+      tokenEndpoint,
+      subject: "user-123",
+      litellmMcpSession: expect.any(String),
+    });
+    await expect(pi.providers[0]!.auth.oauth!.toAuth(credential!)).resolves.toMatchObject({ apiKey: issued[0] });
+  }, 15_000);
+
+  it("keeps provider headers off IdP requests", async () => {
+    const { error, requests } = await runOidcLogin({
+      providerSettings: { headers: { "x-provider-secret": "provider-secret" } },
+    });
+
+    expect(error).toBeUndefined();
+    expect(requests).toHaveLength(2);
+    for (const { headers } of requests) expect(headers.get("x-provider-secret")).toBeNull();
+  });
+
+  it("stores an empty refresh token when the IdP issues none", async () => {
+    const { credential, error } = await runOidcLogin({ tokenBody: { refresh_token: undefined } });
+
+    expect(error).toBeUndefined();
+    expect(credential).toMatchObject({ flow: "oidc_pkce", refresh: "" });
+  });
+
+  it("uses the first free configured redirect port", async () => {
+    const occupied = await listenOnFreePort();
+    const free = await listenOnFreePort();
+    const freePort = portOf(free);
+    await new Promise((resolve) => free.close(resolve));
+    try {
+      const { error, authorizationUrl } = await runOidcLogin({
+        oidc: { issuer, clientId, redirectPorts: [portOf(occupied), freePort] },
+      });
+
+      expect(error).toBeUndefined();
+      expect(authorizationUrl?.searchParams.get("redirect_uri")).toBe(`http://127.0.0.1:${freePort}/callback`);
+    } finally {
+      await new Promise((resolve) => occupied.close(resolve));
+    }
+  });
+
+  it("accepts an audience array that contains the client ID and a configured scope", async () => {
+    const { error, authorizationUrl } = await runOidcLogin({
+      oidc: { issuer: `${issuer}/`, clientId, scope: "openid offline_access" },
+      claims: { aud: ["other-client", clientId] },
+    });
+
+    expect(error).toBeUndefined();
+    expect(authorizationUrl?.searchParams.get("scope")).toBe("openid offline_access");
+  });
+
+  it.each<[string, OidcLoginOptions, string]>([
+    ["a wrong nonce", { claims: { nonce: "other-nonce" } }, "OIDC id_token has invalid nonce"],
+    ["a wrong issuer", { claims: { iss: "https://other.example.com" } }, "OIDC id_token has invalid iss"],
+    ["a non-exact issuer", { claims: { iss: `${issuer}/` } }, "OIDC id_token has invalid iss"],
+    ["an audience mismatch", { claims: { aud: "other-client" } }, "OIDC id_token has invalid aud"],
+    ["an audience array mismatch", { claims: { aud: ["other-client"] } }, "OIDC id_token has invalid aud"],
+    ["an expired token", { claims: { exp: Math.floor(Date.now() / 1000) - 60 } }, "OIDC id_token has invalid exp"],
+    ["a non-numeric expiry", { claims: { exp: "4102444800" } }, "OIDC id_token has invalid exp"],
+    ["a missing subject", { claims: { sub: undefined } }, "OIDC id_token has invalid sub"],
+    ["an empty subject", { claims: { sub: "" } }, "OIDC id_token has invalid sub"],
+    ["a missing id_token", { tokenBody: { id_token: undefined } }, "OIDC token response has no valid id_token"],
+    ["a two-segment id_token", { tokenBody: { id_token: "e30.e30" } }, "OIDC token response has no valid id_token"],
+    [
+      "a non-JSON payload",
+      { tokenBody: { id_token: "e30.bm90LWpzb24.sig" } },
+      "OIDC token response has no valid id_token",
+    ],
+    ["a non-object payload", { tokenBody: { id_token: "e30.MTIz.sig" } }, "OIDC token response has no valid id_token"],
+    [
+      "a non-base64url payload",
+      { tokenBody: { id_token: "e30.e30+.sig" } },
+      "OIDC token response has no valid id_token",
+    ],
+    [
+      "a discovery issuer mismatch",
+      { discovery: { issuer: "https://other.example.com" } },
+      "OIDC discovery issuer does not match the configured issuer",
+    ],
+    [
+      "a non-https authorization endpoint",
+      { discovery: { authorization_endpoint: "http://idp.example.com/authorize" } },
+      "OIDC discovery has invalid authorization_endpoint",
+    ],
+    [
+      "a non-https token endpoint",
+      { discovery: { token_endpoint: "http://idp.example.com/token" } },
+      "OIDC discovery has invalid token_endpoint",
+    ],
+    [
+      "no S256 support",
+      { discovery: { code_challenge_methods_supported: ["plain"] } },
+      "OIDC discovery does not support S256",
+    ],
+    [
+      "a discovery redirect",
+      {
+        discoveryResponse: () =>
+          new Response(null, { status: 302, headers: { location: "https://other.example.com/.well-known" } }),
+      },
+      "OIDC discovery failed (HTTP 302)",
+    ],
+    [
+      "a token redirect",
+      { token: () => new Response(null, { status: 302, headers: { location: "https://other.example.com/token" } }) },
+      "OIDC token exchange failed (HTTP 302)",
+    ],
+    [
+      "a callback error with a description",
+      { callbackQuery: (state) => `state=${state}&error=access_denied&error_description=secret-description` },
+      "OIDC login was denied (access_denied)",
+    ],
+    [
+      "a callback error with an unsafe code",
+      { callbackQuery: (state) => `state=${state}&error=Secret%20Code` },
+      "OIDC login was denied",
+    ],
+    [
+      "a token error with a description",
+      {
+        token: () =>
+          jsonResponse(400, { error: "invalid_grant", error_description: "secret-description authorization-code" }),
+      },
+      "OIDC token exchange rejected (invalid_grant)",
+    ],
+    [
+      "a token error with an unsafe code",
+      { token: () => jsonResponse(401, { error: "Secret\nCode", error_description: "secret-description" }) },
+      "OIDC token exchange failed (HTTP 401)",
+    ],
+  ])("rejects %s", async (_name, options, message) => {
+    const { credential, error, requests } = await runOidcLogin(options);
+
+    expect(credential).toBeUndefined();
+    // Exact messages: no code, verifier, token, query string, or error_description is echoed.
+    expect(error?.message).toBe(message);
+    expect(requests.every(({ url }) => url.startsWith(issuer))).toBe(true);
+  });
+
+  it.each<[string, unknown, string]>([
+    ["a string", issuer, "oidc"],
+    ["null", null, "oidc"],
+    ["a missing issuer", { clientId }, "oidc.issuer"],
+    ["an http issuer", { issuer: "http://idp.example.com", clientId }, "oidc.issuer"],
+    ["issuer credentials", { issuer: "https://user:pass@idp.example.com", clientId }, "oidc.issuer"],
+    ["an issuer query", { issuer: `${issuer}?tenant=alpha`, clientId }, "oidc.issuer"],
+    ["an issuer fragment", { issuer: `${issuer}#alpha`, clientId }, "oidc.issuer"],
+    ["a missing client ID", { issuer }, "oidc.clientId"],
+    ["an empty client ID", { issuer, clientId: "" }, "oidc.clientId"],
+    ["a scope without openid", { issuer, clientId, scope: "profile email" }, "oidc.scope"],
+    ["a non-array redirectPorts", { issuer, clientId, redirectPorts: 8400 }, "oidc.redirectPorts"],
+    ["a zero port", { issuer, clientId, redirectPorts: [0] }, "oidc.redirectPorts"],
+    ["an out-of-range port", { issuer, clientId, redirectPorts: [8400, 65536] }, "oidc.redirectPorts"],
+    ["a fractional port", { issuer, clientId, redirectPorts: [8400.5] }, "oidc.redirectPorts"],
+  ])("fails login without reaching LiteLLM when oidc is %s", async (_name, oidc, field) => {
+    const { error, requests } = await runOidcLogin({ oidc });
+
+    expect(error?.message).toMatch(new RegExp(`^Invalid LiteLLM ${field.replace(".", "\\.")} setting: `));
+    expect(requests).toEqual([]);
   });
 });
 
