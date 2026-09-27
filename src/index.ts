@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -609,7 +609,9 @@ type PkceToken = {
   teamId?: string;
 };
 
-type PkceTokenResult = { ok: true; token: PkceToken } | { ok: false; transient: boolean; message: string };
+type TokenFailure = { ok: false; transient: boolean; message: string };
+
+type PkceTokenResult = { ok: true; token: PkceToken } | TokenFailure;
 
 function authRequestHeaders(headers?: Record<string, string>, contentType?: string): Headers {
   const result = new Headers(headers);
@@ -688,13 +690,14 @@ async function discoverPkce(
   };
 }
 
-async function requestPkceToken(
+/** POSTs a token form without following redirects; each flow validates its own success fields. */
+async function postTokenForm(
   endpoint: string,
   form: URLSearchParams,
   signal: AbortSignal | undefined,
-  headers?: Record<string, string>,
-  existingRefreshToken?: string,
-): Promise<PkceTokenResult> {
+  headers: Record<string, string> | undefined,
+  label: string,
+): Promise<{ ok: true; data: Record<string, unknown> } | TokenFailure> {
   let response: Response;
   try {
     response = await fetch(endpoint, {
@@ -706,7 +709,7 @@ async function requestPkceToken(
     });
   } catch {
     if (signal?.aborted) throw signal.reason;
-    return { ok: false, transient: true, message: "LiteLLM token exchange failed (network error)" };
+    return { ok: false, transient: true, message: `${label} token exchange failed (network error)` };
   }
   let data: Record<string, unknown> | undefined;
   try {
@@ -715,7 +718,7 @@ async function requestPkceToken(
   } catch (error) {
     if (signal?.aborted) throw signal.reason;
     if (response.ok && !(error instanceof SyntaxError)) {
-      return { ok: false, transient: true, message: "LiteLLM token exchange failed (network error)" };
+      return { ok: false, transient: true, message: `${label} token exchange failed (network error)` };
     }
   }
   signal?.throwIfAborted();
@@ -725,13 +728,26 @@ async function requestPkceToken(
       transient: response.status === 429 || response.status >= 500,
       message:
         data?.error === "invalid_grant"
-          ? "LiteLLM token exchange rejected (invalid_grant)"
-          : `LiteLLM token exchange failed (HTTP ${response.status})`,
+          ? `${label} token exchange rejected (invalid_grant)`
+          : `${label} token exchange failed (HTTP ${response.status})`,
     };
   }
-  const expires = typeof data?.expires_in === "number" ? Date.now() + data.expires_in * 1_000 : NaN;
+  return { ok: true, data: data ?? {} };
+}
+
+async function requestPkceToken(
+  endpoint: string,
+  form: URLSearchParams,
+  signal: AbortSignal | undefined,
+  headers?: Record<string, string>,
+  existingRefreshToken?: string,
+): Promise<PkceTokenResult> {
+  const response = await postTokenForm(endpoint, form, signal, headers, "LiteLLM");
+  if (!response.ok) return response;
+  const { data } = response;
+  const expires = typeof data.expires_in === "number" ? Date.now() + data.expires_in * 1_000 : NaN;
   if (
-    !isAuthToken(data?.access_token) ||
+    !isAuthToken(data.access_token) ||
     (!isAuthToken(data.refresh_token) && !isAuthToken(existingRefreshToken)) ||
     typeof data.token_type !== "string" ||
     data.token_type.toLowerCase() !== "bearer" ||
@@ -755,12 +771,25 @@ async function requestPkceToken(
   };
 }
 
-async function loginPkce(
-  interaction: AuthInteraction,
-  baseUrl: string,
-  discovery: CliAuthDiscovery,
-  headers?: Record<string, string>,
-): Promise<OAuthCredential> {
+function constantTimeEqual(value: string | null, expected: string): boolean {
+  if (value === null) return false;
+  const left = Buffer.from(value);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+type LoopbackCallback = { redirectUri: string; state: string; code: () => Promise<string> };
+
+/**
+ * Serves an RFC 8252 loopback redirect on 127.0.0.1 for the lifetime of `run`. `code()` resolves with
+ * the authorization code of the first callback carrying the expected state.
+ */
+async function withLoopbackCallback<T>(
+  signal: AbortSignal | undefined,
+  label: string,
+  run: (callback: LoopbackCallback) => Promise<T>,
+): Promise<T> {
+  const state = randomBytes(32).toString("base64url");
   const server = createServer();
   let settleCallback: ((result: { code?: string; error?: Error }) => void) | undefined;
   server.on("request", (request, response) => {
@@ -780,14 +809,14 @@ async function loginPkce(
       response.writeHead(405, { Allow: "GET" }).end();
       return;
     }
-    if (url.searchParams.get("state") !== state) {
+    if (!constantTimeEqual(url.searchParams.get("state"), state)) {
       response.writeHead(400).end("Invalid OAuth state");
       return;
     }
     const error = url.searchParams.get("error");
     if (error) {
       response.writeHead(400).end("OAuth login failed");
-      settleCallback?.({ error: new Error("LiteLLM PKCE login was denied") });
+      settleCallback?.({ error: new Error(`${label} login was denied`) });
       return;
     }
     const code = url.searchParams.get("code");
@@ -802,8 +831,6 @@ async function loginPkce(
     response.end("<!doctype html><title>LiteLLM login complete</title><p>You can close this window.</p>");
     settleCallback?.({ code });
   });
-  const verifier = randomBytes(32).toString("base64url");
-  const state = randomBytes(32).toString("base64url");
   try {
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);
@@ -814,96 +841,113 @@ async function loginPkce(
       });
     });
     const address = server.address();
-    if (!address || typeof address === "string") throw new Error("LiteLLM PKCE callback failed to start");
-    const redirectUri = `http://127.0.0.1:${address.port}/callback`;
-    const registrationResponse = await fetch(discovery.registrationEndpoint, {
-      method: "POST",
-      headers: authRequestHeaders(headers, "application/json"),
-      body: JSON.stringify({
-        client_name: "pi-provider-litellm",
-        redirect_uris: [redirectUri],
-        token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code", "refresh_token"],
-        response_types: ["code"],
-      }),
-      redirect: "manual",
-      signal: boundedLoginSignal(interaction.signal),
-    });
-    if (!registrationResponse.ok)
-      throw new Error(`LiteLLM PKCE client registration failed (HTTP ${registrationResponse.status})`);
-    const registration = await readAuthJson(registrationResponse, interaction.signal, "registration");
-    if (
-      !isPlainObject(registration) ||
-      !isAuthToken(registration.client_id) ||
-      !Array.isArray(registration.redirect_uris) ||
-      !registration.redirect_uris.includes(redirectUri)
-    ) {
-      throw new Error("LiteLLM PKCE client registration returned an invalid response");
-    }
-    const authorizationUrl = new URL(discovery.authorizationEndpoint);
-    for (const [key, value] of Object.entries({
-      client_id: registration.client_id,
-      redirect_uri: redirectUri,
-      response_type: "code",
-      resource: discovery.resource,
-      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-      code_challenge_method: "S256",
-      state,
-    }))
-      authorizationUrl.searchParams.set(key, value);
-    interaction.notify({
-      type: "auth_url",
-      url: authorizationUrl.toString(),
-      instructions: "Open this URL in a browser to sign in with LiteLLM.",
-    });
-    const code = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => finish(new Error("LiteLLM PKCE login timed out")), PKCE_CALLBACK_TIMEOUT_MS);
-      const onAbort = () => finish(interaction.signal?.reason ?? new Error("LiteLLM PKCE login cancelled"));
-      const finish = (error?: Error, value?: string) => {
-        clearTimeout(timeout);
-        interaction.signal?.removeEventListener("abort", onAbort);
-        settleCallback = undefined;
-        if (error) reject(error);
-        else resolve(value!);
-      };
-      settleCallback = ({ code, error }) => finish(error, code);
-      interaction.signal?.addEventListener("abort", onAbort, { once: true });
-      if (interaction.signal?.aborted) onAbort();
-    });
-    const result = await requestPkceToken(
-      discovery.tokenEndpoint,
-      new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: redirectUri,
-        client_id: registration.client_id,
-        code_verifier: verifier,
-        resource: discovery.resource,
-      }),
-      interaction.signal,
-      headers,
-    );
-    if (!result.ok) throw new Error(result.message);
-    const credential: PkceCredentials = {
-      type: "oauth",
-      access: result.token.access,
-      refresh: result.token.refresh,
-      expires: result.token.expires,
-      baseUrl,
-      flow: PKCE_FLOW,
-      clientId: registration.client_id,
-      tokenEndpoint: discovery.tokenEndpoint,
-      resource: discovery.resource,
-      userId: result.token.userId,
-      teamId: result.token.teamId,
-    };
-    return { ...credential, type: "oauth" };
+    if (!address || typeof address === "string") throw new Error(`${label} callback failed to start`);
+    const code = () =>
+      new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => finish(new Error(`${label} login timed out`)), PKCE_CALLBACK_TIMEOUT_MS);
+        const onAbort = () => finish(signal?.reason ?? new Error(`${label} login cancelled`));
+        const finish = (error?: Error, value?: string) => {
+          clearTimeout(timeout);
+          signal?.removeEventListener("abort", onAbort);
+          settleCallback = undefined;
+          if (error) reject(error);
+          else resolve(value!);
+        };
+        settleCallback = ({ code, error }) => finish(error, code);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+    return await run({ redirectUri: `http://127.0.0.1:${address.port}/callback`, state, code });
   } finally {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
     });
   }
+}
+
+async function loginPkce(
+  interaction: AuthInteraction,
+  baseUrl: string,
+  discovery: CliAuthDiscovery,
+  headers?: Record<string, string>,
+): Promise<OAuthCredential> {
+  const verifier = randomBytes(32).toString("base64url");
+  return withLoopbackCallback(
+    interaction.signal,
+    "LiteLLM PKCE",
+    async ({ redirectUri, state, code: callbackCode }) => {
+      const registrationResponse = await fetch(discovery.registrationEndpoint, {
+        method: "POST",
+        headers: authRequestHeaders(headers, "application/json"),
+        body: JSON.stringify({
+          client_name: "pi-provider-litellm",
+          redirect_uris: [redirectUri],
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+        }),
+        redirect: "manual",
+        signal: boundedLoginSignal(interaction.signal),
+      });
+      if (!registrationResponse.ok)
+        throw new Error(`LiteLLM PKCE client registration failed (HTTP ${registrationResponse.status})`);
+      const registration = await readAuthJson(registrationResponse, interaction.signal, "registration");
+      if (
+        !isPlainObject(registration) ||
+        !isAuthToken(registration.client_id) ||
+        !Array.isArray(registration.redirect_uris) ||
+        !registration.redirect_uris.includes(redirectUri)
+      ) {
+        throw new Error("LiteLLM PKCE client registration returned an invalid response");
+      }
+      const authorizationUrl = new URL(discovery.authorizationEndpoint);
+      for (const [key, value] of Object.entries({
+        client_id: registration.client_id,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        resource: discovery.resource,
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256",
+        state,
+      }))
+        authorizationUrl.searchParams.set(key, value);
+      interaction.notify({
+        type: "auth_url",
+        url: authorizationUrl.toString(),
+        instructions: "Open this URL in a browser to sign in with LiteLLM.",
+      });
+      const code = await callbackCode();
+      const result = await requestPkceToken(
+        discovery.tokenEndpoint,
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri,
+          client_id: registration.client_id,
+          code_verifier: verifier,
+          resource: discovery.resource,
+        }),
+        interaction.signal,
+        headers,
+      );
+      if (!result.ok) throw new Error(result.message);
+      const credential: PkceCredentials = {
+        type: "oauth",
+        access: result.token.access,
+        refresh: result.token.refresh,
+        expires: result.token.expires,
+        baseUrl,
+        flow: PKCE_FLOW,
+        clientId: registration.client_id,
+        tokenEndpoint: discovery.tokenEndpoint,
+        resource: discovery.resource,
+        userId: result.token.userId,
+        teamId: result.token.teamId,
+      };
+      return { ...credential, type: "oauth" };
+    },
+  );
 }
 
 async function startCliSso(
