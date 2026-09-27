@@ -3857,7 +3857,7 @@ describe("direct OIDC login", () => {
     expect(credential).toBeUndefined();
     // Exact messages: no code, verifier, token, query string, or error_description is echoed.
     expect(error?.message).toBe(message);
-    expect(requests.every(({ url }) => url.startsWith(issuer))).toBe(true);
+    expect(requests.every(({ url }) => new URL(url).origin === issuer)).toBe(true);
   });
 
   it.each<[string, unknown, string]>([
