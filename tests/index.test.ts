@@ -3954,6 +3954,19 @@ describe("direct OIDC login", () => {
       expect(refreshed).toEqual({ ...credential, access: fresh, expires: exp * 1000 - 300_000 });
     });
 
+    it.each([
+      ["a long-lived", 3600, now + 3_600_000 - 300_000],
+      // Less than twice the five-minute lead left: refresh halfway rather than treat it as already expired.
+      ["a short-lived", 120, now + 60_000],
+      ["a fractional-expiry", 3600.0004, now + 3_600_000 - 300_000],
+    ])("schedules the next refresh of %s id_token before it expires", async (_name, lifetime, expires) => {
+      const fresh = idToken({ iss: issuer, aud: clientId, sub: "user-123", exp: now / 1000 + lifetime });
+      const { refreshed, error } = await refreshOidc(oidcCredential(), () => jsonResponse(200, { id_token: fresh }));
+
+      expect(error).toBeUndefined();
+      expect(refreshed?.expires).toBe(expires);
+    });
+
     it.each<[string, () => Response, string]>([
       ["a changed subject", () => jsonResponse(200, { id_token: freshIdToken("user-456") }), "invalid sub"],
       [

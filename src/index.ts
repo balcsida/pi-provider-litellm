@@ -1085,8 +1085,8 @@ async function requestOidcToken(
   if (!(Array.isArray(claims.aud) ? claims.aud : [claims.aud]).includes(expected.clientId)) return invalid("aud");
   if (typeof claims.sub !== "string" || !claims.sub) return invalid("sub");
   if (expected.subject !== undefined && claims.sub !== expected.subject) return invalid("sub");
-  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp) || claims.exp * 1_000 <= Date.now())
-    return invalid("exp");
+  const expiresAt = typeof claims.exp === "number" ? Math.floor(claims.exp * 1_000) : NaN;
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) return invalid("exp");
   if (expected.nonce !== undefined && !constantTimeEqual(claims.nonce, expected.nonce)) return invalid("nonce");
   return {
     ok: true,
@@ -1094,7 +1094,9 @@ async function requestOidcToken(
       access: idToken,
       // The refresh token is optional, and an IdP that does not rotate it keeps the existing one valid.
       refresh: isAuthToken(refreshToken) ? refreshToken : existingRefreshToken,
-      expires: tokenExpiresAt(idToken),
+      // Refresh ahead of expiry, but by at most half the remaining lifetime, so a short-lived id_token is
+      // still used rather than treated as already expired.
+      expires: expiresAt - Math.ceil(Math.min(TOKEN_REFRESH_LEAD_MS, (expiresAt - Date.now()) / 2)),
       subject: claims.sub,
     },
   };
