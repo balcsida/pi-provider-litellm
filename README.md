@@ -56,7 +56,7 @@ If your LiteLLM proxy supports SSO/OAuth authentication, Pi selects its supporte
 2. Confirm the offered proxy URL, or enter one if this is the first login
 3. Complete sign-in in the browser Pi opens, then return to Pi
 
-Pi first checks `/.well-known/litellm-cli-auth`. A proxy exposing the supported CLI-auth contract uses authorization code + PKCE (`S256`) with a temporary `127.0.0.1` callback; the browser must run on the same machine as Pi. Advertised endpoints must stay on the proxy's origin, and discovery, registration, and token requests do not follow HTTP redirects. Invalid discovery stops login.
+Without an `oidc` setting (see [Direct OIDC login](#direct-oidc-login)), Pi first checks `/.well-known/litellm-cli-auth`. A proxy exposing the supported CLI-auth contract uses authorization code + PKCE (`S256`) with a temporary `127.0.0.1` callback; the browser must run on the same machine as Pi. Advertised endpoints must stay on the proxy's origin, and discovery, registration, and token requests do not follow HTTP redirects. Invalid discovery stops login.
 
 Pi stores PKCE access and refresh tokens in `~/.pi/agent/auth.json` with file mode `0600`, refreshes automatically, and saves each rotated token pair. Temporary network failures or HTTP 429/5xx responses allow reuse of the existing access token only until its exact expiry. Rejected or revoked refresh credentials require `/login litellm` again.
 
@@ -65,6 +65,41 @@ If discovery returns 404, Pi uses `/sso/cli/start`: confirm the verification cod
 If `/sso/cli/start` returns 404 or 405, copy the token from the LiteLLM UI and paste it into Pi, with an optional virtual-key exchange. Pi reads JWT expiry claims and prompts for login when re-authentication is required.
 
 Tokens are stored in Pi's local file, not an OS keychain. `/logout litellm` deletes the local credential only; logging out or signing in again does not revoke the previous session on the proxy because Pi has no provider revocation hook.
+
+##### Direct OIDC login
+
+For proxies running LiteLLM JWT auth (`enable_jwt_auth`) against your OpenID Connect identity provider (IdP), Pi can sign in with the IdP directly as a registered public client and present the IdP's `id_token` to the proxy as the bearer token. The proxy mints nothing and no virtual key is created; the IdP stays the session authority.
+
+Prerequisites:
+
+- The proxy's JWT auth trusts the IdP's issuer and accepts the client ID as an audience.
+- The IdP has a public client (no client secret) registered for authorization code + PKCE with the loopback redirect `http://127.0.0.1:<port>/callback`.
+- The browser runs on the same machine as Pi.
+
+Configure the default `litellm` provider in the global `~/.pi/agent/settings.json`. Project settings are never read for this, so a cloned repository cannot point login at its own IdP.
+
+```json
+{ "litellm": { "providers": { "litellm": {
+  "baseUrl": "https://litellm.example.com",
+  "oidc": {
+    "issuer": "https://idp.example.com",
+    "clientId": "example-client-id",
+    "scope": "openid",
+    "redirectPorts": [8400, 8401]
+  }
+} } } }
+```
+
+- `issuer` (required): absolute `https` URL with no credentials, query, or fragment.
+- `clientId` (required): the public client's ID.
+- `scope` (default `"openid"`): must include `openid`.
+- `redirectPorts` (optional): ports tried in order, for IdPs that only accept exact pre-registered redirect URIs. Without it the OS assigns a free port.
+
+With `oidc` set, `Sign in with LiteLLM SSO` confirms the proxy URL and then runs only this flow: Pi reads `<issuer>/.well-known/openid-configuration`, opens the IdP's authorization page, and exchanges the code for tokens. Login sends nothing to the proxy, and IdP requests never carry `LITELLM_HEADERS` or provider `headers`. An invalid `oidc` setting fails login with a message naming the field; it never falls back to the LiteLLM flows.
+
+The `id_token` is the bearer token. Pi checks its issuer, audience, subject, expiry, and nonce but not its signature; the proxy verifies the signature against the IdP's keys. Pi refreshes it with the refresh token, so the IdP must return a new `id_token` from the refresh grant. Some IdPs only issue a refresh token when the scope includes `offline_access`; without one, run `/login litellm` again when the `id_token` expires.
+
+Pi never derives the IdP from the proxy: LiteLLM's own `/.well-known/openid-configuration`, `oauth-authorization-server`, and `oauth-protected-resource` documents describe LiteLLM's authorization server, not the IdP that signs the JWTs it accepts. Zero-config IdP discovery from the proxy via RFC 9728 is out of scope until LiteLLM publishes it ([BerriAI/litellm#41135](https://github.com/BerriAI/litellm/issues/41135)).
 
 ### Option B — environment variables
 
@@ -123,6 +158,7 @@ Provider fields:
 | `headers` | `$LITELLM_HEADERS` for `litellm`; unset for aliases | JSON string env reference or inline object of request headers |
 | `displayName` | provider name | Label shown in Pi UI |
 | `enabled` | `true` | Set `false` to skip an alias |
+| `oidc` | unset | `litellm` only. Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
 | `allowInsecureHttp` | `false` | Set `true` to permit plaintext HTTP for this provider, for example `http://host.docker.internal`. Credentials and request data will not be encrypted. Loopback HTTP works without this setting. |
 
 `/login litellm` and Google ADC token auth remain scoped to the default `litellm` provider. Aliases use their configured `apiKey` or manually stored auth entries matching the alias name.
