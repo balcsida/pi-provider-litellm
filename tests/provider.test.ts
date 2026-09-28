@@ -193,6 +193,26 @@ describe("createLiteLLMProvider", () => {
     expect(discover).not.toHaveBeenCalled();
   });
 
+  it("still requires a network refresh for legacy entries startup discovery did not replace", async () => {
+    const [seed] = toNativeModels("litellm", "https://proxy.example/v1", [
+      { ...discovered("claude-sonnet-5").models[0], litellmDiscoveryVersion: 3 },
+    ]);
+    const seededLegacy = { ...seed, litellmDiscoveryVersion: 2 as const };
+    const unseededLegacy = native("stored");
+    const discover = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const value = controller({ discover, models: [seed] });
+
+    await expect(value.refreshModels?.(context([seededLegacy], true))).rejects.toThrow("offline");
+    expect(stderr).not.toHaveBeenCalled();
+
+    await expect(value.refreshModels?.(context([seededLegacy, unseededLegacy], true))).rejects.toThrow("offline");
+    expect(stderr).toHaveBeenCalledOnce();
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/version does not match 3.*network refresh failed/));
+  });
+
   it("restores mixed legacy and current-version entries per entry", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const legacy = { ...native("legacy"), name: "legacy (no metadata)" };

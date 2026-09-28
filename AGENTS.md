@@ -89,6 +89,7 @@
 
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
 - Native Messages requires unanimous compatible Claude deployment evidence; evidence-free fallback and health discovery never select it. Keep Messages compatibility separate from Chat and Responses fields.
+- Strict tools require every deployment's declared routing (`custom_llm_provider` and the `litellm_params.model` prefix) to name Anthropic. `model_info.litellm_provider` is a cost-map lookup of `base_model`, not routing, and `supports_response_schema` / `supports_native_structured_output` describe JSON output, not tool definitions; neither is strict-tool evidence.
 - Kimi/Moonshot-style compatibility is split across `completionsCompat()` and `responsesCompat()`; `buildCompat()` is retained only as the completions alias. Keep regression tests with model discovery changes.
 - Anthropic-backed aliases using `openai-completions` need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM; `openai-responses` uses its native prompt cache fields instead.
 

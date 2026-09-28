@@ -2,7 +2,12 @@ import { isIP } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
-import { LITELLM_DISCOVERY_VERSION, resolveBackendIdentity, resolveCatalogProvider } from "./backend-identity.js";
+import {
+  LITELLM_DISCOVERY_VERSION,
+  resolveBackendIdentity,
+  resolveCatalogProvider,
+  routesOnlyThrough,
+} from "./backend-identity.js";
 import {
   type CatalogResolution,
   catalogResolution,
@@ -328,12 +333,14 @@ function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined 
   return carried;
 }
 
-function messagesStrictToolEvidence(adapter: string, model: Model<Api>): boolean | undefined {
-  // The Anthropic catalog describes the Anthropic API, so only deployments LiteLLM
-  // reports with the anthropic adapter keep its grant. A hosted route (Bedrock,
+const ANTHROPIC_ROUTES: ReadonlySet<string> = new Set(["anthropic"]);
+
+function messagesStrictToolEvidence(entry: ModelInfoEntry, model: Model<Api>): boolean | undefined {
+  // The Anthropic catalog describes the Anthropic API, so only deployments whose
+  // declared routing names Anthropic keep its grant. A hosted route (Bedrock,
   // Vertex) can reject tools[].strict for the same model, and LiteLLM reports no
   // per-route strict-tool capability, so it stays unknown.
-  if (adapter !== "anthropic" || model.api !== "anthropic-messages") return undefined;
+  if (!routesOnlyThrough(entry, ANTHROPIC_ROUTES) || model.api !== "anthropic-messages") return undefined;
   return (model as Model<"anthropic-messages">).compat?.supportsStrictTools;
 }
 
@@ -378,7 +385,7 @@ function nativeMessagesCatalog(
   return compat
     ? {
         messagesCompat: compat,
-        messagesStrictTools: messagesStrictToolEvidence(adapter, model),
+        messagesStrictTools: messagesStrictToolEvidence(entry, model),
         messagesThinkingLevelMap: model.thinkingLevelMap,
       }
     : {};
@@ -629,7 +636,7 @@ function mapFromModelInfoGroup(
     const model = new Set(generations).size === 1 && family !== "conflicting" ? generations[0] : undefined;
     return {
       ...catalog,
-      ...(options.allowMessages === false ? { messagesCompat: undefined } : {}),
+      ...(options.allowMessages === false ? { messagesCompat: undefined, messagesStrictTools: undefined } : {}),
       ...(family ? { semanticFamily: family } : {}),
       ...(model ? { semanticModel: model } : {}),
     };

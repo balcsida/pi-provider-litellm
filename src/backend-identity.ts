@@ -108,3 +108,19 @@ export function resolveCatalogProvider(
   }
   return identity?.provider ?? reported ?? custom;
 }
+
+// LiteLLM routes a deployment by `custom_llm_provider` and the `litellm_params.model` prefix.
+// `model_info.litellm_provider` is a cost-map lookup (of `base_model` when one is set), so it is
+// not routing evidence. With no declared signal, LiteLLM picks the provider from its model lists,
+// where an unprefixed Bedrock id still routes to Bedrock.
+export function routesOnlyThrough(row: BackendIdentityRow, providers: ReadonlySet<string>): boolean {
+  const model = wireString(row.litellm_params?.model);
+  const slash = model?.indexOf("/") ?? -1;
+  const routing = [
+    wireString(row.litellm_params?.custom_llm_provider),
+    model && slash > 0 ? model.slice(0, slash) : undefined,
+  ]
+    .map((provider) => provider?.trim().toLowerCase())
+    .filter((provider): provider is string => Boolean(provider));
+  return routing.length > 0 && routing.every((provider) => providers.has(provider));
+}

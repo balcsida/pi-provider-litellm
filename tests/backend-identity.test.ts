@@ -4,6 +4,7 @@ import {
   LITELLM_DISCOVERY_VERSION,
   resolveBackendIdentity,
   resolveCatalogProvider,
+  routesOnlyThrough,
 } from "../src/backend-identity.js";
 
 describe("resolveBackendIdentity", () => {
@@ -193,5 +194,34 @@ describe("resolveCatalogProvider", () => {
         litellm_params: { custom_llm_provider: " azure " },
       }),
     ).toBe("azure");
+  });
+});
+
+describe("routesOnlyThrough", () => {
+  const anthropic = new Set(["anthropic"]);
+
+  it("requires every declared routing signal to name an allowed provider", () => {
+    expect(routesOnlyThrough({ litellm_params: { model: "Anthropic/claude-fable-5-1" } }, anthropic)).toBe(true);
+    expect(
+      routesOnlyThrough(
+        { litellm_params: { model: "claude-fable-5-1", custom_llm_provider: " anthropic " } },
+        anthropic,
+      ),
+    ).toBe(true);
+    expect(
+      routesOnlyThrough(
+        { litellm_params: { model: "anthropic/claude-fable-5-1", custom_llm_provider: "bedrock" } },
+        anthropic,
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores lookup metadata and treats a missing routing signal as unproven", () => {
+    const row = {
+      litellm_params: { model: "us.anthropic.claude-fable-5-1" },
+      model_info: { base_model: "anthropic/claude-fable-5-1", litellm_provider: "anthropic" },
+    };
+    expect(routesOnlyThrough(row, anthropic)).toBe(false);
+    expect(routesOnlyThrough({ litellm_params: { model: "/claude-fable-5-1" } }, anthropic)).toBe(false);
   });
 });

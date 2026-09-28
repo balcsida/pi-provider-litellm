@@ -484,6 +484,55 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(model.compat).not.toHaveProperty("supportsStrictTools");
   });
 
+  // `/model/info` fills litellm_provider from a cost-map lookup of base_model, so a hosted
+  // deployment can report "anthropic" while LiteLLM routes it elsewhere.
+  it.each([
+    [
+      "Bedrock model with unprefixed base_model",
+      "bedrock/us.anthropic.claude-fable-5-1",
+      undefined,
+      "claude-fable-5-1",
+    ],
+    ["Bedrock model", "bedrock/us.anthropic.claude-fable-5-1", undefined, undefined],
+    ["Vertex model", "vertex_ai/claude-fable-5-1", undefined, undefined],
+    ["Bedrock custom_llm_provider", "claude-fable-5-1", "bedrock", undefined],
+    ["unprefixed Bedrock id", "us.anthropic.claude-fable-5-1", undefined, "claude-fable-5-1"],
+    ["unprefixed id without a routing signal", "claude-fable-5-1", undefined, undefined],
+  ])("withholds strict tools from a %s reported as anthropic", async (_label, backend, customProvider, baseModel) => {
+    const { model } = await createCompatibilityHarness({
+      model_name: "claude-fable-5-1",
+      model_info: {
+        mode: "chat",
+        litellm_provider: "anthropic",
+        supports_reasoning: true,
+        ...(baseModel ? { base_model: baseModel } : {}),
+      },
+      litellm_params: { model: backend, ...(customProvider ? { custom_llm_provider: customProvider } : {}) },
+    });
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.compat).not.toHaveProperty("supportsStrictTools");
+  });
+
+  it.each([
+    ["anthropic/ prefix with unprefixed base_model", "anthropic/claude-fable-5-1", undefined],
+    ["anthropic custom_llm_provider", "claude-fable-5-1", "anthropic"],
+  ])("grants strict tools when routing names Anthropic: %s", async (_label, backend, customProvider) => {
+    const { model } = await createCompatibilityHarness({
+      model_name: "claude-fable-5-1",
+      model_info: {
+        mode: "chat",
+        litellm_provider: "anthropic",
+        supports_reasoning: true,
+        base_model: "claude-fable-5-1",
+      },
+      litellm_params: { model: backend, ...(customProvider ? { custom_llm_provider: customProvider } : {}) },
+    });
+
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.compat).toMatchObject({ supportsStrictTools: true });
+  });
+
   it("omits temperature for a decorated Opus backend that rejects it", async () => {
     const [, adapter, backend] = decoratedAdaptiveRoutes[1];
     const { models, model, requests, respond } = await createCompatibilityHarness(claudeRoute(adapter, backend));
