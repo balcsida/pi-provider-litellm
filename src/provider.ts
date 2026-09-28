@@ -1,12 +1,13 @@
 import {
   type ApiStreamOptions,
-  type Context,
   type Credential,
   createProvider,
+  getCurrentTools,
   type Model,
   type Provider,
   type ProviderAuth,
   type SimpleStreamOptions,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 import { enrichCachedModel, normalizeBaseUrl, restoreCachedModelPolicy } from "./discover.js";
@@ -112,7 +113,7 @@ function modelRootError(
 function requestModel(
   provider: string,
   model: Model<LiteLLMApi>,
-  context: Context,
+  context: TranscriptContext,
   credentialRoot: string | undefined,
   allowInsecureHttp = false,
 ): Model<LiteLLMApi> {
@@ -120,14 +121,13 @@ function requestModel(
   const active = activeCredentialRoot(credentialRoot, allowInsecureHttp);
   const error = modelRootError(model, active, allowInsecureHttp);
   if (error) throw error;
-  if (
-    model.api === "openai-completions" &&
-    (model as LiteLLMModel).litellmBackendFamily === "openai" &&
-    context.tools &&
-    context.tools.length > CHAT_TOOL_CAP
-  ) {
+  const toolCount =
+    model.api === "openai-completions" && (model as LiteLLMModel).litellmBackendFamily === "openai"
+      ? getCurrentTools(context.messages).length
+      : 0;
+  if (toolCount > CHAT_TOOL_CAP) {
     throw new Error(
-      `LiteLLM model ${model.id} uses Chat Completions with ${context.tools.length} tools, exceeding the ` +
+      `LiteLLM model ${model.id} uses Chat Completions with ${toolCount} tools, exceeding the ` +
         `${CHAT_TOOL_CAP}-tool cap; route this model via Responses or reduce enabled extensions`,
     );
   }
@@ -189,7 +189,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   const refreshModels = provider.refreshModels;
   const guardedProvider: Provider<LiteLLMApi> = {
     ...provider,
-    stream: <T extends LiteLLMApi>(model: Model<T>, context: Context, requestOptions?: ApiStreamOptions<T>) =>
+    stream: <T extends LiteLLMApi>(model: Model<T>, context: TranscriptContext, requestOptions?: ApiStreamOptions<T>) =>
       provider.stream(
         requestModel(
           options.id,
@@ -201,7 +201,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         context,
         requestOptions,
       ),
-    streamSimple: (model: Model<LiteLLMApi>, context: Context, requestOptions?: SimpleStreamOptions) =>
+    streamSimple: (model: Model<LiteLLMApi>, context: TranscriptContext, requestOptions?: SimpleStreamOptions) =>
       provider.streamSimple(
         requestModel(
           options.id,

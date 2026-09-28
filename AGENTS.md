@@ -43,6 +43,11 @@
   uses `litellm-models-dev.json` with a 28-day cache window under the Pi agent dir. When it is off, discovery must not
   read that cache either.
 - Pi owns discovered-model persistence in `models-store.json`; this extension does not write a model cache. Legacy `litellm-models.json` model caches are ignored and never deleted. `litellm-models-dev.json` is the models.dev cache and is refreshed in place.
+- Direct OIDC login (`litellm.providers.litellm.oidc`, global settings only; persisted flow `oidc_pkce`) talks only to
+  the configured IdP: it sends nothing to the proxy, never derives the IdP from proxy metadata, never sends
+  `LITELLM_HEADERS` or provider headers to the IdP, uses `redirect: "manual"` with any 3xx a failure, and reports only
+  an OAuth error code matching `^[a-z_]{1,64}$` or an HTTP status. Its refresh branch must stay ahead of the `!command`
+  fallthrough so an IdP refresh token is never executed. The proxy, not Pi, verifies the id_token signature.
 - Google ADC is resolved in process through `src/gcloud-token.ts`; there is no helper subprocess and no `src/gcloud-token-cli.ts`. Only `authorized_user` credentials are supported, and service accounts warn and fail closed.
 - `apiKey.check` performs no network call, so it reports credential shape, not mintability. Its source label must mirror the precedence in `resolveCredentials`, so ADC is named whenever a complete ADC file exists; if the refresh token no longer mints, `resolve` falls back and reports the credential it actually used.
 

@@ -2978,12 +2978,12 @@ describe("discoverModels via /model/info", () => {
         data: [
           {
             model_name: "kimi-route",
-            litellm_params: { model: "kimi-k2.5", custom_llm_provider: "moonshot" },
+            litellm_params: { model: "kimi-k2.6", custom_llm_provider: "moonshot" },
             model_info: { litellm_provider: "openai", mode: "chat" },
           },
           {
             model_name: "moonshot-control",
-            litellm_params: { model: "kimi-k2.5" },
+            litellm_params: { model: "kimi-k2.6" },
             model_info: { litellm_provider: "moonshot", mode: "chat" },
           },
         ],
@@ -2998,7 +2998,7 @@ describe("discoverModels via /model/info", () => {
         name: id,
         contextWindow: 262_144,
         maxTokens: 262_144,
-        cost: { input: 0.6, output: 3, cacheRead: 0.1, cacheWrite: 0 },
+        cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
       });
     }
   });
