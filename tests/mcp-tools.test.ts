@@ -927,7 +927,7 @@ describe("createMcpToolDefinitions", () => {
     ]);
   });
 
-  it("truncates descriptions and prompt snippets to 4 KiB", async () => {
+  it("truncates descriptions to 4 KiB and prompt snippets to one short line", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [
         {
@@ -946,7 +946,51 @@ describe("createMcpToolDefinitions", () => {
 
     expect(Buffer.byteLength(definition?.description ?? "")).toBeLessThanOrEqual(4 * 1024);
     expect(definition?.description).toContain("[truncated]");
-    expect(Buffer.byteLength(definition?.promptSnippet ?? "")).toBeLessThanOrEqual(4 * 1024);
+    expect(Buffer.byteLength(definition?.promptSnippet ?? "")).toBeLessThanOrEqual(160);
+    expect(definition?.promptSnippet).toMatch(/…$/);
+  });
+
+  it("keeps the prompt snippet a single line naming the server, apart from the full description", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "lookup",
+          server_name: "Catalog",
+          description: "Find an entity.\n\nAccepts a name\tor an entity reference.",
+          input_schema: { type: "object", properties: {} },
+        },
+      ]),
+    );
+
+    const [definition] = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definition?.promptSnippet).toBe("Catalog: Find an entity. Accepts a name or an entity reference.");
+    expect(definition?.description).toBe(
+      "Find an entity.\n\nAccepts a name\tor an entity reference. (via Catalog MCP server)",
+    );
+  });
+
+  it("collapses whitespace in the server name before bounding the prompt snippet", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "lookup",
+          server_name: `Catalog${"\n".repeat(200)}Mirror`,
+          description: "Find an entity.",
+          input_schema: { type: "object", properties: {} },
+        },
+      ]),
+    );
+
+    const [definition] = await createMcpToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(definition?.promptSnippet).toBe("Catalog Mirror: Find an entity.");
   });
 
   it("passes complex object schemas through to Pi tools", async () => {

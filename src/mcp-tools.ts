@@ -12,6 +12,9 @@ const MAX_DISCOVERY_ENTRIES = 10_000;
 const MAX_CALL_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTERED_TOOLS = 512;
 const MAX_DESCRIPTION_BYTES = 4 * 1024;
+// Pi prints every snippet in the system prompt's Available tools list, on top of the tool's own
+// description, so the snippet is one short line rather than a second copy of the description.
+const MAX_PROMPT_SNIPPET_BYTES = 160;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_SCHEMA_DEPTH = 16;
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -1305,9 +1308,9 @@ export async function createMcpToolDefinitions(
       DESCRIPTION_TRUNCATION_MARKER,
     );
     const promptSnippet = truncateUtf8(
-      `${mcpTool.description} via ${mcpTool.server_name} MCP server`,
-      MAX_DESCRIPTION_BYTES,
-      DESCRIPTION_TRUNCATION_MARKER,
+      `${mcpTool.server_name}: ${mcpTool.description}`.replace(/\s+/g, " ").trim(),
+      MAX_PROMPT_SNIPPET_BYTES,
+      SHORT_TRUNCATION_MARKER,
     );
 
     // `label` and the `details` fields below are proxy-supplied, so they are bounded like every other
