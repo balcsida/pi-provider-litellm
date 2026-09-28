@@ -16,6 +16,13 @@ const MAX_DESCRIPTION_BYTES = 4 * 1024;
 // Every direct tool's definition is sent on every turn, so a larger catalog goes behind the gateway.
 export const MAX_AUTO_DIRECT_BYTES = 64 * 1024;
 const MAX_SEARCH_RESULTS = 20;
+// Search inlines the full definition of its best matches, so the usual next step is a call.
+const SEARCH_DESCRIBED_RESULTS = 2;
+// Kept free for the heading and the one-line list (at most 20 lines of name plus 200 bytes), so the
+// final bound can only shorten the list, never an inlined schema.
+const SEARCH_LIST_RESERVE_BYTES = 8 * 1024;
+// Described blocks contain blank lines of their own, so sections need an unambiguous boundary.
+const SEARCH_SECTION_SEPARATOR = "\n\n---\n\n";
 const MAX_SEARCH_LINE_BYTES = 200;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_SCHEMA_DEPTH = 16;
@@ -1477,8 +1484,8 @@ export function createMcpGatewayDefinition(
     label: "LiteLLM MCP",
     description:
       `Search, describe, and call the MCP tools exposed by ${source}. ` +
-      'Use action "search" with a query to find tools, "describe" to read a tool\'s input schema, ' +
-      'and "call" with that tool name and its arguments.',
+      'Use action "search" with a query to find tools; it returns the best matches with their input schemas. ' +
+      'Use "describe" to read any other tool\'s schema, and "call" with a tool name and its arguments.',
     promptSnippet: `Search, describe, and call MCP tools exposed by ${source}`,
     executionMode: "parallel",
     parameters,
@@ -1493,15 +1500,31 @@ export function createMcpGatewayDefinition(
       const catalog = getCatalog();
       const matches = searchCatalog(catalog, params.query ?? "");
       const shown = matches.slice(0, MAX_SEARCH_RESULTS);
+      // Best matches are inlined in rank order while they fit whole, so a schema is never cut
+      // mid-JSON; the first one that does not fit, and everything after it, stays in the list.
+      const described: string[] = [];
+      let describedBytes = 0;
+      for (const entry of shown.slice(0, SEARCH_DESCRIBED_RESULTS)) {
+        const block = describeCatalogEntry(entry);
+        if (describedBytes + byteLength(block) > MAX_RESULT_BYTES - SEARCH_LIST_RESERVE_BYTES) break;
+        described.push(block);
+        describedBytes += byteLength(block) + byteLength(SEARCH_SECTION_SEPARATOR);
+      }
+      const listed = shown.slice(described.length);
       const heading =
         `${matches.length} of ${catalog.length} MCP tools match` +
-        `${matches.length > shown.length ? `; showing the first ${shown.length}` : ""}. ` +
-        'Use action "describe" for a tool\'s input schema before calling it.';
-      const lines = shown.map(
+        `${matches.length > shown.length ? `; showing the first ${shown.length}` : ""}.` +
+        (described.length > 0
+          ? ` The ${described.length === 1 ? "best match follows" : `best ${described.length} follow`} with ` +
+            `${described.length === 1 ? "its" : "their"} input schema${described.length === 1 ? "" : "s"}, ready to call.`
+          : "") +
+        (listed.length > 0 ? ' Use action "describe" for any other tool before calling it.' : "");
+      const lines = listed.map(
         ({ name: toolName, tool }) =>
           `- ${toolName}: ${oneLine(`${tool.server_name}: ${tool.description}`, MAX_SEARCH_LINE_BYTES)}`,
       );
-      const text = truncateUtf8([heading, ...lines].join("\n"), MAX_RESULT_BYTES, TRUNCATION_MARKER);
+      const sections = [heading, ...described, ...(lines.length > 0 ? [lines.join("\n")] : [])];
+      const text = truncateUtf8(sections.join(SEARCH_SECTION_SEPARATOR), MAX_RESULT_BYTES, TRUNCATION_MARKER);
       return { content: [{ type: "text", text }], details: {} };
     },
   });

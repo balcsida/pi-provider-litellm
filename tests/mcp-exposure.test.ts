@@ -93,19 +93,61 @@ describe("MCP gateway tool", () => {
     expect(searchCatalog(catalog, "invoice")).toEqual([]);
   });
 
-  it("lists search matches as single lines with a bounded count", async () => {
+  it("inlines the best two matches with their schemas and lists the rest as single lines", async () => {
     const catalog = Array.from({ length: 25 }, (_, index) =>
-      entry(`mcp_srv_tool_${index}`, { description: `Tool ${index}\nsecond line` }),
+      entry(`mcp_srv_tool_${index}`, {
+        description: `Tool ${index}\nsecond line`,
+        input_schema: { type: "object", properties: { [`arg_${index}`]: { type: "string" } } },
+      }),
     );
 
     const result = await runGateway(catalog, { action: "search", query: "tool" });
     const text = (result.content[0] as { text: string }).text;
+    const [heading, first, second, list] = text.split("\n\n---\n\n");
 
-    expect(text.split("\n")[0]).toBe(
-      '25 of 25 MCP tools match; showing the first 20. Use action "describe" for a tool\'s input schema before calling it.',
+    expect(heading).toBe(
+      "25 of 25 MCP tools match; showing the first 20. The best 2 follow with their input schemas, ready to call. " +
+        'Use action "describe" for any other tool before calling it.',
     );
-    expect(text).toContain("- mcp_srv_tool_0: server: Tool 0 second line");
-    expect(text).not.toContain("mcp_srv_tool_20");
+    expect(first).toContain("mcp_srv_tool_0\nServer: server");
+    expect(first).toContain('Input schema: {"type":"object","properties":{"arg_0":{"type":"string"}}}');
+    expect(second).toContain("mcp_srv_tool_1\nServer: server");
+    expect(list?.split("\n")[0]).toBe("- mcp_srv_tool_2: server: Tool 2 second line");
+    expect(list).not.toContain("mcp_srv_tool_0:");
+    expect(list).not.toContain("mcp_srv_tool_20");
+  });
+
+  it("names a single match ready to call without pointing at describe", async () => {
+    const result = await runGateway([entry("mcp_srv_ping", { description: "Ping" })], {
+      action: "search",
+      query: "ping",
+    });
+    const text = (result.content[0] as { text: string }).text;
+
+    expect(text.split("\n\n---\n\n")[0]).toBe(
+      "1 of 1 MCP tools match. The best match follows with its input schema, ready to call.",
+    );
+  });
+
+  it("leaves a best match whose schema would not fit whole to describe", async () => {
+    const properties: Record<string, unknown> = {};
+    for (let index = 0; JSON.stringify({ type: "object", properties }).length < 60 * 1024; index += 1) {
+      properties[`field_${index}`] = { type: "string", description: "d".repeat(200) };
+    }
+    const catalog = [
+      entry("mcp_srv_wide", { description: "Wide tool", input_schema: { type: "object", properties } }),
+      entry("mcp_srv_narrow", { description: "Narrow tool" }),
+    ];
+
+    const result = await runGateway(catalog, { action: "search", query: "tool" });
+    const text = (result.content[0] as { text: string }).text;
+
+    expect(text.split("\n\n---\n\n")[0]).toBe(
+      '2 of 2 MCP tools match. Use action "describe" for any other tool before calling it.',
+    );
+    expect(text).toContain("- mcp_srv_wide: server: Wide tool");
+    expect(text).toContain("- mcp_srv_narrow: server: Narrow tool");
+    expect(text).not.toContain("Input schema:");
   });
 
   it("describes a tool's schema as text without compiling proxy regexes into the gateway", async () => {
