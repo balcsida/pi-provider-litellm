@@ -798,9 +798,12 @@ export function reduceModelGroup(
   // Strict tools require affirmative evidence from every routable deployment.
   const messagesStrictTools =
     catalogs.length > 0 && catalogs.every((catalog) => catalog?.messagesStrictTools === true) ? true : undefined;
+  // LiteLLM v1.100+ reports `supported_endpoints: null` for every model its model map does not
+  // list, so null means unknown, like an absent field. Only a list without Messages, or a
+  // malformed non-null value, withholds the transport.
   const messagesEndpointAllowed = deployments.every((entry) => {
     const endpoints = entry.model_info?.supported_endpoints;
-    return endpoints === undefined || (Array.isArray(endpoints) && endpoints.includes("/v1/messages"));
+    return endpoints == null || (Array.isArray(endpoints) && endpoints.includes("/v1/messages"));
   });
   const api = candidateModes.every((mode) => mode === "responses")
     ? "openai-responses"

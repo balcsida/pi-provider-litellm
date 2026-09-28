@@ -2343,7 +2343,17 @@ describe("native Messages route selection", () => {
     expect(partiallyMalformedOmittingMessages?.api).toBe("openai-completions");
   });
 
-  it.each([null, "/v1/chat/completions", "/v1/messages", 42, { endpoint: "/v1/messages" }])(
+  // LiteLLM v1.100 sends `supported_endpoints: null` for models outside its model map, as it does
+  // for Bedrock-served Claude; that is no evidence either way, like an absent field.
+  it("treats null endpoint metadata as unknown rather than a denial", () => {
+    const result = reduceModelGroup(
+      [{ model_name: "claude-route", model_info: { id: "a", mode: "chat", supported_endpoints: null } }],
+      () => claude({}),
+    );
+    expect(result?.api).toBe("anthropic-messages");
+  });
+
+  it.each(["/v1/chat/completions", "/v1/messages", 42, { endpoint: "/v1/messages" }])(
     "withholds Messages for malformed endpoint metadata %j",
     (endpoints) => {
       const result = reduceModelGroup(
