@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
@@ -12,6 +12,11 @@ const MAX_DISCOVERY_ENTRIES = 10_000;
 const MAX_CALL_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTERED_TOOLS = 512;
 const MAX_DESCRIPTION_BYTES = 4 * 1024;
+// `auto` registers a catalog directly only while its definitions fit this budget, about 16k tokens.
+// Every direct tool's definition is sent on every turn, so a larger catalog goes behind the gateway.
+export const MAX_AUTO_DIRECT_BYTES = 64 * 1024;
+const MAX_SEARCH_RESULTS = 20;
+const MAX_SEARCH_LINE_BYTES = 200;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_SCHEMA_DEPTH = 16;
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -195,10 +200,12 @@ export function reportMcpRegistrationSuccess(onDiagnostic?: DiagnosticSink): voi
 
 // `registered` is the generated names of the tools that survived, so a failure that changes
 // which servers answered is reported again even when the count happens to stay the same.
+// `outcome` names what happened to the surviving tools: registered directly, or exposed through the gateway.
 export function reportMcpPartialDiscovery(
   partialFailure: boolean,
   registered: readonly string[],
   onDiagnostic?: DiagnosticSink,
+  outcome = "registered",
 ): void {
   if (!partialFailure) {
     clearIncident("discovery-partial-failure", onDiagnostic);
@@ -206,7 +213,7 @@ export function reportMcpPartialDiscovery(
   }
   emitSafetyDiagnostic(
     "discovery-partial-failure",
-    `proxy reported a partial server failure; ${plural(registered.length, "tool")} registered.`,
+    `proxy reported a partial server failure; ${plural(registered.length, "tool")} ${outcome}.`,
     `discovery-partial-failure:${membershipIdentity(registered)}`,
     onDiagnostic,
   );
@@ -1273,7 +1280,7 @@ export async function createMcpToolDefinitions(
   signal?: AbortSignal,
   onDiagnostic?: DiagnosticSink,
   namespace?: string,
-): Promise<{ definitions: ToolDefinition[]; report: McpPreparationReport }> {
+): Promise<{ definitions: ToolDefinition[]; catalog: McpCatalogEntry[]; report: McpPreparationReport }> {
   const discoveryAuth = await getAuth();
   const discovery = await discoverMcpTools(
     discoveryAuth.baseUrl,
@@ -1310,10 +1317,9 @@ export async function createMcpToolDefinitions(
       DESCRIPTION_TRUNCATION_MARKER,
     );
 
-    // `label` and the `details` fields below are proxy-supplied, so they are bounded like every other
-    // untrusted string that reaches Pi's UI or the model.
+    // `label` is proxy-supplied, so it is bounded like every other untrusted string that reaches
+    // Pi's UI or the model.
     const label = truncateUtf8(`${mcpTool.server_name}: ${mcpTool.name}`, MAX_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
-    const boundedDetail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
 
     return defineTool({
       name,
@@ -1323,32 +1329,180 @@ export async function createMcpToolDefinitions(
       executionMode: "parallel",
       parameters,
       async execute(_toolCallId, params: Static<typeof parameters>, toolSignal, _onUpdate, ctx) {
-        const auth = await getAuth(ctx);
         const rawParams = params as Record<string, unknown>;
         const args = syntheticArgsEnvelope ? asRecord(rawParams.args) : rawParams;
         if (!args) throw new Error("Synthetic MCP tool arguments must contain an object-valued args property");
-        const text = await executeMcpTool(
-          auth.baseUrl,
-          auth.apiKey,
-          mcpTool.server_id ?? mcpTool.server_name,
-          mcpTool.name,
-          args,
-          auth.headers,
-          toolSignal,
-          auth.allowInsecureHttp,
-          onDiagnostic,
-        );
-        return {
-          content: [{ type: "text", text }],
-          details: {
-            server: boundedDetail(mcpTool.server_name),
-            serverId: boundedDetail(mcpTool.server_id ?? mcpTool.server_name),
-            tool: boundedDetail(mcpTool.name),
-          },
-        };
+        return callCatalogTool(mcpTool, args, await getAuth(ctx), toolSignal, onDiagnostic);
       },
     });
   });
 
-  return { definitions, report };
+  return { definitions, catalog: prepared.map(({ name, tool }) => ({ name, tool })), report };
+}
+
+export type McpExposureMode = "auto" | "direct" | "gateway";
+
+export const MCP_EXPOSURE_MODES: readonly McpExposureMode[] = ["auto", "direct", "gateway"];
+
+// A prepared tool keyed by its generated Pi name, which the gateway uses as the tool's handle.
+export interface McpCatalogEntry {
+  name: string;
+  tool: LiteLLMMcpTool;
+}
+
+async function callCatalogTool(
+  tool: LiteLLMMcpTool,
+  args: Record<string, unknown>,
+  auth: LiteLLMRuntimeAuth,
+  signal: AbortSignal | undefined,
+  onDiagnostic?: DiagnosticSink,
+) {
+  const text = await executeMcpTool(
+    auth.baseUrl,
+    auth.apiKey,
+    tool.server_id ?? tool.server_name,
+    tool.name,
+    args,
+    auth.headers,
+    signal,
+    auth.allowInsecureHttp,
+    onDiagnostic,
+  );
+  // The `details` fields are proxy-supplied, so they are bounded like the label.
+  const boundedDetail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
+  return {
+    content: [{ type: "text" as const, text }],
+    details: {
+      server: boundedDetail(tool.server_name),
+      serverId: boundedDetail(tool.server_id ?? tool.server_name),
+      tool: boundedDetail(tool.name),
+    },
+  };
+}
+
+// What direct registration adds to every request: each definition's name, description, prompt
+// snippet, and serialized parameter schema. Bytes, not tokens, so the measure needs no tokenizer.
+export function measureToolDefinitions(definitions: readonly ToolDefinition[]): number {
+  let bytes = 0;
+  for (const definition of definitions) {
+    bytes += byteLength(definition.name) + byteLength(definition.description);
+    bytes += byteLength(definition.promptSnippet ?? "") + byteLength(JSON.stringify(definition.parameters));
+  }
+  return bytes;
+}
+
+// An alias gateway carries a hash of the raw alias, like direct tool names, so aliases that sanitize
+// alike (`team-a`, `team_a`) cannot replace each other's gateway, and the name stays within 64 characters.
+export function gatewayToolName(namespace?: string): string {
+  if (namespace === undefined) return "litellm_mcp";
+  const hash = createHash("sha256")
+    .update(JSON.stringify(["gateway", namespace]))
+    .digest("hex")
+    .slice(0, TOOL_NAME_HASH_LENGTH);
+  const base = `litellm_mcp_${sanitizeName(namespace)}`;
+  return `${base.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
+}
+
+function oneLine(value: string, maxBytes: number): string {
+  const bounded = truncateUtf8(value, MAX_DESCRIPTION_BYTES, "");
+  return truncateUtf8(bounded.replace(/\s+/g, " ").trim(), maxBytes, SHORT_TRUNCATION_MARKER);
+}
+
+// Term matching over the bounded name, server, and description text. A name or server hit outranks
+// a description hit; ties keep catalog order so results are stable across identical searches.
+export function searchCatalog(catalog: readonly McpCatalogEntry[], query: string): McpCatalogEntry[] {
+  const terms = query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  if (terms.length === 0) return [...catalog];
+  return catalog
+    .map((entry) => {
+      const title = `${entry.name} ${entry.tool.server_name} ${entry.tool.name}`.toLowerCase();
+      const body = truncateUtf8(entry.tool.description, MAX_DESCRIPTION_BYTES, "").toLowerCase();
+      let score = 0;
+      for (const term of terms) score += title.includes(term) ? 2 : body.includes(term) ? 1 : 0;
+      return { entry, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score)
+    .map(({ entry }) => entry);
+}
+
+// Every part is bounded on its own, so the schema is never cut mid-JSON: the name is at most 64
+// characters, the server label and description are truncated here, and `prepareTools` accepted the
+// schema only if its compact serialization fits `MAX_SCHEMA_BYTES`.
+function describeCatalogEntry({ name, tool }: McpCatalogEntry): string {
+  const hasSchema = !tool.input_schema_malformed && Object.keys(tool.input_schema).length > 0;
+  // Schema text is returned for the model to read; it is never compiled, so the regex and `$ref`
+  // hazards that force the direct-mode envelope do not apply here.
+  const schema = hasSchema
+    ? JSON.stringify(tool.input_schema)
+    : "none supplied by the server; pass arguments as an object";
+  const server = truncateUtf8(tool.server_name, MAX_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
+  const description = truncateUtf8(tool.description, MAX_DESCRIPTION_BYTES, DESCRIPTION_TRUNCATION_MARKER);
+  return `${name}\nServer: ${server}\n\n${description}\n\nInput schema: ${schema}`;
+}
+
+// One tool that stands in for a whole catalog: its definition costs the same whatever the catalog
+// holds, and search/describe read the in-memory catalog, so only `call` touches the proxy.
+export function createMcpGatewayDefinition(
+  getAuth: (ctx?: ExtensionContext) => Promise<LiteLLMRuntimeAuth>,
+  getCatalog: () => readonly McpCatalogEntry[],
+  namespace?: string,
+  onDiagnostic?: DiagnosticSink,
+): ToolDefinition {
+  const name = gatewayToolName(namespace);
+  const source = namespace === undefined ? "the LiteLLM proxy" : `the ${JSON.stringify(namespace)} LiteLLM proxy`;
+  const parameters = Type.Object({
+    action: StringEnum(["search", "describe", "call"] as const, {
+      description: "search the catalog, describe one tool's input schema, or call one tool",
+    }),
+    query: Type.Optional(
+      Type.String({ description: "search: words matched against tool names, servers, and descriptions" }),
+    ),
+    tool: Type.Optional(Type.String({ description: "describe or call: a tool name returned by search" })),
+    arguments: Type.Optional(
+      Type.Record(Type.String(), Type.Unknown(), { description: "call: arguments matching the described schema" }),
+    ),
+  });
+  const lookup = (toolName: string | undefined): McpCatalogEntry => {
+    const entry = toolName === undefined ? undefined : getCatalog().find((candidate) => candidate.name === toolName);
+    if (!entry) throw new Error(`Unknown ${name} tool; use action "search" to find a tool name.`);
+    return entry;
+  };
+
+  return defineTool({
+    name,
+    label: "LiteLLM MCP",
+    description:
+      `Search, describe, and call the MCP tools exposed by ${source}. ` +
+      'Use action "search" with a query to find tools, "describe" to read a tool\'s input schema, ' +
+      'and "call" with that tool name and its arguments.',
+    promptSnippet: `Search, describe, and call MCP tools exposed by ${source}`,
+    executionMode: "parallel",
+    parameters,
+    async execute(_toolCallId, params: Static<typeof parameters>, toolSignal, _onUpdate, ctx) {
+      if (params.action === "call") {
+        const entry = lookup(params.tool);
+        return callCatalogTool(entry.tool, params.arguments ?? {}, await getAuth(ctx), toolSignal, onDiagnostic);
+      }
+      if (params.action === "describe") {
+        return { content: [{ type: "text", text: describeCatalogEntry(lookup(params.tool)) }], details: {} };
+      }
+      const catalog = getCatalog();
+      const matches = searchCatalog(catalog, params.query ?? "");
+      const shown = matches.slice(0, MAX_SEARCH_RESULTS);
+      const heading =
+        `${matches.length} of ${catalog.length} MCP tools match` +
+        `${matches.length > shown.length ? `; showing the first ${shown.length}` : ""}. ` +
+        'Use action "describe" for a tool\'s input schema before calling it.';
+      const lines = shown.map(
+        ({ name: toolName, tool }) =>
+          `- ${toolName}: ${oneLine(`${tool.server_name}: ${tool.description}`, MAX_SEARCH_LINE_BYTES)}`,
+      );
+      const text = truncateUtf8([heading, ...lines].join("\n"), MAX_RESULT_BYTES, TRUNCATION_MARKER);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
 }

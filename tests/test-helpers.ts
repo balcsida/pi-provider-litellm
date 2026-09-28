@@ -74,9 +74,12 @@ export type TestPi = {
   commands: Map<string, TestCommand>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   tools: Array<{ name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }>;
+  activeTools: string[];
   registerProvider(provider: Provider): void;
   registerCommand(name: string, command: TestCommand): void;
   registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }): void;
+  getActiveTools(): string[];
+  setActiveTools(toolNames: string[]): void;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
@@ -103,6 +106,7 @@ export function createPi(): TestPi {
     commands: new Map(),
     handlers: new Map(),
     tools: [],
+    activeTools: [],
     registerProvider(provider) {
       this.providers.push(provider);
     },
@@ -111,10 +115,21 @@ export function createPi(): TestPi {
     },
     // Models Pi's real registry: `extension.tools.set(tool.name, ...)` — a synchronous replacement
     // keyed by name. Appending would let tests assert duplicates that production cannot produce.
+    // A new name also becomes active; a replaced one keeps its active state, as in Pi.
     registerTool(tool) {
       const existing = this.tools.findIndex((registered) => registered.name === tool.name);
       if (existing >= 0) this.tools[existing] = tool;
-      else this.tools.push(tool);
+      else {
+        this.tools.push(tool);
+        this.activeTools.push(tool.name);
+      }
+    },
+    getActiveTools() {
+      return [...this.activeTools];
+    },
+    // Pi ignores names that are not registered.
+    setActiveTools(toolNames) {
+      this.activeTools = toolNames.filter((name) => this.tools.some((tool) => tool.name === name));
     },
     on(event, handler) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);

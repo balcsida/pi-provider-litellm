@@ -21,9 +21,16 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import {
+  createMcpGatewayDefinition,
   createMcpToolDefinitions,
   credentialFingerprint,
+  gatewayToolName,
+  MAX_AUTO_DIRECT_BYTES,
+  MCP_EXPOSURE_MODES,
   McpAccessDeniedError,
+  type McpCatalogEntry,
+  type McpExposureMode,
+  measureToolDefinitions,
   reportMcpCatalogOutcome,
   reportMcpPartialDiscovery,
   reportMcpRegistrationFatal,
@@ -486,6 +493,13 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
 function isFeatureEnabled(settings: Record<string, unknown> | undefined, feature: "skills" | "mcp"): boolean {
   const raw = settings?.[feature];
   return !isPlainObject(raw) || raw.enabled !== false;
+}
+
+// `undefined` means the setting is present but not a known mode.
+function getMcpExposureMode(settings: Record<string, unknown> | undefined): McpExposureMode | undefined {
+  const raw = isPlainObject(settings?.mcp) ? settings.mcp.mode : undefined;
+  if (raw === undefined) return "auto";
+  return MCP_EXPOSURE_MODES.find((mode) => mode === raw);
 }
 
 function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
@@ -1582,6 +1596,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     else process.stderr.write(`${text}\n`);
   }
 
+  const configuredMcpMode = getMcpExposureMode(settings);
+  if (mcpEnabled && configuredMcpMode === undefined) {
+    notifyMcp('LiteLLM MCP: litellm.mcp.mode must be "auto", "direct", or "gateway"; using "auto".');
+  }
+  const mcpMode = configuredMcpMode ?? "auto";
+
   pi.on("session_start", (_event, ctx) => {
     sessionStarted = true;
     mcpUI = ctx.hasUI ? ctx.ui : undefined;
@@ -1647,6 +1667,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const registeredMcpIdentities = new Map<string, string>();
   let mcpSeeded = false;
   const mcpRegistrations = new Map<string, Promise<void>>();
+  // Gateway catalogs and the last exposure applied, per provider. Pi cannot unregister a tool, so a
+  // mode change hides the other mode's tools with setActiveTools instead.
+  const mcpCatalogs = new Map<string, readonly McpCatalogEntry[]>();
+  // `hiddenActive` holds the tools a mode switch hid while they were active, so the next switch
+  // restores exactly those and leaves tools the user had turned off alone.
+  const mcpExposures = new Map<
+    string,
+    { mode: "direct" | "gateway"; directNames: Set<string>; hiddenActive: Set<string> }
+  >();
   // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
   // never cleared, so a refusal is fatal for this extension instance rather than a per-tool or
   // retryable condition. Once seen, stop attempting registration here; a reload creates a fresh
@@ -1844,8 +1873,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const registration = (async () => {
       try {
         signal?.throwIfAborted();
-        const { definitions, report } = await createMcpToolDefinitions(
-          (ctx) => (ctx?.modelRegistry ? requireRuntimeAuth(ctx, definition) : Promise.resolve(auth)),
+        const getAuth = (ctx?: ExtensionContext) =>
+          ctx?.modelRegistry ? requireRuntimeAuth(ctx, definition) : Promise.resolve(auth);
+        const { definitions, catalog, report } = await createMcpToolDefinitions(
+          getAuth,
           isVerboseDiscovery() ? (message) => notifyMcp(`${label}: ${message}`, "info") : undefined,
           signal,
           notify,
@@ -1853,29 +1884,80 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         );
         signal?.throwIfAborted();
         if (loginGeneration !== mcpLoginGeneration(definition.name)) return;
+        const directBytes = measureToolDefinitions(definitions);
+        const mode = mcpMode === "auto" ? (directBytes > MAX_AUTO_DIRECT_BYTES ? "gateway" : "direct") : mcpMode;
+        const gatewayName = gatewayToolName(namespace);
+        const previous = mcpExposures.get(definition.name);
+        const directNames = previous?.directNames ?? new Set<string>();
         const registeredNames: string[] = [];
         try {
-          for (const definition of definitions) {
-            // Checked per tool so a cancelled refresh stops promptly instead of driving a full
-            // registry rebuild for every remaining tool.
-            signal?.throwIfAborted();
-            pi.registerTool(definition);
-            registeredNames.push(definition.name);
+          if (mode === "gateway") {
+            mcpCatalogs.set(definition.name, catalog);
+            if (catalog.length > 0) {
+              pi.registerTool(
+                createMcpGatewayDefinition(getAuth, () => mcpCatalogs.get(definition.name) ?? [], namespace, notify),
+              );
+            }
+          } else {
+            for (const definition of definitions) {
+              // Checked per tool so a cancelled refresh stops promptly instead of driving a full
+              // registry rebuild for every remaining tool.
+              signal?.throwIfAborted();
+              pi.registerTool(definition);
+              registeredNames.push(definition.name);
+              directNames.add(definition.name);
+            }
           }
         } catch (error) {
           if (signal?.aborted) throw signal.reason;
           // Fatal for this instance: report once, with a bounded Pi-authored cause and no proxy text,
           // then stop retrying so a stale instance cannot churn discovery on every later refresh.
           mcpRegistrationFatal = true;
-          reportMcpRegistrationFatal(registeredNames.length, definitions.length, error, notify);
+          reportMcpRegistrationFatal(
+            registeredNames.length,
+            mode === "gateway" ? 1 : definitions.length,
+            error,
+            notify,
+          );
           return;
         }
+        // A new name registers active, but a re-registered one keeps its state, so switching modes
+        // must hide the other mode's tools and restore the ones the previous switch hid.
+        let hiddenActive = previous?.hiddenActive ?? new Set<string>();
+        if (previous && previous.mode !== mode) {
+          const hiding = mode === "gateway" ? directNames : new Set([gatewayName]);
+          const active = pi.getActiveTools();
+          const next = active.filter((name) => !hiding.has(name));
+          for (const name of mode === "gateway" ? [gatewayName] : registeredNames) {
+            if (previous.hiddenActive.has(name) && !next.includes(name)) next.push(name);
+          }
+          hiddenActive = new Set(active.filter((name) => hiding.has(name)));
+          pi.setActiveTools(next);
+        }
+        mcpExposures.set(definition.name, { mode, directNames, hiddenActive });
+        if (mode === "gateway" && mcpMode === "auto" && previous?.mode !== "gateway") {
+          notifyMcp(
+            `${label}: ${catalog.length} MCP tools would add about ${Math.ceil(directBytes / 4 / 1000)}k tokens ` +
+              `to every request, so they are available through ${gatewayName} instead. ` +
+              'Set litellm.mcp.mode to "direct" to register them individually.',
+            "info",
+          );
+        }
+        const exposedNames = mode === "gateway" ? catalog.map((entry) => entry.name) : registeredNames;
         reportMcpRegistrationSuccess(notify);
-        reportMcpPartialDiscovery(report.partialFailure, registeredNames, notify);
+        reportMcpPartialDiscovery(
+          report.partialFailure,
+          exposedNames,
+          notify,
+          mode === "gateway" ? `available through ${gatewayName}` : undefined,
+        );
         if (isVerboseDiscovery()) {
           notifyMcp(
-            `${label}: registered ${registeredNames.length} of ${definitions.length} prepared MCP tools ` +
-              `(${report.discovered} raw, ${report.enveloped} enveloped).`,
+            mode === "gateway"
+              ? `${label}: exposed ${catalog.length} prepared MCP tools through ${gatewayName} ` +
+                  `(${report.discovered} raw, ${directBytes} bytes of definitions kept out of the prompt).`
+              : `${label}: registered ${registeredNames.length} of ${definitions.length} prepared MCP tools ` +
+                  `(${report.discovered} raw, ${report.enveloped} enveloped).`,
             "info",
           );
         }
