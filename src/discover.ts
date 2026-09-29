@@ -135,26 +135,14 @@ export function completionsCompat(
 }
 
 function supportsResponses(entry: ModelInfoEntry): boolean {
+  // Only return true when there is explicit evidence that the deployment
+  // supports the Responses API.  Previously this function fell through to a
+  // backend-family heuristic (any non-Azure OpenAI family → true) which caused
+  // 404 errors on models whose proxy claims the openai family but only serves
+  // Chat Completions (e.g. LongCat behind LiteLLM).  See issue #203.
   const endpoints = entry.model_info?.supported_endpoints;
   if (Array.isArray(endpoints)) return endpoints.some((endpoint) => endpoint === "/v1/responses");
-  if (normalizedMode(entry.model_info?.mode) === "responses") return true;
-
-  const identity = resolveBackendIdentity(entry);
-  if (identity?.family !== "openai") return false;
-  const adapter = wireString(entry.litellm_params?.custom_llm_provider)?.trim().toLowerCase();
-  const configuredModel = wireString(entry.litellm_params?.model)?.trim().toLowerCase();
-  const reportedProvider = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
-  const azureAdapter =
-    adapter === "azure" ||
-    adapter === "azure_ai" ||
-    /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
-    reportedProvider === "azure" ||
-    reportedProvider === "azure_ai";
-  // An Azure API version describes the API surface, not whether this deployment
-  // serves Responses. Require the explicit mode/endpoint evidence above instead
-  // of promoting a working Chat route to an unavailable endpoint.
-  // Generic adapters remain eligible for LiteLLM's Responses-to-Chat bridge.
-  return !azureAdapter;
+  return normalizedMode(entry.model_info?.mode) === "responses";
 }
 
 export function modelProtocol(modelId: string, modeOrEntry?: string | null | ModelInfoEntry): ModelProtocol {
