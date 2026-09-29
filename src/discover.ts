@@ -2,7 +2,12 @@ import { isIP } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
-import { LITELLM_DISCOVERY_VERSION, resolveBackendIdentity, resolveCatalogProvider } from "./backend-identity.js";
+import {
+  LITELLM_DISCOVERY_VERSION,
+  resolveBackendIdentity,
+  resolveCatalogProvider,
+  routesOnlyThrough,
+} from "./backend-identity.js";
 import {
   type CatalogResolution,
   catalogResolution,
@@ -28,6 +33,7 @@ import type {
   DiscoveryOptions,
   DiscoveryResult,
   HealthResponse,
+  LiteLLMModel,
   LiteLLMModelPolicy,
   ModelInfoEntry,
   ModelInfoResponse,
@@ -324,8 +330,18 @@ function messagesCompatOf(model: Model<Api>): MessagesBackendCompat | undefined 
   const carried: MessagesBackendCompat = {};
   if (compat?.forceAdaptiveThinking !== undefined) carried.forceAdaptiveThinking = compat.forceAdaptiveThinking;
   if (compat?.supportsTemperature !== undefined) carried.supportsTemperature = compat.supportsTemperature;
-  if (compat?.supportsStrictTools !== undefined) carried.supportsStrictTools = compat.supportsStrictTools;
   return carried;
+}
+
+const ANTHROPIC_ROUTES: ReadonlySet<string> = new Set(["anthropic"]);
+
+function messagesStrictToolEvidence(entry: ModelInfoEntry, model: Model<Api>): boolean | undefined {
+  // The Anthropic catalog describes the Anthropic API, so only deployments whose
+  // declared routing names Anthropic keep its grant. A hosted route (Bedrock,
+  // Vertex) can reject tools[].strict for the same model, and LiteLLM reports no
+  // per-route strict-tool capability, so it stays unknown.
+  if (!routesOnlyThrough(entry, ANTHROPIC_ROUTES) || model.api !== "anthropic-messages") return undefined;
+  return (model as Model<"anthropic-messages">).compat?.supportsStrictTools;
 }
 
 function anthropicBackendLookupIds(id: string): string[] {
@@ -353,7 +369,7 @@ const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$
 
 function nativeMessagesCatalog(
   entry: ModelInfoEntry,
-): Pick<CatalogResolution, "messagesCompat" | "messagesThinkingLevelMap"> {
+): Pick<CatalogResolution, "messagesCompat" | "messagesStrictTools" | "messagesThinkingLevelMap"> {
   const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter) || deploymentFamily(entry) !== "claude") return {};
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
@@ -366,7 +382,13 @@ function nativeMessagesCatalog(
   if (models.some((model) => !model) || new Set(models.map((model) => model?.id)).size !== 1) return {};
   const model = models[0]!;
   const compat = messagesCompatOf(model);
-  return compat ? { messagesCompat: compat, messagesThinkingLevelMap: model.thinkingLevelMap } : {};
+  return compat
+    ? {
+        messagesCompat: compat,
+        messagesStrictTools: messagesStrictToolEvidence(entry, model),
+        messagesThinkingLevelMap: model.thinkingLevelMap,
+      }
+    : {};
 }
 
 const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
@@ -614,7 +636,7 @@ function mapFromModelInfoGroup(
     const model = new Set(generations).size === 1 && family !== "conflicting" ? generations[0] : undefined;
     return {
       ...catalog,
-      ...(options.allowMessages === false ? { messagesCompat: undefined } : {}),
+      ...(options.allowMessages === false ? { messagesCompat: undefined, messagesStrictTools: undefined } : {}),
       ...(family ? { semanticFamily: family } : {}),
       ...(model ? { semanticModel: model } : {}),
     };
@@ -645,10 +667,17 @@ function mapFromModelInfoGroup(
           family === undefined ? undefined : completionsCompat(reduced.id, family),
         ),
       );
+  const messagesCompat =
+    api === "anthropic-messages"
+      ? {
+          ...reduced.messagesCompat,
+          ...(reduced.messagesStrictTools !== undefined ? { supportsStrictTools: reduced.messagesStrictTools } : {}),
+        }
+      : undefined;
   const policy = closeSerializerPolicy({
     api,
     reasoning,
-    vendorCompat: api === "anthropic-messages" ? reduced.messagesCompat : vendorCompat,
+    vendorCompat: api === "anthropic-messages" ? messagesCompat : vendorCompat,
     semanticCompat: reduced.acceptsResponsesReasoningControl
       ? { ...reasoningPolicy?.compat, supportsReasoningEffort: true }
       : reasoningPolicy?.compat,
@@ -1189,10 +1218,22 @@ function hasMoonshotCompatEvidence(compat: Model<Api>["compat"]): boolean {
 }
 
 export function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
-  const cached = model as Model<Api> & { litellmPolicy?: LiteLLMModelPolicy };
-  if (cached.litellmPolicy || !hasMoonshotCompatEvidence(model.compat)) return model;
-  const restored: typeof cached = { ...cached, litellmPolicy: moonshotPolicy(model.id) };
-  return restored;
+  const cached = model as LiteLLMModel;
+  let restored: LiteLLMModel = cached;
+  const messagesCompat = cached.compat as Model<"anthropic-messages">["compat"];
+  if (
+    cached.api === "anthropic-messages" &&
+    cached.litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION &&
+    messagesCompat?.supportsStrictTools !== undefined
+  ) {
+    const { supportsStrictTools: _staleStrictTools, ...compat } = messagesCompat;
+    // Older discovery copied this value from the direct Anthropic catalog even
+    // for hosted routes. Without the original deployment rows it cannot be
+    // re-proven offline, so fail closed until the forced network refresh below.
+    restored = { ...cached, compat: Object.keys(compat).length > 0 ? compat : undefined };
+  }
+  if (restored.litellmPolicy || !hasMoonshotCompatEvidence(restored.compat)) return restored;
+  return { ...restored, litellmPolicy: moonshotPolicy(restored.id) } as LiteLLMModel;
 }
 
 function hasResponsesReasoningControl(model: Model<Api>): boolean {

@@ -2278,6 +2278,27 @@ describe("native Messages route selection", () => {
     });
   });
 
+  it.each([
+    { name: "all affirmative", evidence: [true, true], expected: true },
+    { name: "conflicting evidence", evidence: [true, false], expected: undefined },
+    { name: "denial plus unknown", evidence: [false, undefined], expected: undefined },
+    { name: "partial evidence", evidence: [true, undefined], expected: undefined },
+    { name: "no evidence", evidence: [undefined, undefined], expected: undefined },
+  ])("reduces strict-tool evidence independently for $name deployments", ({ evidence, expected }) => {
+    const remaining = [...evidence];
+    const result = reduceModelGroup(
+      [
+        { model_name: "claude-route", model_info: { id: "a", mode: "chat" } },
+        { model_name: "claude-route", model_info: { id: "b", mode: "chat" } },
+      ],
+      () => ({ ...claude({ forceAdaptiveThinking: true }), messagesStrictTools: remaining.shift() }),
+    );
+
+    expect(result?.api).toBe("anthropic-messages");
+    expect(result?.messagesCompat).toEqual({ forceAdaptiveThinking: true });
+    expect(result?.messagesStrictTools).toBe(expected);
+  });
+
   it("respects explicit Messages endpoint capability", () => {
     const supported = reduceModelGroup(
       [
