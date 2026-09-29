@@ -13,6 +13,7 @@ import {
 import { wildcardMatches } from "../src/discover.js";
 import { prepareLiteLLMRequestPayload } from "../src/index.js";
 import { isResponsesMode } from "../src/model-groups.js";
+import { type ProxyVersion, probeProxyVersion, proxyVersionAtLeast } from "../src/proxy-version.js";
 import { loadPublicCatalog } from "../src/public-catalog.js";
 import type { LiteLLMModel, LiteLLMModelPolicy } from "../src/types.js";
 
@@ -233,7 +234,7 @@ function allowedReasoning(row: BackendIdentityRow): boolean {
   );
 }
 
-export function protocolPrediction(row: BackendIdentityRow): string {
+export function protocolPrediction(row: BackendIdentityRow, proxyVersion?: ProxyVersion): string {
   const identity = resolveBackendIdentity(row);
   const info = row.model_info as JsonObject | undefined;
   const params = row.litellm_params as JsonObject | undefined;
@@ -242,13 +243,13 @@ export function protocolPrediction(row: BackendIdentityRow): string {
     : undefined;
   if (listsResponses === false) return "openai-completions";
   if (isResponsesMode(info?.mode)) return "openai-responses";
-  // Mirrors discovery: azure_ai has no native LiteLLM Responses config, so its
-  // cost-map `supported_endpoints` cannot authorize the crashing Chat bridge.
+  // Mirrors discovery: before v1.103.0 azure_ai reaches Responses only through the
+  // crashing Chat bridge, so its cost-map `supported_endpoints` cannot authorize it.
   const azureAi =
     (typeof params?.custom_llm_provider === "string" &&
       params.custom_llm_provider.trim().toLowerCase() === "azure_ai") ||
     (typeof params?.model === "string" && /^azure_ai\//i.test(params.model.trim()));
-  if (azureAi) return "openai-completions";
+  if (azureAi && listsResponses && !proxyVersionAtLeast(proxyVersion, [1, 103, 0])) return "openai-completions";
   if (listsResponses === true) return "openai-responses";
   if (identity?.family !== "openai") return "openai-completions";
   const providers = [
@@ -346,6 +347,8 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
       rowsByName.set(row.model_name, group);
     }
     const wildcardRows = rows.filter((row) => typeof row.model_name === "string" && row.model_name.includes("*"));
+    // A snapshot carries no proxy version, so its predictions keep every version-gated workaround.
+    const proxyVersion = snapshot ? undefined : await probeProxyVersion(baseUrl.replace(/\/+$/, ""), apiKey, {});
     const catalog = await loadPublicCatalog(publicCatalogOptions(snapshot));
     const models = discovery.models.map((model) => {
       const matchingWildcardRows = wildcardRows.filter((row) => wildcardMatches(row.model_name as string, model.id));
@@ -388,7 +391,7 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
         limits: { context: model.contextWindow, output: model.maxTokens },
         cost: model.cost,
         predictions: {
-          protocol: group.every((row) => protocolPrediction(row) === "openai-responses")
+          protocol: group.every((row) => protocolPrediction(row, proxyVersion) === "openai-responses")
             ? "openai-responses"
             : "openai-completions",
           reasoning: Object.fromEntries(

@@ -20,6 +20,7 @@ import {
   normalizeBaseUrl,
   resolveModelInfoCatalog,
 } from "../src/discover.js";
+import { parseProxyVersion } from "../src/proxy-version.js";
 
 // Deterministic endpoint mock: only the listed suffixes are served and every
 // other URL fails loudly, so a stray fetch can never reach the network or be
@@ -177,10 +178,10 @@ describe("modelProtocol", () => {
     }
   });
 
-  // LiteLLM bridges every azure_ai Responses call through Chat Completions (no native
-  // AZURE_AI Responses config) and that bridge fails streaming with "list index out of
-  // range" before v1.103.0. The cost-map `supported_endpoints` list describes the model,
-  // not that bridge, so it must not promote the route; only an explicit mode may.
+  // Before v1.103.0 LiteLLM bridges every azure_ai Responses call through Chat Completions
+  // and that bridge fails streaming with "list index out of range". The cost-map
+  // `supported_endpoints` list describes the model, not that bridge, so without a known
+  // proxy version it must not promote the route; only an explicit mode may.
   it.each([
     { litellm_params: { model: "azure_ai/gpt-6-astra" } },
     { litellm_params: { model: "gpt-6-astra", custom_llm_provider: "azure_ai" } },
@@ -213,6 +214,62 @@ describe("modelProtocol", () => {
         model_info: { mode: "chat", litellm_provider: "azure_ai", supported_endpoints: ["/v1/responses"] },
       }),
     ).toMatchObject({ api: "openai-responses" });
+  });
+
+  describe("on a proxy of a known version", () => {
+    const azureAiRows = [
+      { litellm_params: { model: "azure_ai/gpt-6-astra" } },
+      { litellm_params: { model: "gpt-6-astra", custom_llm_provider: "azure_ai" } },
+    ];
+    const listsResponses = { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] };
+
+    it.each(["1.103.0", "1.103.1", "1.104.0-rc.1", "2.0.0"])(
+      "lets an azure_ai endpoint list select Responses on %s",
+      (version) => {
+        for (const row of azureAiRows) {
+          expect(
+            modelProtocol("gpt-6-astra", { ...row, model_info: listsResponses }, parseProxyVersion(version)),
+          ).toMatchObject({ api: "openai-responses" });
+        }
+      },
+    );
+
+    it.each(["1.102.0", "1.102.1", "1.103.0-rc.1", "1.103.0.dev2"])(
+      "keeps azure_ai deployments on Chat on %s",
+      (version) => {
+        for (const row of azureAiRows) {
+          expect(
+            modelProtocol("gpt-6-astra", { ...row, model_info: listsResponses }, parseProxyVersion(version)),
+          ).toMatchObject({ api: "openai-completions" });
+        }
+      },
+    );
+
+    it("does not promote an azure_ai deployment that lists no endpoints", () => {
+      for (const row of azureAiRows) {
+        for (const litellm_provider of ["azure", "azure_ai", undefined]) {
+          expect(
+            modelProtocol(
+              "gpt-6-astra",
+              { ...row, model_info: { mode: "chat", ...(litellm_provider ? { litellm_provider } : {}) } },
+              parseProxyVersion("1.103.0"),
+            ),
+          ).toMatchObject({ api: "openai-completions" });
+        }
+      }
+    });
+
+    it("still denies an azure_ai endpoint list that omits /v1/responses", () => {
+      for (const row of azureAiRows) {
+        expect(
+          modelProtocol(
+            "gpt-6-astra",
+            { ...row, model_info: { mode: "responses", supported_endpoints: ["/v1/chat/completions"] } },
+            parseProxyVersion("1.103.0"),
+          ),
+        ).toMatchObject({ api: "openai-completions" });
+      }
+    });
   });
 
   it.each([
@@ -5304,6 +5361,163 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
       contextWindow: 200_000,
       maxTokens: 100_000,
     });
+  });
+});
+
+describe("discoverModels proxy version gate", () => {
+  const VERSION_PROBE = "/v1/responses/resp_version_probe";
+  const azureAiRoute = {
+    model_name: "gpt-6-astra",
+    litellm_params: { model: "azure_ai/gpt-6-astra" },
+    model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+  };
+  const versionReply = (version?: string) => () =>
+    new Response(JSON.stringify({ error: { message: "no healthy deployments" } }), {
+      status: 400,
+      headers: version ? { "x-litellm-version": version } : {},
+    });
+
+  function recordUrls(routes: Record<string, () => Response>): string[] {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      urls.push(url);
+      for (const [suffix, respond] of Object.entries(routes)) {
+        if (url.endsWith(suffix)) return respond();
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    return urls;
+  }
+
+  it.each([
+    ["1.103.0", "openai-responses"],
+    ["1.104.0", "openai-responses"],
+    ["1.102.1", "openai-completions"],
+    ["1.103.0-rc.1", "openai-completions"],
+    ["not-a-version", "openai-completions"],
+  ])("selects the azure_ai transport for a proxy reporting %s", async (version, api) => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [azureAiRoute] }),
+      [VERSION_PROBE]: versionReply(version),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "gpt-6-astra", api }]);
+  });
+
+  it.each([
+    ["omits the version header", { [VERSION_PROBE]: versionReply() }],
+    ["does not answer the version probe", {}],
+  ])("keeps azure_ai on Chat when the proxy %s", async (_label, routes) => {
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [azureAiRoute] }), ...routes });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("model_info");
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "gpt-6-astra", api: "openai-completions" },
+    ]);
+  });
+
+  it("keeps a group on Chat when one deployment needs it on a current proxy", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            azureAiRoute,
+            { ...azureAiRoute, model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions"] } },
+          ],
+        }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "gpt-6-astra", api: "openai-completions" }]);
+  });
+
+  it("asks for the version once, however many deployments depend on it", async () => {
+    const urls = recordUrls({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [azureAiRoute, azureAiRoute, { ...azureAiRoute, model_name: "gpt-5.5" }],
+        }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toHaveLength(1);
+  });
+
+  it.each([
+    ["an OpenAI route", { model_name: "gpt", litellm_params: { model: "openai/gpt-5" } }],
+    [
+      "a native azure route listing Responses",
+      {
+        model_name: "gpt",
+        litellm_params: { model: "azure/gpt-5" },
+        model_info: { supported_endpoints: ["/v1/responses"] },
+      },
+    ],
+    [
+      "an azure_ai route in explicit Responses mode",
+      { ...azureAiRoute, model_info: { ...azureAiRoute.model_info, mode: "responses" } },
+    ],
+    [
+      "an azure_ai route whose endpoint list omits Responses",
+      { ...azureAiRoute, model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions"] } },
+    ],
+    ["an azure_ai route that lists no endpoints", { ...azureAiRoute, model_info: { mode: "chat" } }],
+  ])("does not ask for the version when only %s is published", async (_label, row) => {
+    const urls = recordUrls({ "/model/info": () => jsonResponse(200, { data: [row] }) });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(urls).toEqual(["https://litellm.example.com/model/info"]);
+  });
+
+  it.each([
+    ["1.103.0", "openai-responses"],
+    ["1.102.0", "openai-completions"],
+  ])("applies a %s proxy version to deployment details found through /health", async (version, api) => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "gpt-6-astra", model_id: "astra" }] }),
+      "litellm_model_id=astra": () => jsonResponse(200, { data: [azureAiRoute] }),
+      [VERSION_PROBE]: versionReply(version),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "gpt-6-astra", api }]);
+  });
+
+  it("applies the version to ids expanded from an azure_ai wildcard route", async () => {
+    const wildcard = { ...azureAiRoute, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const expand = (version: string) => {
+      mockEndpoints({
+        "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+        "/v1/models": () => jsonResponse(200, { data: [{ id: "foundry/gpt-6-astra" }] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+      return discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    };
+
+    const current = await expand("1.103.0");
+    vi.restoreAllMocks();
+    const older = await expand("1.102.0");
+
+    expect(current.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "foundry/gpt-6-astra", api: "openai-responses" },
+    ]);
+    expect(older.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "foundry/gpt-6-astra", api: "openai-completions" },
+    ]);
   });
 });
 

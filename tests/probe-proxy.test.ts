@@ -27,6 +27,7 @@ import {
   reasoningPrediction,
   runLiveMatrix,
 } from "../scripts/probe-proxy.js";
+import { parseProxyVersion } from "../src/proxy-version.js";
 
 const snapshot: ProbeSnapshot = {
   modelInfo: {
@@ -148,6 +149,37 @@ describe("predictions", () => {
         }),
       ).toBe("openai-responses");
     }
+  });
+
+  it.each([
+    ["1.103.0", "openai-responses"],
+    ["1.104.0-rc.1", "openai-responses"],
+    ["1.102.1", "openai-completions"],
+    ["1.103.0-rc.1", "openai-completions"],
+  ])("predicts the azure_ai transport for a proxy reporting %s", (version, api) => {
+    for (const litellm_params of [
+      { model: "azure_ai/gpt-6-astra" },
+      { model: "gpt-6-astra", custom_llm_provider: "azure_ai" },
+    ]) {
+      expect(
+        protocolPrediction(
+          {
+            litellm_params,
+            model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] } as never,
+          },
+          parseProxyVersion(version),
+        ),
+      ).toBe(api);
+    }
+  });
+
+  it("does not predict Responses for an azure_ai row that lists no endpoints", () => {
+    expect(
+      protocolPrediction(
+        { litellm_params: { model: "azure_ai/gpt-6-astra" }, model_info: { mode: "chat" } as never },
+        parseProxyVersion("1.103.0"),
+      ),
+    ).toBe("openai-completions");
   });
 
   it.each(["responses", "response", "Responses"])("predicts Responses for a %s mode row", (mode) => {

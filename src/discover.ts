@@ -25,6 +25,7 @@ import {
   type SemanticModel,
   wireString,
 } from "./model-groups.js";
+import { type ProxyVersion, type ProxyVersionFloor, probeProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
 import { loadPublicCatalog, type PublicCatalog, type PublicCatalogRecord } from "./public-catalog.js";
 import { intersectThinkingLevelMaps } from "./thinking-levels.js";
 import type {
@@ -140,30 +141,42 @@ export function completionsCompat(
   return { supportsStore: false };
 }
 
-// LiteLLM has no native Responses config for the `azure_ai` provider (utils.py,
-// `_get_python_responses_config` lists AZURE but not AZURE_AI), so every
-// azure_ai deployment reaches `/v1/responses` through the Chat Completions
-// bridge. That bridge crashes on Azure's empty-`choices` stream chunks with
-// "list index out of range" (fixed upstream in BerriAI/litellm#34455, first in
-// v1.103.0), while the same deployment streams fine on `/v1/chat/completions`.
-// Its `supported_endpoints` list is copied from the model cost map and describes
-// the model, not the transport LiteLLM actually uses, so it cannot authorize
-// Responses here; only an explicit `mode: "responses"` does. A list that omits
-// `/v1/responses` still denies, as for every other deployment.
+// Before v1.103.0 LiteLLM has no native Responses config for the `azure_ai`
+// provider, so every azure_ai deployment reaches `/v1/responses` through the
+// Chat Completions bridge. That bridge crashes on Azure's empty-`choices` stream
+// chunks with "list index out of range" (BerriAI/litellm#34455), while the same
+// deployment streams fine on `/v1/chat/completions`. v1.103.0 guards the bridge
+// and serves azure_ai natively where the host allows it.
+const AZURE_AI_RESPONSES_FLOOR: ProxyVersionFloor = [1, 103, 0];
+
 function isAzureAiDeployment(entry: ModelInfoEntry): boolean {
   const adapter = wireString(entry.litellm_params?.custom_llm_provider)?.trim().toLowerCase();
   const configuredModel = wireString(entry.litellm_params?.model)?.trim().toLowerCase();
   return adapter === "azure_ai" || /^azure_ai\//.test(configuredModel ?? "");
 }
 
-function supportsResponses(entry: ModelInfoEntry): boolean {
+function listsResponsesEndpoint(entry: ModelInfoEntry): boolean | undefined {
   const endpoints = entry.model_info?.supported_endpoints;
-  const listsResponses = Array.isArray(endpoints)
-    ? endpoints.some((endpoint) => endpoint === "/v1/responses")
-    : undefined;
+  return Array.isArray(endpoints) ? endpoints.some((endpoint) => endpoint === "/v1/responses") : undefined;
+}
+
+// An azure_ai `supported_endpoints` list is copied from the model cost map and
+// describes the model, not the transport LiteLLM uses, so on its own it cannot
+// authorize Responses. These are the only deployments whose transport the proxy
+// version decides; discovery asks for the version only when one is published.
+function transportAwaitsProxyVersion(entry: ModelInfoEntry): boolean {
+  return (
+    isAzureAiDeployment(entry) &&
+    listsResponsesEndpoint(entry) === true &&
+    normalizedMode(entry.model_info?.mode) !== "responses"
+  );
+}
+
+function supportsResponses(entry: ModelInfoEntry, proxyVersion?: ProxyVersion): boolean {
+  const listsResponses = listsResponsesEndpoint(entry);
   if (listsResponses === false) return false;
   if (normalizedMode(entry.model_info?.mode) === "responses") return true;
-  if (isAzureAiDeployment(entry)) return false;
+  if (transportAwaitsProxyVersion(entry) && !proxyVersionAtLeast(proxyVersion, AZURE_AI_RESPONSES_FLOOR)) return false;
   if (listsResponses === true) return true;
 
   const identity = resolveBackendIdentity(entry);
@@ -173,7 +186,8 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
   const reportedProvider = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   const azureAdapter =
     adapter === "azure" ||
-    /^azure\//.test(configuredModel ?? "") ||
+    adapter === "azure_ai" ||
+    /^azure(?:_ai)?\//.test(configuredModel ?? "") ||
     reportedProvider === "azure" ||
     reportedProvider === "azure_ai";
   // An Azure API version describes the API surface, not whether this deployment
@@ -183,12 +197,16 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
   return !azureAdapter;
 }
 
-export function modelProtocol(modelId: string, modeOrEntry?: string | null | ModelInfoEntry): ModelProtocol {
+export function modelProtocol(
+  modelId: string,
+  modeOrEntry?: string | null | ModelInfoEntry,
+  proxyVersion?: ProxyVersion,
+): ModelProtocol {
   const selectedEntry =
     typeof modeOrEntry === "object" && modeOrEntry !== null
       ? { ...modeOrEntry, model_name: undefined }
       : { model_name: modelId, model_info: { mode: modeOrEntry } };
-  return supportsResponses(selectedEntry)
+  return supportsResponses(selectedEntry, proxyVersion)
     ? { api: "openai-responses", compat: responsesCompat(modelId) }
     : { api: "openai-completions", compat: completionsCompat(modelId) };
 }
@@ -643,6 +661,7 @@ function mapFromModelInfoGroup(
     defaultedContextRoutes?: Set<string>;
     denyLevels?: boolean;
     allowMessages?: boolean;
+    proxyVersion?: ProxyVersion;
   } = {},
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry) => {
@@ -665,7 +684,7 @@ function mapFromModelInfoGroup(
   if (reduced.contextWindowDefaulted) options.defaultedContextRoutes?.add(reduced.id);
   if (reduced.catalogAuthorityAmbiguous) options.ambiguousRoutes?.push(reduced.id);
   if (reduced.deploymentFamilies.includes("conflicting")) options.conflictingFamilyRoutes?.push(reduced.id);
-  const protocols = entries.map((entry) => modelProtocol(reduced.id, entry));
+  const protocols = entries.map((entry) => modelProtocol(reduced.id, entry, options.proxyVersion));
   const protocol = protocols.find((candidate) => candidate.api === "openai-completions") ?? protocols[0]!;
   const api = reduced.api === "anthropic-messages" ? reduced.api : protocol.api;
   const families = new Set(entries.map((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.family));
@@ -831,6 +850,9 @@ async function discoverFromHealth(
   const publicCatalog = deployments.some((deployment) => deployment && !deployment.synthetic)
     ? await loadDiscoveryPublicCatalog(options)
     : undefined;
+  const proxyVersion = deployments.some((deployment) => deployment && transportAwaitsProxyVersion(deployment.entry))
+    ? await probeProxyVersion(base, apiKey, options)
+    : undefined;
   const incompatibleModeRoutes: string[] = [];
   const ambiguousRoutes: string[] = [];
   const conflictingFamilyRoutes: string[] = [];
@@ -849,6 +871,7 @@ async function discoverFromHealth(
         withheldRepairRoutes,
         denyLevels: group.some(({ denyLevels }) => denyLevels),
         allowMessages: false,
+        proxyVersion,
       });
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
@@ -932,6 +955,7 @@ function applyWildcardEvidence(
   wildcardRows: readonly ModelInfoEntry[],
   publishedWildcardIds: ReadonlySet<string>,
   publicCatalog: PublicCatalog | undefined,
+  proxyVersion: ProxyVersion | undefined,
 ): DiscoveredModel | undefined {
   const matchingRows = wildcardRows.filter((row) => row.model_name && wildcardMatches(row.model_name, model.id));
   const selectedPattern = matchingRows
@@ -946,7 +970,7 @@ function applyWildcardEvidence(
   const parents = matchingRows
     .filter((row) => row.model_name === selectedPattern)
     .map((row) => resolveWildcardRow(row, model.id));
-  const selected = mapFromModelInfoGroup(parents, publicCatalog);
+  const selected = mapFromModelInfoGroup(parents, publicCatalog, { proxyVersion });
   if (!selected) return undefined;
   const policies = [model.litellmPolicy, selected.litellmPolicy].filter((policy) => policy !== undefined);
   const combinedPolicy =
@@ -1083,6 +1107,9 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const publicCatalog = await loadDiscoveryPublicCatalog(options);
+    const proxyVersion = [...groups.values()].some((group) => group.some(transportAwaitsProxyVersion))
+      ? await probeProxyVersion(base, apiKey, options)
+      : undefined;
     const ambiguousRoutes: string[] = [];
     const incompatibleModeRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
@@ -1097,6 +1124,7 @@ export async function discoverModels(
           conflictingFamilyRoutes,
           withheldRepairRoutes,
           defaultedContextRoutes,
+          proxyVersion,
         }),
         deploymentFamilies: group.map(deploymentFamily),
       };
@@ -1146,7 +1174,7 @@ export async function discoverModels(
           })
           .map((entry) => mapFromWildcardExpansion(entry, wildcards, withheldRepairRoutes))
           .filter((model): model is DiscoveredModel => model !== undefined)
-          .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog))
+          .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog, proxyVersion))
           .filter((model): model is DiscoveredModel => model !== undefined);
         models = [...models, ...expanded];
       }
