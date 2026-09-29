@@ -75,6 +75,7 @@ export const allowedSourceModules = [
   "protocols",
   "model-groups",
   "provider",
+  "proxy-version",
   "public-catalog",
   "skills",
   "thinking-levels",
