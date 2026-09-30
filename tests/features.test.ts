@@ -2059,6 +2059,49 @@ describe("LiteLLM MCP exposure", () => {
     expect(pi.activeTools).toEqual(["read"]);
   });
 
+  async function withdrawAfterSecondPass(allTools: Array<{ name: string; exposure?: string }>) {
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    pi.allTools = allTools;
+    await extension(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
+    const name = mcpTool(pi)?.name ?? "";
+    pi.activeTools = ["read", name];
+    pi.allTools = [
+      ...allTools,
+      { name, ...(allTools.some((tool) => "exposure" in tool) ? { exposure: "direct" } : {}) },
+    ];
+    const setActive = vi.spyOn(pi, "setActiveTools");
+    mockCatalog([{ ...searchTool, name: "other" }]);
+    // A settled catalog is only rediscovered when the credentials change.
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(mcpTool(pi)?.exposure).toBe("hidden"));
+    return { pi, name, setActive };
+  }
+
+  it("withdraws a tool that vanished from the catalog and deactivates it on Pi 0.99", async () => {
+    const { pi, name, setActive } = await withdrawAfterSecondPass([
+      { name: "read", exposure: "direct" },
+      { name: "mcp_brave_search", exposure: "direct" },
+    ]);
+    const stub = pi.tools.find((tool) => tool.name === name);
+    expect(stub?.exposure).toBe("hidden");
+    await expect(stub?.execute?.()).rejects.toThrow("This LiteLLM MCP tool is no longer offered by the proxy.");
+    expect(setActive).toHaveBeenCalled();
+    expect(pi.activeTools).toEqual(["read"]);
+  });
+
+  it("registers the withdrawal stub but leaves the active set alone on older Pi", async () => {
+    const { pi, name, setActive } = await withdrawAfterSecondPass([{ name: "read" }]);
+    const stub = pi.tools.find((tool) => tool.name === name);
+    await expect(stub?.execute?.()).rejects.toThrow("no longer offered by the proxy");
+    expect(setActive).not.toHaveBeenCalled();
+    expect(pi.activeTools).toEqual(["read", name]);
+  });
+
   it("reports an unusable exposure setting at load and registers direct tools", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     mockCatalog([searchTool]);
