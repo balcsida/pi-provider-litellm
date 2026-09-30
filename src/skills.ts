@@ -169,6 +169,10 @@ function parseJsonObject(value: string, fieldName: string): Record<string, unkno
   return parsed as Record<string, unknown>;
 }
 
+// Pi 0.99 groups tools by namespace and lets permission extensions read annotation hints; older
+// Pi ignores both fields.
+const SKILLS_NAMESPACE = { name: "litellm_skills", description: "LiteLLM Skills Gateway" };
+
 export function createSkillToolDefinitions(
   getAuth: (ctx?: ExtensionContext) => Promise<LiteLLMRuntimeAuth>,
 ): ToolDefinition[] {
@@ -178,6 +182,8 @@ export function createSkillToolDefinitions(
       label: "LiteLLM Skills",
       description: "List skills registered on the LiteLLM proxy Skills Gateway.",
       promptSnippet: "List LiteLLM Skills Gateway skills",
+      namespace: SKILLS_NAMESPACE,
+      annotations: { readOnlyHint: true, openWorldHint: false },
       parameters: Type.Object({}),
       async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
@@ -189,6 +195,8 @@ export function createSkillToolDefinitions(
       name: "litellm_skill_create",
       label: "Create LiteLLM Skill",
       description: "Create and enable a skill on the LiteLLM proxy Skill Hub from source metadata.",
+      namespace: SKILLS_NAMESPACE,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       parameters: CreateSkillParams,
       async execute(_toolCallId, params: Static<typeof CreateSkillParams>, _signal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
@@ -207,6 +215,8 @@ export function createSkillToolDefinitions(
       name: "litellm_skill_delete",
       label: "Delete LiteLLM Skill",
       description: "Delete a skill from the LiteLLM proxy Skills Gateway.",
+      namespace: SKILLS_NAMESPACE,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       parameters: DeleteSkillParams,
       async execute(_toolCallId, params: Static<typeof DeleteSkillParams>, _signal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
