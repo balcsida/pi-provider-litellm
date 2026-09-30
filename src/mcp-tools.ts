@@ -20,6 +20,8 @@ const MAX_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_SCHEMA_DEPTH = 16;
 const MAX_RESULT_BYTES = 64 * 1024;
+// Pi 0.99 caps its own structured bash results at the same size.
+const MAX_STRUCTURED_RESULT_BYTES = 1024 * 1024;
 const MAX_TOOL_NAME_LENGTH = 64;
 const TOOL_NAME_HASH_LENGTH = 10;
 const MAX_LABEL_BYTES = 256;
@@ -821,7 +823,8 @@ function structuredResult(result: unknown, text: string, isError: boolean): Reco
   const record = asRecord(result);
   if (record && Array.isArray(record.content)) {
     const { _meta: _ignored, ...rest } = record;
-    return isError ? { ...rest, isError: true } : rest;
+    const structured = isError ? { ...rest, isError: true } : rest;
+    if (Buffer.byteLength(JSON.stringify(structured)) <= MAX_STRUCTURED_RESULT_BYTES) return structured;
   }
   return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
 }

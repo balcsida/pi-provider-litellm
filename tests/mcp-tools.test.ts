@@ -489,6 +489,19 @@ describe("executeMcpTool", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("bounds structuredContent to 1 MiB, falling back to the text wrapper", async () => {
+    const big = "x".repeat(1024 * 1024 + 1);
+    const small = "y".repeat(1024);
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { result: { content: [{ type: "text", text: big }], _meta: {} } }))
+      .mockResolvedValueOnce(jsonResponse(200, { result: { content: [{ type: "text", text: small }], _meta: {} } }));
+
+    const over = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(over.structuredContent).toEqual({ content: [{ type: "text", text: over.text }] });
+    const under = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(under.structuredContent).toEqual({ content: [{ type: "text", text: small }] });
+  });
+
   it("returns an object result as structuredContent without _meta and wraps a bare value", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
