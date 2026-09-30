@@ -533,9 +533,11 @@ describe("probeDiscovery", () => {
       models: [{ id: "gpt-6-astra", api: protocol, reasoning: false, contextWindow: 1000, maxTokens: 100, cost: {} }],
       ...(proxyVersion ? { proxyVersion } : {}),
     };
+    // The stub module's source is fixed; the result it returns travels through the
+    // environment so no test data is ever assembled into code.
     await writeFile(
       join(sourceDir, "discover.ts"),
-      `export async function discoverModels() { return ${JSON.stringify(discovery)}; }\n`,
+      'export async function discoverModels() { return JSON.parse(process.env.PROBE_TEST_DISCOVERY ?? "{}"); }\n',
     );
     const fetch = vi.fn(async (input: string | URL | Request) => {
       if (!String(input).endsWith("/model/info")) throw new Error(`unexpected URL: ${String(input)}`);
@@ -553,13 +555,18 @@ describe("probeDiscovery", () => {
       );
     });
     vi.stubGlobal("fetch", fetch);
+    process.env.PROBE_TEST_DISCOVERY = JSON.stringify(discovery);
 
-    const report = await probeDiscovery({ baseUrl: "https://proxy.example/v1", apiKey: "secret", src: dir });
+    try {
+      const report = await probeDiscovery({ baseUrl: "https://proxy.example/v1", apiKey: "secret", src: dir });
 
-    expect(report.models).toMatchObject([{ id: "gpt-6-astra", predictions: { protocol } }]);
-    // The public catalog is fetched too; only requests to the proxy are in question here.
-    const proxyRequests = fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("proxy.example"));
-    expect(proxyRequests).toEqual(["https://proxy.example/model/info"]);
+      expect(report.models).toMatchObject([{ id: "gpt-6-astra", predictions: { protocol } }]);
+      // The public catalog is fetched too; only requests to the proxy are in question here.
+      const proxyRequests = fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("proxy.example"));
+      expect(proxyRequests).toEqual(["https://proxy.example/model/info"]);
+    } finally {
+      delete process.env.PROBE_TEST_DISCOVERY;
+    }
   });
 
   it("injects snapshot fetch and reports identity, flags, selected metadata, and predictions", async () => {
