@@ -67,8 +67,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
-    "@earendil-works/pi-ai": "^0.86.1",
-    "@earendil-works/pi-coding-agent": "^0.86.1",
+    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^0.87.1",
     "@kitlangton/terminal-control": "1.2.1",
     "@types/node": "^26.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
