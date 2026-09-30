@@ -4,10 +4,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMcpToolDefinitions as createMcpToolDefinitionsRaw,
   credentialFingerprint,
+  DEFAULT_MCP_EXPOSURE_POLICY,
   discoverMcpTools as discoverMcpToolsRaw,
   executeMcpTool,
   findSchemaHazard,
+  type McpExposurePolicy,
+  parseMcpExposurePolicy,
   reportMcpPartialDiscovery,
+  resolveMcpExposure,
+  toToolExposure,
 } from "../src/mcp-tools.js";
 
 // Thin wrappers so the bulk of the suite keeps asserting on the shapes it cares about.
@@ -2844,5 +2849,200 @@ describe("MCP normalization edge cases", () => {
     }));
     expect(result.definitions).toHaveLength(2);
     expect(result.report.dropped).toEqual([]);
+  });
+});
+
+describe("Pi tool exposure, namespaces, and annotations", () => {
+  const objectSchema = { type: "object", properties: {} };
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+
+  it("defaults to direct exposure with no overrides", () => {
+    expect(parseMcpExposurePolicy(undefined)).toEqual({ policy: DEFAULT_MCP_EXPOSURE_POLICY, warnings: [] });
+    expect(parseMcpExposurePolicy({ enabled: true })).toEqual({ policy: DEFAULT_MCP_EXPOSURE_POLICY, warnings: [] });
+    expect(DEFAULT_MCP_EXPOSURE_POLICY).toEqual({ exposure: "direct", toolExposure: [] });
+  });
+
+  it("reads Pi's mcp.json exposure keys in settings order", () => {
+    expect(
+      parseMcpExposurePolicy({
+        exposure: "deferred",
+        toolExposure: { "delete_*": "hidden", "github/search_code": "direct" },
+      }),
+    ).toEqual({
+      policy: {
+        exposure: "deferred",
+        toolExposure: [
+          ["delete_*", "hidden"],
+          ["github/search_code", "direct"],
+        ],
+      },
+      warnings: [],
+    });
+  });
+
+  it("falls back to direct and reports unusable exposure settings", () => {
+    const { policy, warnings } = parseMcpExposurePolicy({
+      exposure: "everywhere",
+      toolExposure: { ok: "hidden", broken: "nope", also: 3 },
+    });
+
+    expect(policy).toEqual({ exposure: "direct", toolExposure: [["ok", "hidden"]] });
+    expect(warnings).toEqual([
+      expect.stringContaining(
+        'litellm.mcp.exposure must be one of "direct", "codemode", "codemode-deferred", "deferred", "hidden"',
+      ),
+      expect.stringContaining('litellm.mcp.toolExposure["broken"] must be one of'),
+      expect.stringContaining('litellm.mcp.toolExposure["also"] must be one of'),
+    ]);
+    expect(parseMcpExposurePolicy({ toolExposure: ["delete_*"] })).toEqual({
+      policy: DEFAULT_MCP_EXPOSURE_POLICY,
+      warnings: [expect.stringContaining("litellm.mcp.toolExposure must be an object")],
+    });
+  });
+
+  it("resolves exact keys over patterns and server-qualified keys over bare ones", () => {
+    const policy: McpExposurePolicy = {
+      exposure: "codemode",
+      toolExposure: [
+        ["*", "hidden"],
+        ["search", "direct"],
+        ["brave/search", "deferred"],
+        ["sea*", "codemode-deferred"],
+        ["docs/*", "direct"],
+      ],
+    };
+
+    expect(resolveMcpExposure(policy, "brave", "search")).toBe("deferred");
+    expect(resolveMcpExposure(policy, "other", "search")).toBe("direct");
+    // The first matching pattern in settings order wins, even when a later one is more specific.
+    expect(resolveMcpExposure(policy, "other", "seal")).toBe("hidden");
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["sea*", "direct"]] }, "x", "seal")).toBe(
+      "direct",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["docs/*", "direct"]] }, "docs", "read")).toBe(
+      "direct",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["docs/*", "direct"]] }, "wiki", "read")).toBe(
+      "codemode",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*b*c", "hidden"]] }, "s", "aXbYc")).toBe(
+      "hidden",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*b*c", "hidden"]] }, "s", "ac")).toBe(
+      "codemode",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*a", "hidden"]] }, "s", "a")).toBe("codemode");
+    expect(resolveMcpExposure(DEFAULT_MCP_EXPOSURE_POLICY, "s", "anything")).toBe("direct");
+  });
+
+  it("maps codemode-deferred onto Pi's single deferred tool exposure", () => {
+    expect(toToolExposure("codemode-deferred")).toBe("deferred");
+    for (const exposure of ["direct", "codemode", "deferred", "hidden"] as const) {
+      expect(toToolExposure(exposure)).toBe(exposure);
+    }
+  });
+
+  it("registers direct tools grouped by server when no exposure is configured", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "search",
+          input_schema: objectSchema,
+          mcp_info: { server_name: "Brave API", description: "Web search" },
+        },
+        { name: "fetch", server_name: "docs", input_schema: objectSchema },
+      ]),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    expect(definitions.map((definition) => definition.exposure)).toEqual(["direct", "direct"]);
+    expect(definitions.map((definition) => definition.namespace)).toEqual([
+      { name: "mcp_brave_api", description: "Web search" },
+      { name: "mcp_docs", description: "LiteLLM MCP server docs" },
+    ]);
+    expect(definitions.every((definition) => definition.annotations === undefined)).toBe(true);
+    expect(report.exposures).toEqual(["direct"]);
+  });
+
+  it("applies the exposure policy per tool and reports the distinct exposures", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "search", server_name: "brave", input_schema: objectSchema },
+        { name: "delete_index", server_name: "brave", input_schema: objectSchema },
+        { name: "read", server_name: "docs", input_schema: objectSchema },
+      ]),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth, undefined, undefined, undefined, "dev", {
+      exposure: "codemode-deferred",
+      toolExposure: [
+        ["delete_*", "hidden"],
+        ["docs/read", "direct"],
+      ],
+    });
+
+    expect(definitions.map((definition) => [definition.name, definition.exposure])).toEqual([
+      [named("mcp_dev_brave_search"), "deferred"],
+      [named("mcp_dev_brave_delete_index"), "hidden"],
+      [named("mcp_dev_docs_read"), "direct"],
+    ]);
+    expect(definitions.map((definition) => definition.namespace?.name)).toEqual([
+      "mcp_dev_brave",
+      "mcp_dev_brave",
+      "mcp_dev_docs",
+    ]);
+    // The report keeps the MCP exposure, so the caller can tell codemode-deferred from deferred.
+    expect(report.exposures).toEqual(["codemode-deferred", "direct", "hidden"]);
+  });
+
+  it("passes through boolean annotation hints and drops everything else", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "search",
+          server_name: "brave",
+          input_schema: objectSchema,
+          annotations: {
+            title: "Search",
+            readOnlyHint: true,
+            destructiveHint: "no",
+            openWorldHint: 1,
+            idempotentHint: false,
+          },
+        },
+        { name: "bare", server_name: "brave", input_schema: objectSchema, annotations: null },
+        { name: "empty", server_name: "brave", input_schema: objectSchema, annotations: { title: "Only a title" } },
+      ]),
+    );
+
+    const definitions = await createMcpToolDefinitions(auth);
+
+    expect(definitions.map((definition) => definition.annotations)).toEqual([
+      { readOnlyHint: true, idempotentHint: false },
+      undefined,
+      undefined,
+    ]);
+    expect(Object.hasOwn(definitions[1] ?? {}, "annotations")).toBe(false);
+  });
+
+  it("bounds the namespace name and server description like other proxy-supplied text", async () => {
+    const longServer = `s${"x".repeat(200)}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "tool",
+          input_schema: objectSchema,
+          mcp_info: { server_name: longServer, description: "d".repeat(1000) },
+        },
+      ]),
+    );
+
+    const [definition] = await createMcpToolDefinitions(auth);
+
+    expect(definition?.namespace?.name).toHaveLength(64);
+    expect(definition?.namespace?.name.startsWith("mcp_sxxx")).toBe(true);
+    expect(Buffer.byteLength(definition?.namespace?.description ?? "")).toBeLessThanOrEqual(256);
+    expect(definition?.namespace?.description?.endsWith("…")).toBe(true);
   });
 });

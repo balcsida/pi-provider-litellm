@@ -24,6 +24,8 @@ import {
   createMcpToolDefinitions,
   credentialFingerprint,
   McpAccessDeniedError,
+  type McpExposure,
+  parseMcpExposurePolicy,
   reportMcpCatalogOutcome,
   reportMcpPartialDiscovery,
   reportMcpRegistrationFatal,
@@ -1859,6 +1861,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
+  const mcpExposure = parseMcpExposurePolicy(settings?.mcp);
   const providerNames = new Set(definitions.map((definition) => definition.name));
   const oauthRuntimeRoots = new Map<string, { apiKey: string; root: string }>();
   let mcpUI: ExtensionContext["ui"] | undefined;
@@ -1884,6 +1887,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     sessionStarted = false;
     pendingMcpMessages.clear();
   });
+  for (const warning of mcpExposure.warnings) notifyMcp(`LiteLLM MCP: ${warning}`);
 
   function discoveryDisabledReason(): string | null {
     if (isOffline()) return `${ENV_OFFLINE}=1`;
@@ -2101,6 +2105,42 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
+  let warnedMcpExposureIgnored = false;
+  let warnedMcpUnreachable = false;
+  // As in Pi's own MCP extension: tools that are not declared to the model are reached through
+  // codemode (`codemode`, `codemode-deferred`) or tool_search (`deferred`). Activate the one the
+  // configured exposure needs, and say so once when neither is available.
+  function activateMcpDiscoveryTools(exposures: readonly McpExposure[]): void {
+    const needsCodemode = exposures.includes("codemode") || exposures.includes("codemode-deferred");
+    const needsToolSearch = exposures.includes("deferred");
+    if (!needsCodemode && !needsToolSearch) return;
+    const tools = pi.getAllTools();
+    // Pi before 0.99 reports no `exposure` and declares every registered tool, so nothing needs activating.
+    if (!tools.some((tool) => "exposure" in tool)) {
+      if (warnedMcpExposureIgnored) return;
+      warnedMcpExposureIgnored = true;
+      notifyMcp(
+        "LiteLLM MCP: this Pi version ignores litellm.mcp.exposure; MCP tools are declared directly to the model.",
+      );
+      return;
+    }
+    const hasCodemode = tools.some((tool) => tool.name === "codemode");
+    const hasToolSearch = tools.some((tool) => tool.name === "tool_search");
+    const active = pi.getActiveTools();
+    const activate = [
+      ...(needsCodemode && hasCodemode && !active.includes("codemode") ? ["codemode"] : []),
+      ...(needsToolSearch && hasToolSearch && !active.includes("tool_search") ? ["tool_search"] : []),
+    ];
+    if (activate.length > 0) pi.setActiveTools([...active, ...activate]);
+    const reachable = [...active, ...activate];
+    if ((hasCodemode && reachable.includes("codemode")) || (hasToolSearch && reachable.includes("tool_search"))) return;
+    if (warnedMcpUnreachable) return;
+    warnedMcpUnreachable = true;
+    notifyMcp(
+      "LiteLLM MCP: tools with codemode or deferred exposure are reachable only through Pi's codemode or tool_search tool, and neither is available; they cannot be called.",
+    );
+  }
+
   async function registerMcpTools(
     definition: ProviderDefinition,
     auth: McpRuntimeAuth,
@@ -2141,6 +2181,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
           notify,
           namespace,
+          mcpExposure.policy,
         );
         signal?.throwIfAborted();
         if (loginGeneration !== mcpLoginGeneration(definition.name)) return;
@@ -2163,6 +2204,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         }
         reportMcpRegistrationSuccess(notify);
         reportMcpPartialDiscovery(report.partialFailure, registeredNames, notify);
+        activateMcpDiscoveryTools(report.exposures);
         if (isVerboseDiscovery()) {
           notifyMcp(
             `${label}: registered ${registeredNames.length} of ${definitions.length} prepared MCP tools ` +

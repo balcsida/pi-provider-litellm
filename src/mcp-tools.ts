@@ -1,9 +1,14 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import {
+  defineTool,
+  type ExtensionContext,
+  type ToolDefinition,
+  type ToolExposure,
+} from "@earendil-works/pi-coding-agent";
 import { normalizeBaseUrl } from "./discover.js";
-import type { LiteLLMMcpTool, LiteLLMRuntimeAuth } from "./types.js";
+import type { LiteLLMMcpTool, LiteLLMRuntimeAuth, McpToolAnnotations } from "./types.js";
 
 const LIST_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
@@ -36,12 +41,102 @@ interface RawLiteLLMMcpTool {
   description?: unknown;
   inputSchema?: unknown;
   input_schema?: unknown;
+  annotations?: unknown;
   server_id?: unknown;
   server_name?: unknown;
   mcp_info?: {
     server_id?: unknown;
     server_name?: unknown;
+    description?: unknown;
   };
+}
+
+// The exposure values of a Pi `mcp.json` server entry, so `litellm.mcp.exposure` and
+// `litellm.mcp.toolExposure` mean what Pi's own MCP configuration means.
+export type McpExposure = "direct" | "codemode" | "codemode-deferred" | "deferred" | "hidden";
+const MCP_EXPOSURES: readonly McpExposure[] = ["direct", "codemode", "codemode-deferred", "deferred", "hidden"];
+
+export interface McpExposurePolicy {
+  // Exposure of every tool without a `toolExposure` match.
+  exposure: McpExposure;
+  // `[key, exposure]` in settings order. A key without `/` matches the tool name as the server offers
+  // it; a key with `/` matches `<server>/<tool>`. `*` matches any characters.
+  toolExposure: ReadonlyArray<readonly [string, McpExposure]>;
+}
+
+export const DEFAULT_MCP_EXPOSURE_POLICY: McpExposurePolicy = { exposure: "direct", toolExposure: [] };
+
+function isMcpExposure(value: unknown): value is McpExposure {
+  return typeof value === "string" && (MCP_EXPOSURES as readonly string[]).includes(value);
+}
+
+// Reads `exposure` and `toolExposure` from the `litellm.mcp` settings block. Unusable values fall back
+// to `direct`, today's behavior, and are reported in extension-owned text.
+export function parseMcpExposurePolicy(raw: unknown): { policy: McpExposurePolicy; warnings: string[] } {
+  const settings = asRecord(raw);
+  const warnings: string[] = [];
+  const expected = MCP_EXPOSURES.map((value) => JSON.stringify(value)).join(", ");
+  let exposure: McpExposure = "direct";
+  if (settings?.exposure !== undefined) {
+    if (isMcpExposure(settings.exposure)) exposure = settings.exposure;
+    else warnings.push(`litellm.mcp.exposure must be one of ${expected}; using "direct".`);
+  }
+  const toolExposure: Array<readonly [string, McpExposure]> = [];
+  if (settings?.toolExposure !== undefined) {
+    const overrides = asRecord(settings.toolExposure);
+    if (!overrides)
+      warnings.push("litellm.mcp.toolExposure must be an object mapping tool name patterns to exposures; ignoring it.");
+    else
+      for (const [key, value] of Object.entries(overrides)) {
+        if (isMcpExposure(value)) toolExposure.push([key, value]);
+        else warnings.push(`litellm.mcp.toolExposure[${JSON.stringify(key)}] must be one of ${expected}; ignoring it.`);
+      }
+  }
+  return { policy: { exposure, toolExposure }, warnings };
+}
+
+// Glob match where `*` matches any characters; segments must appear in order without overlapping.
+function wildcardMatches(pattern: string, subject: string): boolean {
+  const segments = pattern.split("*");
+  if (segments.length === 1) return pattern === subject;
+  const first = segments[0] ?? "";
+  const last = segments[segments.length - 1] ?? "";
+  if (!subject.startsWith(first) || !subject.endsWith(last)) return false;
+  const end = subject.length - last.length;
+  let position = first.length;
+  for (const segment of segments.slice(1, -1)) {
+    const index = subject.indexOf(segment, position);
+    if (index === -1 || index + segment.length > end) return false;
+    position = index + segment.length;
+  }
+  return position <= end;
+}
+
+// As in Pi's mcp.json: an exact key wins over patterns, and among patterns the first in settings
+// order wins. A `<server>/<tool>` exact key is more specific than a bare tool name.
+export function resolveMcpExposure(policy: McpExposurePolicy, serverName: string, toolName: string): McpExposure {
+  const qualified = `${serverName}/${toolName}`;
+  let qualifiedExact: McpExposure | undefined;
+  let bareExact: McpExposure | undefined;
+  let firstPattern: McpExposure | undefined;
+  for (const [key, exposure] of policy.toolExposure) {
+    const isQualified = key.includes("/");
+    const subject = isQualified ? qualified : toolName;
+    if (!key.includes("*")) {
+      if (key !== subject) continue;
+      if (isQualified) qualifiedExact ??= exposure;
+      else bareExact ??= exposure;
+    } else if (firstPattern === undefined && wildcardMatches(key, subject)) {
+      firstPattern = exposure;
+    }
+  }
+  return qualifiedExact ?? bareExact ?? firstPattern ?? policy.exposure;
+}
+
+// Pi's tool API has one `deferred`; the two deferred MCP exposures differ only in which discovery
+// tool (codemode or tool_search) is activated to reach them.
+export function toToolExposure(exposure: McpExposure): ToolExposure {
+  return exposure === "codemode-deferred" ? "deferred" : exposure;
 }
 
 interface PreparedTool {
@@ -49,6 +144,7 @@ interface PreparedTool {
   name: string;
   parameters: TSchema;
   syntheticArgsEnvelope: boolean;
+  exposure: McpExposure;
 }
 
 interface InvalidMcpTool {
@@ -104,6 +200,8 @@ export interface McpPreparationReport {
   // Non-printed identities paired with `dropped`, used to detect membership changes safely.
   dropMemberships: Array<{ reason: McpDropReason; identities: string[] }>;
   degraded: Array<{ reason: McpDegradeReason; tools: string[] }>;
+  // Distinct exposures of the prepared tools, so the caller can activate codemode or tool_search.
+  exposures: McpExposure[];
 }
 
 // Bounded discovery result: `raw` is what the proxy returned, so losses can be reconciled.
@@ -460,6 +558,21 @@ function parseDiscoveryJson(text: string): unknown {
   return parseJson(text, "MCP discovery");
 }
 
+const ANNOTATION_HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
+
+// Only the boolean hints, as Pi's own MCP client keeps them; other proxy-supplied annotation fields
+// (such as `title`) never reach Pi.
+function toolAnnotations(value: unknown): McpToolAnnotations | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const hints: McpToolAnnotations = {};
+  for (const hint of ANNOTATION_HINTS) {
+    const flag = raw[hint];
+    if (typeof flag === "boolean") hints[hint] = flag;
+  }
+  return Object.keys(hints).length > 0 ? hints : undefined;
+}
+
 function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   const raw = asRecord(value) as RawLiteLLMMcpTool | undefined;
   if (!raw) return undefined;
@@ -474,6 +587,8 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
   const hasSnakeInputSchema = Object.hasOwn(raw, "input_schema");
   const suppliedSchema = hasInputSchema ? raw.inputSchema : hasSnakeInputSchema ? raw.input_schema : undefined;
   const inputSchema = asRecord(suppliedSchema);
+  const annotations = toolAnnotations(raw.annotations);
+  const serverDescription = stringValue(raw.mcp_info?.description);
   return {
     name,
     server_name: serverName,
@@ -482,6 +597,8 @@ function normalizeMcpTool(value: unknown): LiteLLMMcpTool | undefined {
     input_schema: inputSchema ?? {},
     // Present but not an object: malformed, as distinct from absent.
     ...(inputSchema === undefined && (hasInputSchema || hasSnakeInputSchema) ? { input_schema_malformed: true } : {}),
+    ...(annotations ? { annotations } : {}),
+    ...(serverDescription ? { server_description: serverDescription } : {}),
   };
 }
 
@@ -1147,6 +1264,7 @@ function buildParameters(tool: LiteLLMMcpTool): BuiltParameters | McpDropReason 
 export function prepareTools(
   discovery: McpDiscovery,
   namespace?: string,
+  exposurePolicy: McpExposurePolicy = DEFAULT_MCP_EXPOSURE_POLICY,
 ): {
   prepared: PreparedTool[];
   report: McpPreparationReport;
@@ -1185,6 +1303,7 @@ export function prepareTools(
       tool,
       parameters: built.parameters,
       syntheticArgsEnvelope: built.syntheticArgsEnvelope,
+      exposure: resolveMcpExposure(exposurePolicy, tool.server_name, tool.name),
       degraded: built.degraded,
     });
   }
@@ -1222,6 +1341,7 @@ export function prepareTools(
     dropped: [...drops.entries()].map(([reason, tools]) => ({ reason, tools })),
     dropMemberships: [...dropMemberships.entries()].map(([reason, identities]) => ({ reason, identities })),
     degraded: [...degrades.entries()].map(([reason, tools]) => ({ reason, tools })),
+    exposures: [...new Set(prepared.map((tool) => tool.exposure))].sort(),
   };
   return { prepared, report };
 }
@@ -1273,6 +1393,7 @@ export async function createMcpToolDefinitions(
   signal?: AbortSignal,
   onDiagnostic?: DiagnosticSink,
   namespace?: string,
+  exposurePolicy: McpExposurePolicy = DEFAULT_MCP_EXPOSURE_POLICY,
 ): Promise<{ definitions: ToolDefinition[]; report: McpPreparationReport }> {
   const discoveryAuth = await getAuth();
   const discovery = await discoverMcpTools(
@@ -1284,7 +1405,7 @@ export async function createMcpToolDefinitions(
     discoveryAuth.allowInsecureHttp,
     onDiagnostic,
   );
-  const { prepared, report } = prepareTools(discovery, namespace);
+  const { prepared, report } = prepareTools(discovery, namespace, exposurePolicy);
   emitPreparationDiagnostics(report, onDiagnostic);
   const lostTotal = report.dropped.reduce((total, entry) => total + entry.tools.length, 0) + report.overflow;
   const lostDetail = [
@@ -1298,7 +1419,7 @@ export async function createMcpToolDefinitions(
       `${lostDetail ? ` (${lostDetail})` : ""}`,
   );
 
-  const definitions = prepared.map(({ tool: mcpTool, name, parameters, syntheticArgsEnvelope }) => {
+  const definitions = prepared.map(({ tool: mcpTool, name, parameters, syntheticArgsEnvelope, exposure }) => {
     const description = truncateUtf8(
       `${mcpTool.description} (via ${mcpTool.server_name} MCP server)`,
       MAX_DESCRIPTION_BYTES,
@@ -1314,6 +1435,17 @@ export async function createMcpToolDefinitions(
     // untrusted string that reaches Pi's UI or the model.
     const label = truncateUtf8(`${mcpTool.server_name}: ${mcpTool.name}`, MAX_LABEL_BYTES, SHORT_TRUNCATION_MARKER);
     const boundedDetail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
+    // Pi 0.99 groups tools by namespace, as its own MCP client does per server. The prefix matches the
+    // generated tool names, so a group is recognisable in codemode listings; older Pi ignores it.
+    const namespacePrefix = namespace === undefined ? "mcp" : `mcp_${sanitizeName(namespace)}`;
+    const toolNamespace = {
+      name: `${namespacePrefix}_${sanitizeName(mcpTool.server_name)}`.slice(0, MAX_TOOL_NAME_LENGTH),
+      description: truncateUtf8(
+        mcpTool.server_description ?? `LiteLLM MCP server ${mcpTool.server_name}`,
+        MAX_LABEL_BYTES,
+        SHORT_TRUNCATION_MARKER,
+      ),
+    };
 
     return defineTool({
       name,
@@ -1321,6 +1453,9 @@ export async function createMcpToolDefinitions(
       description,
       promptSnippet,
       executionMode: "parallel",
+      exposure: toToolExposure(exposure),
+      namespace: toolNamespace,
+      ...(mcpTool.annotations ? { annotations: mcpTool.annotations } : {}),
       parameters,
       async execute(_toolCallId, params: Static<typeof parameters>, toolSignal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
