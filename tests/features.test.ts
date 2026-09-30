@@ -7,6 +7,7 @@ import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "
 import {
   createEventBus,
   discoverAndLoadExtensions,
+  type ExtensionAPI,
   ExtensionRunner,
   ModelRegistry,
   ModelRuntime,
@@ -809,6 +810,7 @@ describe("feature parity", () => {
         setActiveTools: () => {},
         refreshTools: () => {},
         getCommands: () => [],
+        getSettings: () => ({}) as ReturnType<ExtensionAPI["getSettings"]>,
         setModel: async () => true,
         getThinkingLevel: () => "off",
         setThinkingLevel: () => {},
