@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import type { Static, TSchema } from "@earendil-works/pi-ai";
+import type { JsonValue, Static, TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import {
   defineTool,
@@ -799,6 +799,33 @@ function mcpCallError(serverId: string, toolName: string, detail: string): Error
   );
 }
 
+export interface McpToolOutcome {
+  text: string;
+  structuredContent: Record<string, unknown>;
+  isError: boolean;
+}
+
+// Same shape as Pi's own MCP `createMcpResultSchema()`, which codemode detects to render
+// `CallToolResult`. Extension-owned: a proxy-supplied `outputSchema` is never forwarded.
+const MCP_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    content: { type: "array", items: { type: "object" } },
+    isError: { type: "boolean" },
+    _meta: { type: "object" },
+  },
+  required: ["content"],
+} as unknown as TSchema;
+
+function structuredResult(result: unknown, text: string, isError: boolean): Record<string, unknown> {
+  const record = asRecord(result);
+  if (record && Array.isArray(record.content)) {
+    const { _meta: _ignored, ...rest } = record;
+    return isError ? { ...rest, isError: true } : rest;
+  }
+  return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
+}
+
 export async function executeMcpTool(
   baseUrl: string,
   apiKey: string,
@@ -809,7 +836,7 @@ export async function executeMcpTool(
   parentSignal?: AbortSignal,
   allowInsecureHttp = false,
   onDiagnostic?: DiagnosticSink,
-): Promise<string> {
+): Promise<McpToolOutcome> {
   parentSignal?.throwIfAborted();
   const signal = boundedSignal(CALL_TIMEOUT_MS, parentSignal);
   let response: Response;
@@ -838,9 +865,11 @@ export async function executeMcpTool(
     if (resultRecord?.isError === true || bodyRecord?.isError === true) {
       const message =
         mcpErrorMessage(resultRecord?.content ?? bodyRecord?.content ?? result) ?? serializeResult(result);
-      throw mcpCallError(serverId, toolName, message);
+      const text = mcpCallError(serverId, toolName, message).message;
+      return { text, structuredContent: structuredResult(result, text, true), isError: true };
     }
-    return serializeResult(result);
+    const text = serializeResult(result);
+    return { text, structuredContent: structuredResult(result, text, false), isError: false };
   } catch (error) {
     if (parentSignal?.aborted) throw parentSignal.reason;
     throw error;
@@ -1457,12 +1486,13 @@ export async function createMcpToolDefinitions(
       namespace: toolNamespace,
       ...(mcpTool.annotations ? { annotations: mcpTool.annotations } : {}),
       parameters,
+      outputSchema: MCP_RESULT_SCHEMA,
       async execute(_toolCallId, params: Static<typeof parameters>, toolSignal, _onUpdate, ctx) {
         const auth = await getAuth(ctx);
         const rawParams = params as Record<string, unknown>;
         const args = syntheticArgsEnvelope ? asRecord(rawParams.args) : rawParams;
         if (!args) throw new Error("Synthetic MCP tool arguments must contain an object-valued args property");
-        const text = await executeMcpTool(
+        const { text, structuredContent, isError } = await executeMcpTool(
           auth.baseUrl,
           auth.apiKey,
           mcpTool.server_id ?? mcpTool.server_name,
@@ -1473,8 +1503,13 @@ export async function createMcpToolDefinitions(
           auth.allowInsecureHttp,
           onDiagnostic,
         );
+        // Pi before 0.99 ignores a returned `isError`; `ctx.executeTool` exists only from 0.99.
+        if (isError && typeof (ctx as { executeTool?: unknown }).executeTool !== "function") throw new Error(text);
         return {
           content: [{ type: "text", text }],
+          // The body came from JSON.parse, so it is a JsonValue; Pi's type cannot see that.
+          structuredContent: structuredContent as JsonValue,
+          ...(isError ? { isError: true } : {}),
           details: {
             server: boundedDetail(mcpTool.server_name),
             serverId: boundedDetail(mcpTool.server_id ?? mcpTool.server_name),

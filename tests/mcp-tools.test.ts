@@ -340,7 +340,7 @@ describe("executeMcpTool", () => {
 
     await expect(
       executeMcpTool("http://host.docker.internal", "sk-test", "server", "tool", {}, undefined, undefined, true),
-    ).resolves.toBe(JSON.stringify("ok", null, 2));
+    ).resolves.toMatchObject({ text: JSON.stringify("ok", null, 2) });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://host.docker.internal/mcp-rest/tools/call",
@@ -362,7 +362,7 @@ describe("executeMcpTool", () => {
         { query: "pi" },
         { "X-Team": "agent" },
       ),
-    ).resolves.toBe(JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2));
+    ).resolves.toMatchObject({ text: JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2) });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/mcp-rest/tools/call",
@@ -482,18 +482,33 @@ describe("executeMcpTool", () => {
     await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
       "denied",
     );
-    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
-      "failed",
-    );
+    const outcome = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toBe("Error calling search on brave: failed");
+    expect(outcome.structuredContent).toEqual({ isError: true, content: [{ text: "failed" }] });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns an object result as structuredContent without _meta and wraps a bare value", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(200, { result: { content: [{ type: "text", text: "hi" }], _meta: { a: 1 }, extra: 2 } }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
+
+    const object = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(object.isError).toBe(false);
+    expect(object.structuredContent).toEqual({ content: [{ type: "text", text: "hi" }], extra: 2 });
+    const bare = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(bare.structuredContent).toEqual({ content: [{ type: "text", text: JSON.stringify("ok", null, 2) }] });
   });
 
   it("accepts an explicit null MCP error as success", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { error: null, result: "ok" }));
 
-    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).resolves.toBe(
-      JSON.stringify("ok", null, 2),
-    );
+    await expect(
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}),
+    ).resolves.toMatchObject({ text: JSON.stringify("ok", null, 2) });
   });
 
   it("bounds tool-call bodies before parsing", async () => {
@@ -519,7 +534,7 @@ describe("executeMcpTool", () => {
   it("truncates returned result text to 64 KiB with a marker without splitting multibyte text", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "😀".repeat(20 * 1024) }));
 
-    const text = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    const { text } = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
 
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(64 * 1024);
     expect(text).toContain("[truncated by pi-provider-litellm]");
@@ -532,13 +547,13 @@ describe("executeMcpTool", () => {
   ])("truncates MCP error text to 64 KiB", async (body) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
 
-    const error = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}).catch(
-      (failure: unknown) => failure,
+    const message = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}).then(
+      (outcome) => outcome.text,
+      (failure: unknown) => (failure as Error).message,
     );
 
-    expect(error).toBeInstanceOf(Error);
-    expect(Buffer.byteLength((error as Error).message)).toBeLessThanOrEqual(64 * 1024);
-    expect((error as Error).message).toContain("[truncated by pi-provider-litellm]");
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(64 * 1024);
+    expect(message).toContain("[truncated by pi-provider-litellm]");
   });
 
   it("bounds nested MCP error traversal", async () => {
@@ -1137,6 +1152,41 @@ describe("createMcpToolDefinitions", () => {
       headers: expect.objectContaining({ Authorization: "Bearer execution-token", "x-tenant": "new" }),
       body: JSON.stringify({ server_id: "brave-api", name: "search", arguments: { query: "pi" } }),
     });
+  });
+});
+
+describe("MCP tool structured results", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+  const listing = () =>
+    jsonResponse(200, [{ name: "probe", server_name: "srv", input_schema: { type: "object", properties: {} } }]);
+
+  it("declares the extension-owned CallToolResult outputSchema", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => listing());
+    const [definition] = await createMcpToolDefinitions(auth);
+    expect(JSON.parse(JSON.stringify(definition?.outputSchema))).toEqual({
+      type: "object",
+      properties: {
+        content: { type: "array", items: { type: "object" } },
+        isError: { type: "boolean" },
+        _meta: { type: "object" },
+      },
+      required: ["content"],
+    });
+  });
+
+  it("returns isError results with their content on Pi 0.99, and throws on older Pi", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(listing());
+    const [definition] = await createMcpToolDefinitions(auth);
+    const failure = { result: { isError: true, content: [{ type: "text", text: "nope" }] } };
+    fetchMock.mockImplementation(async () => jsonResponse(200, failure));
+
+    const result = await definition?.execute("c", {}, undefined, undefined, { executeTool: vi.fn() } as never);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: "Error calling probe on srv: nope" }],
+      structuredContent: { isError: true, content: [{ type: "text", text: "nope" }] },
+    });
+    await expect(definition?.execute("c", {}, undefined, undefined, {} as never)).rejects.toThrow("nope");
   });
 });
 
