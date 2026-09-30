@@ -2102,6 +2102,54 @@ describe("LiteLLM MCP exposure", () => {
     expect(pi.activeTools).toEqual(["read", name]);
   });
 
+  it("treats a refused withdrawal stub as a fatal registration failure", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(mcpTool(pi)).toBeDefined());
+    const name = mcpTool(pi)?.name ?? "";
+    const register = pi.registerTool.bind(pi);
+    pi.registerTool = (tool) => {
+      if (tool.name === name) throw new Error("stale extension");
+      register(tool);
+    };
+    mockCatalog([{ ...searchTool, name: "other" }]);
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("no further attempts will be made by this extension instance"),
+      ),
+    );
+  });
+
+  it("withdraws nothing when the catalog comes back empty", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool, { ...searchTool, name: "second" }]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_"))).toHaveLength(2));
+    mockCatalog([]);
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("no MCP tools were registered"),
+      ),
+    );
+    expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_")).map((tool) => tool.exposure)).toEqual([
+      "direct",
+      "direct",
+    ]);
+  });
+
   it("reports an unusable exposure setting at load and registers direct tools", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     mockCatalog([searchTool]);

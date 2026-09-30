@@ -2233,17 +2233,23 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         reportMcpPartialDiscovery(report.partialFailure, registeredNames, notify);
         const previousNames = registeredMcpToolNames.get(definition.name) ?? new Set<string>();
         const currentNames = new Set(registeredNames);
-        // A partial-failure catalog may omit live tools, so it withdraws nothing and keeps the old names.
-        const withdrawn = report.partialFailure
-          ? new Set<string>()
-          : new Set([...previousNames].filter((n) => !currentNames.has(n)));
-        if (report.partialFailure) for (const name of previousNames) currentNames.add(name);
-        registeredMcpToolNames.set(definition.name, currentNames);
-        if (withdrawn.size > 0) {
-          withdrawMcpTools(withdrawn);
-          if (isVerboseDiscovery()) {
-            notifyMcp(`${label}: withdrew ${withdrawn.size} MCP tools no longer offered by the proxy.`, "info");
-          }
+        // A partial or empty catalog may omit live tools, so it withdraws nothing and keeps the old names.
+        const settled = definitions.length > 0 && !report.partialFailure;
+        const withdrawn = settled ? new Set([...previousNames].filter((n) => !currentNames.has(n))) : new Set<string>();
+        try {
+          if (withdrawn.size > 0) withdrawMcpTools(withdrawn);
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          mcpRegistrationFatal = true;
+          reportMcpRegistrationFatal(registeredNames.length, definitions.length, error, notify);
+          return;
+        }
+        if (definitions.length > 0) {
+          if (!settled) for (const name of previousNames) currentNames.add(name);
+          registeredMcpToolNames.set(definition.name, currentNames);
+        }
+        if (withdrawn.size > 0 && isVerboseDiscovery()) {
+          notifyMcp(`${label}: withdrew ${withdrawn.size} MCP tools no longer offered by the proxy.`, "info");
         }
         activateMcpDiscoveryTools(report.exposures);
         if (isVerboseDiscovery()) {
