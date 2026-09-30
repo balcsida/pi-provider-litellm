@@ -29,6 +29,18 @@
   identity when a non-generic provider conflicts with the model prefix. Reduce every deployment before choosing
   transport, capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
 - Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
+- `supported_endpoints` pins transport except for `azure_ai` deployments on a proxy older than LiteLLM v1.103.0 or of
+  unknown version. Those releases bridge them to Chat Completions regardless of that cost-map list, so they take
+  Responses only from an explicit `mode: "responses"`. Keep `scripts/probe-proxy.ts` `protocolPrediction` in step
+  with `supportsResponses` in `src/discover.ts`.
+- Version-gated workarounds read the proxy version through `src/proxy-version.ts`. An unknown version satisfies no
+  floor, so every gate fails toward the workaround, and a pre-release orders before the release it names. Probe only
+  when a published deployment's outcome depends on the version (`publishesVersionGatedTransport`), at most once per
+  discovery: the probe draws an error reply, so an unconditional one would add a failed request to every operator's
+  logs. A listed deployment is not yet a published one: a withheld group publishes nothing, and a wildcard route
+  publishes nothing until `/v1/models` expands it, so its probe waits for the expansion. `scripts/probe-proxy.ts`
+  reuses `DiscoveryResult.proxyVersion` and never probes. The version is proxy-supplied; keep only the parsed numbers
+  and never print the raw header.
 - Evidence-free `/v1/models` and wholly health-only `/health` groups take protocol and presentation metadata from
   the bounded Pi catalog lookup. `openai-responses` selects Responses; other or missing catalog APIs select Chat.
   A health-only row mixed with deployment details grants no catalog authority to that group.

@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { BackendFamily, LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
+import type { ProxyVersion } from "./proxy-version.js";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
 
@@ -56,6 +57,9 @@ export type LiteLLMModel = Model<LiteLLMApi> & {
 export interface DiscoveryResult {
   models: DiscoveredModel[];
   source: DiscoverySource;
+  // Present only when a `/model/info` discovery had to read it and the proxy
+  // answered. Absent means unknown, not old: discovery asks only when it must.
+  proxyVersion?: ProxyVersion;
 }
 
 export interface DiscoveryOptions {

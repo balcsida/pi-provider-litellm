@@ -27,6 +27,7 @@ import {
   reasoningPrediction,
   runLiveMatrix,
 } from "../scripts/probe-proxy.js";
+import { parseProxyVersion } from "../src/proxy-version.js";
 
 const snapshot: ProbeSnapshot = {
   modelInfo: {
@@ -127,6 +128,57 @@ describe("predictions", () => {
         litellm_params: { model: "azure/gpt-5" },
         model_info: { mode: "responses", supported_endpoints: ["/v1/chat/completions"] } as never,
       }),
+    ).toBe("openai-completions");
+  });
+
+  it("keeps azure_ai rows on Chat despite a cost-map /v1/responses endpoint", () => {
+    for (const litellm_params of [
+      { model: "azure_ai/gpt-6-astra" },
+      { model: "gpt-6-astra", custom_llm_provider: "azure_ai" },
+    ]) {
+      expect(
+        protocolPrediction({
+          litellm_params,
+          model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] } as never,
+        }),
+      ).toBe("openai-completions");
+      expect(
+        protocolPrediction({
+          litellm_params,
+          model_info: { mode: "responses", supported_endpoints: ["/v1/responses"] } as never,
+        }),
+      ).toBe("openai-responses");
+    }
+  });
+
+  it.each([
+    ["1.103.0", "openai-responses"],
+    ["1.104.0-rc.1", "openai-responses"],
+    ["1.102.1", "openai-completions"],
+    ["1.103.0-rc.1", "openai-completions"],
+  ])("predicts the azure_ai transport for a proxy reporting %s", (version, api) => {
+    for (const litellm_params of [
+      { model: "azure_ai/gpt-6-astra" },
+      { model: "gpt-6-astra", custom_llm_provider: "azure_ai" },
+    ]) {
+      expect(
+        protocolPrediction(
+          {
+            litellm_params,
+            model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] } as never,
+          },
+          parseProxyVersion(version),
+        ),
+      ).toBe(api);
+    }
+  });
+
+  it("does not predict Responses for an azure_ai row that lists no endpoints", () => {
+    expect(
+      protocolPrediction(
+        { litellm_params: { model: "azure_ai/gpt-6-astra" }, model_info: { mode: "chat" } as never },
+        parseProxyVersion("1.103.0"),
+      ),
     ).toBe("openai-completions");
   });
 
@@ -467,6 +519,54 @@ describe("probeDiscovery", () => {
     expect(report.source).toBe(source);
     expect(report.models).toMatchObject([{ id: "route-gpt", deployments: 1, publicSources: [] }]);
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/model/info"))).toBe(false);
+  });
+
+  it.each([
+    ["the version discovery read", { major: 1, minor: 103, patch: 0, prerelease: false }, "openai-responses"],
+    ["no version when discovery read none", undefined, "openai-completions"],
+  ])("predicts from %s without asking the proxy again", async (_label, proxyVersion, protocol) => {
+    const dir = await mkdtemp(join(tmpdir(), "probe-proxy-version-"));
+    const sourceDir = join(dir, "src");
+    await mkdir(sourceDir);
+    const discovery = {
+      source: "model_info",
+      models: [{ id: "gpt-6-astra", api: protocol, reasoning: false, contextWindow: 1000, maxTokens: 100, cost: {} }],
+      ...(proxyVersion ? { proxyVersion } : {}),
+    };
+    // The stub module's source is fixed; the result it returns travels through the
+    // environment so no test data is ever assembled into code.
+    await writeFile(
+      join(sourceDir, "discover.ts"),
+      'export async function discoverModels() { return JSON.parse(process.env.PROBE_TEST_DISCOVERY ?? "{}"); }\n',
+    );
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      if (!String(input).endsWith("/model/info")) throw new Error(`unexpected URL: ${String(input)}`);
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              model_name: "gpt-6-astra",
+              litellm_params: { model: "azure_ai/gpt-6-astra" },
+              model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetch);
+    process.env.PROBE_TEST_DISCOVERY = JSON.stringify(discovery);
+
+    try {
+      const report = await probeDiscovery({ baseUrl: "https://proxy.example/v1", apiKey: "secret", src: dir });
+
+      expect(report.models).toMatchObject([{ id: "gpt-6-astra", predictions: { protocol } }]);
+      // The public catalog is fetched too; only requests to the proxy are in question here.
+      const proxyRequests = fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("proxy.example"));
+      expect(proxyRequests).toEqual(["https://proxy.example/model/info"]);
+    } finally {
+      delete process.env.PROBE_TEST_DISCOVERY;
+    }
   });
 
   it("injects snapshot fetch and reports identity, flags, selected metadata, and predictions", async () => {

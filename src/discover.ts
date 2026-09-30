@@ -25,6 +25,7 @@ import {
   type SemanticModel,
   wireString,
 } from "./model-groups.js";
+import { type ProxyVersion, type ProxyVersionFloor, probeProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
 import { loadPublicCatalog, type PublicCatalog, type PublicCatalogRecord } from "./public-catalog.js";
 import { intersectThinkingLevelMaps } from "./thinking-levels.js";
 import type {
@@ -140,10 +141,43 @@ export function completionsCompat(
   return { supportsStore: false };
 }
 
-function supportsResponses(entry: ModelInfoEntry): boolean {
+// Before v1.103.0 LiteLLM has no native Responses config for the `azure_ai`
+// provider, so every azure_ai deployment reaches `/v1/responses` through the
+// Chat Completions bridge. That bridge crashes on Azure's empty-`choices` stream
+// chunks with "list index out of range" (BerriAI/litellm#34455), while the same
+// deployment streams fine on `/v1/chat/completions`. v1.103.0 guards the bridge
+// and serves azure_ai natively where the host allows it.
+const AZURE_AI_RESPONSES_FLOOR: ProxyVersionFloor = [1, 103, 0];
+
+function isAzureAiDeployment(entry: ModelInfoEntry): boolean {
+  const adapter = wireString(entry.litellm_params?.custom_llm_provider)?.trim().toLowerCase();
+  const configuredModel = wireString(entry.litellm_params?.model)?.trim().toLowerCase();
+  return adapter === "azure_ai" || /^azure_ai\//.test(configuredModel ?? "");
+}
+
+function listsResponsesEndpoint(entry: ModelInfoEntry): boolean | undefined {
   const endpoints = entry.model_info?.supported_endpoints;
-  if (Array.isArray(endpoints)) return endpoints.some((endpoint) => endpoint === "/v1/responses");
+  return Array.isArray(endpoints) ? endpoints.some((endpoint) => endpoint === "/v1/responses") : undefined;
+}
+
+// An azure_ai `supported_endpoints` list is copied from the model cost map and
+// describes the model, not the transport LiteLLM uses, so on its own it cannot
+// authorize Responses. These are the only deployments whose transport the proxy
+// version decides; discovery asks for the version only when one is published.
+function transportAwaitsProxyVersion(entry: ModelInfoEntry): boolean {
+  return (
+    isAzureAiDeployment(entry) &&
+    listsResponsesEndpoint(entry) === true &&
+    normalizedMode(entry.model_info?.mode) !== "responses"
+  );
+}
+
+function supportsResponses(entry: ModelInfoEntry, proxyVersion?: ProxyVersion): boolean {
+  const listsResponses = listsResponsesEndpoint(entry);
+  if (listsResponses === false) return false;
   if (normalizedMode(entry.model_info?.mode) === "responses") return true;
+  if (transportAwaitsProxyVersion(entry) && !proxyVersionAtLeast(proxyVersion, AZURE_AI_RESPONSES_FLOOR)) return false;
+  if (listsResponses === true) return true;
 
   const identity = resolveBackendIdentity(entry);
   if (identity?.family !== "openai") return false;
@@ -163,12 +197,16 @@ function supportsResponses(entry: ModelInfoEntry): boolean {
   return !azureAdapter;
 }
 
-export function modelProtocol(modelId: string, modeOrEntry?: string | null | ModelInfoEntry): ModelProtocol {
+export function modelProtocol(
+  modelId: string,
+  modeOrEntry?: string | null | ModelInfoEntry,
+  proxyVersion?: ProxyVersion,
+): ModelProtocol {
   const selectedEntry =
     typeof modeOrEntry === "object" && modeOrEntry !== null
       ? { ...modeOrEntry, model_name: undefined }
       : { model_name: modelId, model_info: { mode: modeOrEntry } };
-  return supportsResponses(selectedEntry)
+  return supportsResponses(selectedEntry, proxyVersion)
     ? { api: "openai-responses", compat: responsesCompat(modelId) }
     : { api: "openai-completions", compat: completionsCompat(modelId) };
 }
@@ -623,6 +661,7 @@ function mapFromModelInfoGroup(
     defaultedContextRoutes?: Set<string>;
     denyLevels?: boolean;
     allowMessages?: boolean;
+    proxyVersion?: ProxyVersion;
   } = {},
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry) => {
@@ -645,7 +684,7 @@ function mapFromModelInfoGroup(
   if (reduced.contextWindowDefaulted) options.defaultedContextRoutes?.add(reduced.id);
   if (reduced.catalogAuthorityAmbiguous) options.ambiguousRoutes?.push(reduced.id);
   if (reduced.deploymentFamilies.includes("conflicting")) options.conflictingFamilyRoutes?.push(reduced.id);
-  const protocols = entries.map((entry) => modelProtocol(reduced.id, entry));
+  const protocols = entries.map((entry) => modelProtocol(reduced.id, entry, options.proxyVersion));
   const protocol = protocols.find((candidate) => candidate.api === "openai-completions") ?? protocols[0]!;
   const api = reduced.api === "anthropic-messages" ? reduced.api : protocol.api;
   const families = new Set(entries.map((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.family));
@@ -728,6 +767,16 @@ function mapFromModelInfoGroup(
 // An evidence-free fallback entry has no deployment or adapter evidence. Its route name
 // authorizes nothing; the Pi catalog entry for its id supplies its protocol and presentation
 // metadata, while an unknown id stays on Chat Completions until /model/info can be read.
+// Whether a group that will be published has its transport decided by the proxy
+// version. Mapping without collectors leaves no diagnostic behind, and whether a
+// group is published does not depend on the version.
+function publishesVersionGatedTransport(
+  group: readonly ModelInfoEntry[],
+  publicCatalog: PublicCatalog | undefined,
+): boolean {
+  return group.some(transportAwaitsProxyVersion) && mapFromModelInfoGroup(group, publicCatalog) !== undefined;
+}
+
 function catalogProtocol(modelId: string, catalogModel: Model<Api> | undefined): ModelProtocol {
   return catalogModel?.api === "openai-responses"
     ? { api: "openai-responses", compat: responsesCompat(modelId) }
@@ -811,6 +860,14 @@ async function discoverFromHealth(
   const publicCatalog = deployments.some((deployment) => deployment && !deployment.synthetic)
     ? await loadDiscoveryPublicCatalog(options)
     : undefined;
+  const proxyVersion = [...groups.values()].some((group) =>
+    publishesVersionGatedTransport(
+      group.map(({ entry }) => entry),
+      publicCatalog,
+    ),
+  )
+    ? await probeProxyVersion(base, apiKey, options)
+    : undefined;
   const incompatibleModeRoutes: string[] = [];
   const ambiguousRoutes: string[] = [];
   const conflictingFamilyRoutes: string[] = [];
@@ -829,6 +886,7 @@ async function discoverFromHealth(
         withheldRepairRoutes,
         denyLevels: group.some(({ denyLevels }) => denyLevels),
         allowMessages: false,
+        proxyVersion,
       });
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
@@ -904,16 +962,14 @@ function wildcardPatternSpecificity(pattern: string): readonly [number, number] 
   return [escaped.length, complexity];
 }
 
-// A concrete id expanded from a wildcard route inherits the deployment evidence from the
-// most-specific matching route, using LiteLLM's pattern order. Rows sharing that route still
-// vote together, so any deployment needing Chat keeps the child on Chat.
-function applyWildcardEvidence(
-  model: DiscoveredModel,
+// The rows of the most-specific published wildcard route LiteLLM would select for a
+// concrete id, using its pattern order, with the id substituted into each row.
+function selectedWildcardRows(
+  modelId: string,
   wildcardRows: readonly ModelInfoEntry[],
   publishedWildcardIds: ReadonlySet<string>,
-  publicCatalog: PublicCatalog | undefined,
-): DiscoveredModel | undefined {
-  const matchingRows = wildcardRows.filter((row) => row.model_name && wildcardMatches(row.model_name, model.id));
+): ModelInfoEntry[] | undefined {
+  const matchingRows = wildcardRows.filter((row) => row.model_name && wildcardMatches(row.model_name, modelId));
   const selectedPattern = matchingRows
     .map((row) => row.model_name!)
     .sort((left, right) => {
@@ -923,10 +979,24 @@ function applyWildcardEvidence(
       return rightLength - leftLength || leftComplexity - rightComplexity || left.localeCompare(right);
     })[0];
   if (!selectedPattern || !publishedWildcardIds.has(selectedPattern)) return undefined;
-  const parents = matchingRows
+  return matchingRows
     .filter((row) => row.model_name === selectedPattern)
-    .map((row) => resolveWildcardRow(row, model.id));
-  const selected = mapFromModelInfoGroup(parents, publicCatalog);
+    .map((row) => resolveWildcardRow(row, modelId));
+}
+
+// A concrete id expanded from a wildcard route inherits the deployment evidence from the
+// most-specific matching route, using LiteLLM's pattern order. Rows sharing that route still
+// vote together, so any deployment needing Chat keeps the child on Chat.
+function applyWildcardEvidence(
+  model: DiscoveredModel,
+  wildcardRows: readonly ModelInfoEntry[],
+  publishedWildcardIds: ReadonlySet<string>,
+  publicCatalog: PublicCatalog | undefined,
+  proxyVersion: ProxyVersion | undefined,
+): DiscoveredModel | undefined {
+  const parents = selectedWildcardRows(model.id, wildcardRows, publishedWildcardIds);
+  if (!parents) return undefined;
+  const selected = mapFromModelInfoGroup(parents, publicCatalog, { proxyVersion });
   if (!selected) return undefined;
   const policies = [model.litellmPolicy, selected.litellmPolicy].filter((policy) => policy !== undefined);
   const combinedPolicy =
@@ -1063,6 +1133,18 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const publicCatalog = await loadDiscoveryPublicCatalog(options);
+    // A wildcard route publishes nothing until `/v1/models` expands it, so only
+    // exact routes can call for the proxy version this early.
+    let proxyVersionRead = false;
+    const readProxyVersion = (): Promise<ProxyVersion | undefined> => {
+      proxyVersionRead = true;
+      return probeProxyVersion(base, apiKey, options);
+    };
+    let proxyVersion = [...groups].some(
+      ([route, group]) => !route.includes("*") && publishesVersionGatedTransport(group, publicCatalog),
+    )
+      ? await readProxyVersion()
+      : undefined;
     const ambiguousRoutes: string[] = [];
     const incompatibleModeRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
@@ -1077,6 +1159,7 @@ export async function discoverModels(
           conflictingFamilyRoutes,
           withheldRepairRoutes,
           defaultedContextRoutes,
+          proxyVersion,
         }),
         deploymentFamilies: group.map(deploymentFamily),
       };
@@ -1114,19 +1197,33 @@ export async function discoverModels(
       const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
       if (listResult.ok && wildcards.length > 0) {
         const seen = new Set(models.map((model) => model.id));
-        const expanded = (listResult.data.data ?? [])
-          .filter((entry) => {
-            const id = wireString(entry.id);
-            return (
-              id === undefined ||
-              (!seen.has(id) &&
-                !droppedExactIds.has(id) &&
-                !droppedWildcards.some((route) => wildcardMatches(route, id)))
-            );
-          })
-          .map((entry) => mapFromWildcardExpansion(entry, wildcards, withheldRepairRoutes))
+        const candidates = (listResult.data.data ?? []).filter((entry) => {
+          const id = wireString(entry.id);
+          return (
+            id === undefined ||
+            (!seen.has(id) && !droppedExactIds.has(id) && !droppedWildcards.some((route) => wildcardMatches(route, id)))
+          );
+        });
+        let sources = wildcards;
+        const expansionAwaitsProxyVersion = candidates.some((entry) => {
+          const id = wireString(entry.id);
+          if (!id || id.includes("*")) return false;
+          const parents = selectedWildcardRows(id, wildcardRows, publishedWildcardIds);
+          return parents !== undefined && publishesVersionGatedTransport(parents, publicCatalog);
+        });
+        if (!proxyVersionRead && expansionAwaitsProxyVersion) {
+          proxyVersion = await readProxyVersion();
+          // The parents were reduced before the version was known; an expansion
+          // must inherit from parents reduced under the version it is published with.
+          sources = wildcardRoutes.flatMap(({ route, deploymentFamilies }) => {
+            const model = mapFromModelInfoGroup(groups.get(route)!, publicCatalog, { proxyVersion });
+            return model ? [{ model, deploymentFamilies }] : [];
+          });
+        }
+        const expanded = candidates
+          .map((entry) => mapFromWildcardExpansion(entry, sources, withheldRepairRoutes))
           .filter((model): model is DiscoveredModel => model !== undefined)
-          .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog))
+          .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog, proxyVersion))
           .filter((model): model is DiscoveredModel => model !== undefined);
         models = [...models, ...expanded];
       }
@@ -1152,7 +1249,7 @@ export async function discoverModels(
           "set model_info.max_input_tokens on every deployment in each route",
       );
     }
-    return { source: "model_info", models };
+    return { source: "model_info", models, ...(proxyVersion ? { proxyVersion } : {}) };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
