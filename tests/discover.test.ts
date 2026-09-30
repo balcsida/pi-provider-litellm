@@ -5480,6 +5480,105 @@ describe("discoverModels proxy version gate", () => {
   });
 
   it.each([
+    ["cannot be listed", () => jsonResponse(500, {})],
+    ["lists nothing", () => jsonResponse(200, { data: [] })],
+    ["lists only ids the wildcard does not match", () => jsonResponse(200, { data: [{ id: "other/gpt-6-astra" }] })],
+  ])("does not ask for the version when an azure_ai wildcard route %s", async (_label, listModels) => {
+    const wildcard = { ...azureAiRoute, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+      "/v1/models": listModels,
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models).toEqual([]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it("does not ask for the version when the only dependent route is withheld", async () => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `withheld-azure-ai-${process.pid}-${Date.now()}-${Math.random()}`;
+    const urls = recordUrls({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { ...azureAiRoute, model_name: route },
+            { model_name: route, model_info: { mode: "embedding" } },
+          ],
+        }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models).toEqual([]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it("asks once when an exact route and a wildcard expansion both depend on the version", async () => {
+    const wildcard = { ...azureAiRoute, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(200, { data: [azureAiRoute, wildcard] }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "gpt-6-astra" }, { id: "foundry/gpt-5.5" }] }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "gpt-6-astra", api: "openai-responses" },
+      { id: "foundry/gpt-5.5", api: "openai-responses" },
+    ]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toHaveLength(1);
+  });
+
+  it("reports the version it read, and none when it did not ask", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [azureAiRoute] }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+    const asked = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    vi.restoreAllMocks();
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, { data: [{ model_name: "gpt", litellm_params: { model: "openai/gpt-5" } }] }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+    const notAsked = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(asked.proxyVersion).toEqual({ major: 1, minor: 103, patch: 0, prerelease: false });
+    expect(notAsked).not.toHaveProperty("proxyVersion");
+  });
+
+  it("does not ask for the version when the only dependent /health route is withheld", async () => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `withheld-health-azure-ai-${process.pid}-${Date.now()}-${Math.random()}`;
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: route, model_id: "astra" },
+            { model: route, model_id: "embed" },
+            { model: "safe-health-route" },
+          ],
+        }),
+      "litellm_model_id=astra": () => jsonResponse(200, { data: [{ ...azureAiRoute, model_name: route }] }),
+      "litellm_model_id=embed": () =>
+        jsonResponse(200, { data: [{ model_name: route, model_info: { mode: "embedding" } }] }),
+      [VERSION_PROBE]: versionReply("1.103.0"),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map((model) => model.id)).toEqual(["safe-health-route"]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it.each([
     ["1.103.0", "openai-responses"],
     ["1.102.0", "openai-completions"],
   ])("applies a %s proxy version to deployment details found through /health", async (version, api) => {

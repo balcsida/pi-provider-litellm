@@ -521,6 +521,47 @@ describe("probeDiscovery", () => {
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/model/info"))).toBe(false);
   });
 
+  it.each([
+    ["the version discovery read", { major: 1, minor: 103, patch: 0, prerelease: false }, "openai-responses"],
+    ["no version when discovery read none", undefined, "openai-completions"],
+  ])("predicts from %s without asking the proxy again", async (_label, proxyVersion, protocol) => {
+    const dir = await mkdtemp(join(tmpdir(), "probe-proxy-version-"));
+    const sourceDir = join(dir, "src");
+    await mkdir(sourceDir);
+    const discovery = {
+      source: "model_info",
+      models: [{ id: "gpt-6-astra", api: protocol, reasoning: false, contextWindow: 1000, maxTokens: 100, cost: {} }],
+      ...(proxyVersion ? { proxyVersion } : {}),
+    };
+    await writeFile(
+      join(sourceDir, "discover.ts"),
+      `export async function discoverModels() { return ${JSON.stringify(discovery)}; }\n`,
+    );
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      if (!String(input).endsWith("/model/info")) throw new Error(`unexpected URL: ${String(input)}`);
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              model_name: "gpt-6-astra",
+              litellm_params: { model: "azure_ai/gpt-6-astra" },
+              model_info: { mode: "chat", supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    const report = await probeDiscovery({ baseUrl: "https://proxy.example/v1", apiKey: "secret", src: dir });
+
+    expect(report.models).toMatchObject([{ id: "gpt-6-astra", predictions: { protocol } }]);
+    // The public catalog is fetched too; only requests to the proxy are in question here.
+    const proxyRequests = fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("proxy.example"));
+    expect(proxyRequests).toEqual(["https://proxy.example/model/info"]);
+  });
+
   it("injects snapshot fetch and reports identity, flags, selected metadata, and predictions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "probe-proxy-"));
     const file = join(dir, "snapshot.json");

@@ -767,6 +767,16 @@ function mapFromModelInfoGroup(
 // An evidence-free fallback entry has no deployment or adapter evidence. Its route name
 // authorizes nothing; the Pi catalog entry for its id supplies its protocol and presentation
 // metadata, while an unknown id stays on Chat Completions until /model/info can be read.
+// Whether a group that will be published has its transport decided by the proxy
+// version. Mapping without collectors leaves no diagnostic behind, and whether a
+// group is published does not depend on the version.
+function publishesVersionGatedTransport(
+  group: readonly ModelInfoEntry[],
+  publicCatalog: PublicCatalog | undefined,
+): boolean {
+  return group.some(transportAwaitsProxyVersion) && mapFromModelInfoGroup(group, publicCatalog) !== undefined;
+}
+
 function catalogProtocol(modelId: string, catalogModel: Model<Api> | undefined): ModelProtocol {
   return catalogModel?.api === "openai-responses"
     ? { api: "openai-responses", compat: responsesCompat(modelId) }
@@ -850,7 +860,12 @@ async function discoverFromHealth(
   const publicCatalog = deployments.some((deployment) => deployment && !deployment.synthetic)
     ? await loadDiscoveryPublicCatalog(options)
     : undefined;
-  const proxyVersion = deployments.some((deployment) => deployment && transportAwaitsProxyVersion(deployment.entry))
+  const proxyVersion = [...groups.values()].some((group) =>
+    publishesVersionGatedTransport(
+      group.map(({ entry }) => entry),
+      publicCatalog,
+    ),
+  )
     ? await probeProxyVersion(base, apiKey, options)
     : undefined;
   const incompatibleModeRoutes: string[] = [];
@@ -947,6 +962,28 @@ function wildcardPatternSpecificity(pattern: string): readonly [number, number] 
   return [escaped.length, complexity];
 }
 
+// The rows of the most-specific published wildcard route LiteLLM would select for a
+// concrete id, using its pattern order, with the id substituted into each row.
+function selectedWildcardRows(
+  modelId: string,
+  wildcardRows: readonly ModelInfoEntry[],
+  publishedWildcardIds: ReadonlySet<string>,
+): ModelInfoEntry[] | undefined {
+  const matchingRows = wildcardRows.filter((row) => row.model_name && wildcardMatches(row.model_name, modelId));
+  const selectedPattern = matchingRows
+    .map((row) => row.model_name!)
+    .sort((left, right) => {
+      const [leftLength, leftComplexity] = wildcardPatternSpecificity(left);
+      const [rightLength, rightComplexity] = wildcardPatternSpecificity(right);
+      // Fewer wildcards (lower complexity) is more specific when escaped length ties.
+      return rightLength - leftLength || leftComplexity - rightComplexity || left.localeCompare(right);
+    })[0];
+  if (!selectedPattern || !publishedWildcardIds.has(selectedPattern)) return undefined;
+  return matchingRows
+    .filter((row) => row.model_name === selectedPattern)
+    .map((row) => resolveWildcardRow(row, modelId));
+}
+
 // A concrete id expanded from a wildcard route inherits the deployment evidence from the
 // most-specific matching route, using LiteLLM's pattern order. Rows sharing that route still
 // vote together, so any deployment needing Chat keeps the child on Chat.
@@ -957,19 +994,8 @@ function applyWildcardEvidence(
   publicCatalog: PublicCatalog | undefined,
   proxyVersion: ProxyVersion | undefined,
 ): DiscoveredModel | undefined {
-  const matchingRows = wildcardRows.filter((row) => row.model_name && wildcardMatches(row.model_name, model.id));
-  const selectedPattern = matchingRows
-    .map((row) => row.model_name!)
-    .sort((left, right) => {
-      const [leftLength, leftComplexity] = wildcardPatternSpecificity(left);
-      const [rightLength, rightComplexity] = wildcardPatternSpecificity(right);
-      // Fewer wildcards (lower complexity) is more specific when escaped length ties.
-      return rightLength - leftLength || leftComplexity - rightComplexity || left.localeCompare(right);
-    })[0];
-  if (!selectedPattern || !publishedWildcardIds.has(selectedPattern)) return undefined;
-  const parents = matchingRows
-    .filter((row) => row.model_name === selectedPattern)
-    .map((row) => resolveWildcardRow(row, model.id));
+  const parents = selectedWildcardRows(model.id, wildcardRows, publishedWildcardIds);
+  if (!parents) return undefined;
   const selected = mapFromModelInfoGroup(parents, publicCatalog, { proxyVersion });
   if (!selected) return undefined;
   const policies = [model.litellmPolicy, selected.litellmPolicy].filter((policy) => policy !== undefined);
@@ -1107,8 +1133,17 @@ export async function discoverModels(
       groups.set(route, group);
     }
     const publicCatalog = await loadDiscoveryPublicCatalog(options);
-    const proxyVersion = [...groups.values()].some((group) => group.some(transportAwaitsProxyVersion))
-      ? await probeProxyVersion(base, apiKey, options)
+    // A wildcard route publishes nothing until `/v1/models` expands it, so only
+    // exact routes can call for the proxy version this early.
+    let proxyVersionRead = false;
+    const readProxyVersion = (): Promise<ProxyVersion | undefined> => {
+      proxyVersionRead = true;
+      return probeProxyVersion(base, apiKey, options);
+    };
+    let proxyVersion = [...groups].some(
+      ([route, group]) => !route.includes("*") && publishesVersionGatedTransport(group, publicCatalog),
+    )
+      ? await readProxyVersion()
       : undefined;
     const ambiguousRoutes: string[] = [];
     const incompatibleModeRoutes: string[] = [];
@@ -1162,17 +1197,31 @@ export async function discoverModels(
       const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
       if (listResult.ok && wildcards.length > 0) {
         const seen = new Set(models.map((model) => model.id));
-        const expanded = (listResult.data.data ?? [])
-          .filter((entry) => {
-            const id = wireString(entry.id);
-            return (
-              id === undefined ||
-              (!seen.has(id) &&
-                !droppedExactIds.has(id) &&
-                !droppedWildcards.some((route) => wildcardMatches(route, id)))
-            );
-          })
-          .map((entry) => mapFromWildcardExpansion(entry, wildcards, withheldRepairRoutes))
+        const candidates = (listResult.data.data ?? []).filter((entry) => {
+          const id = wireString(entry.id);
+          return (
+            id === undefined ||
+            (!seen.has(id) && !droppedExactIds.has(id) && !droppedWildcards.some((route) => wildcardMatches(route, id)))
+          );
+        });
+        let sources = wildcards;
+        const expansionAwaitsProxyVersion = candidates.some((entry) => {
+          const id = wireString(entry.id);
+          if (!id || id.includes("*")) return false;
+          const parents = selectedWildcardRows(id, wildcardRows, publishedWildcardIds);
+          return parents !== undefined && publishesVersionGatedTransport(parents, publicCatalog);
+        });
+        if (!proxyVersionRead && expansionAwaitsProxyVersion) {
+          proxyVersion = await readProxyVersion();
+          // The parents were reduced before the version was known; an expansion
+          // must inherit from parents reduced under the version it is published with.
+          sources = wildcardRoutes.flatMap(({ route, deploymentFamilies }) => {
+            const model = mapFromModelInfoGroup(groups.get(route)!, publicCatalog, { proxyVersion });
+            return model ? [{ model, deploymentFamilies }] : [];
+          });
+        }
+        const expanded = candidates
+          .map((entry) => mapFromWildcardExpansion(entry, sources, withheldRepairRoutes))
           .filter((model): model is DiscoveredModel => model !== undefined)
           .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog, proxyVersion))
           .filter((model): model is DiscoveredModel => model !== undefined);
@@ -1200,7 +1249,7 @@ export async function discoverModels(
           "set model_info.max_input_tokens on every deployment in each route",
       );
     }
-    return { source: "model_info", models };
+    return { source: "model_info", models, ...(proxyVersion ? { proxyVersion } : {}) };
   }
   if (![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);

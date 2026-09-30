@@ -13,7 +13,7 @@ import {
 import { wildcardMatches } from "../src/discover.js";
 import { prepareLiteLLMRequestPayload } from "../src/index.js";
 import { isResponsesMode } from "../src/model-groups.js";
-import { type ProxyVersion, probeProxyVersion, proxyVersionAtLeast } from "../src/proxy-version.js";
+import { type ProxyVersion, proxyVersionAtLeast } from "../src/proxy-version.js";
 import { loadPublicCatalog } from "../src/public-catalog.js";
 import type { LiteLLMModel, LiteLLMModelPolicy } from "../src/types.js";
 
@@ -25,7 +25,7 @@ type Discover = (
   baseUrl: string,
   apiKey: string,
   options?: JsonObject,
-) => Promise<{ source: string; models: ProbeModel[] }>;
+) => Promise<{ source: string; models: ProbeModel[]; proxyVersion?: unknown }>;
 type PreparePayload = typeof prepareLiteLLMRequestPayload;
 type ProbeModel = {
   id: string;
@@ -234,6 +234,18 @@ function allowedReasoning(row: BackendIdentityRow): boolean {
   );
 }
 
+// The discovery module is loaded from an arbitrary source tree, so its result is checked, not trusted.
+function discoveredProxyVersion(value: unknown): ProxyVersion | undefined {
+  if (!isRecord(value)) return undefined;
+  const { major, minor, patch, prerelease } = value;
+  return Number.isSafeInteger(major) &&
+    Number.isSafeInteger(minor) &&
+    Number.isSafeInteger(patch) &&
+    typeof prerelease === "boolean"
+    ? { major: major as number, minor: minor as number, patch: patch as number, prerelease }
+    : undefined;
+}
+
 export function protocolPrediction(row: BackendIdentityRow, proxyVersion?: ProxyVersion): string {
   const identity = resolveBackendIdentity(row);
   const info = row.model_info as JsonObject | undefined;
@@ -347,8 +359,9 @@ export async function probeDiscovery(options: ProbeOptions): Promise<ProbeReport
       rowsByName.set(row.model_name, group);
     }
     const wildcardRows = rows.filter((row) => typeof row.model_name === "string" && row.model_name.includes("*"));
-    // A snapshot carries no proxy version, so its predictions keep every version-gated workaround.
-    const proxyVersion = snapshot ? undefined : await probeProxyVersion(baseUrl.replace(/\/+$/, ""), apiKey, {});
+    // Predictions reuse the version discovery read instead of asking the proxy again. A snapshot,
+    // or a source tree that reports none, keeps every version-gated workaround.
+    const proxyVersion = discoveredProxyVersion(discovery.proxyVersion);
     const catalog = await loadPublicCatalog(publicCatalogOptions(snapshot));
     const models = discovery.models.map((model) => {
       const matchingWildcardRows = wildcardRows.filter((row) => wildcardMatches(row.model_name as string, model.id));
