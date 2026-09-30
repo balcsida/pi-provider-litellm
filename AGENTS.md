@@ -35,9 +35,12 @@
   with `supportsResponses` in `src/discover.ts`.
 - Version-gated workarounds read the proxy version through `src/proxy-version.ts`. An unknown version satisfies no
   floor, so every gate fails toward the workaround, and a pre-release orders before the release it names. Probe only
-  when a published deployment's outcome depends on the version (`transportAwaitsProxyVersion`), at most once per
+  when a published deployment's outcome depends on the version (`publishesVersionGatedTransport`), at most once per
   discovery: the probe draws an error reply, so an unconditional one would add a failed request to every operator's
-  logs. The version is proxy-supplied; keep only the parsed numbers and never print the raw header.
+  logs. A listed deployment is not yet a published one: a withheld group publishes nothing, and a wildcard route
+  publishes nothing until `/v1/models` expands it, so its probe waits for the expansion. `scripts/probe-proxy.ts`
+  reuses `DiscoveryResult.proxyVersion` and never probes. The version is proxy-supplied; keep only the parsed numbers
+  and never print the raw header.
 - Evidence-free `/v1/models` and wholly health-only `/health` groups take protocol and presentation metadata from
   the bounded Pi catalog lookup. `openai-responses` selects Responses; other or missing catalog APIs select Chat.
   A health-only row mixed with deployment details grants no catalog authority to that group.
