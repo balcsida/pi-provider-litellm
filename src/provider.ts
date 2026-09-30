@@ -1,4 +1,6 @@
 import {
+  type AnyModel,
+  type Api,
   type ApiStreamOptions,
   type Credential,
   createProvider,
@@ -26,6 +28,11 @@ export type LiteLLMProviderOptions = {
   resolveCredentialRoot: (credential?: Credential, requestBaseUrl?: string, apiKey?: string) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
+
+// Chat models may omit `type`; Pi's `isModelType()` is newer than the peer floor, so keep the check local.
+function isChatModel(model: AnyModel): model is Model<Api> {
+  return (model.type ?? "chat") === "chat";
+}
 
 export function toNativeModels(
   provider: string,
@@ -220,7 +227,9 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   return {
     ...guardedProvider,
     refreshModels: async (context) => {
-      const storedModels = context.stored?.models ?? [];
+      // Pi 0.99 persists models of every type; this provider only publishes chat models, and the
+      // policy helpers below read chat-only fields.
+      const storedModels = (context.stored?.models ?? []).filter(isChatModel);
       let legacyCount = 0;
       const models = storedModels.map((model) => {
         if ((model as LiteLLMModel).litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION) {
