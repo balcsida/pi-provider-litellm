@@ -7,6 +7,11 @@
 - Build output is `dist/`; do not edit generated output by hand or publish it.
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
+- Dev dependencies track Pi `0.99.1` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
+  ignores (extra `ToolDefinition` fields) or feature-detects (an `exposure` field on `pi.getAllTools()` entries), and do
+  not import runtime symbols that older `pi-ai`/`pi-coding-agent` lack, such as `isModelType`.
+- Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
+  before reading chat-only fields.
 
 ## Commands
 
@@ -90,6 +95,9 @@
   - `typebox`'s `value/convert/from_object.mjs` turns `properties` keys into `new RegExp(`^${key}$`)` with **no escaping**, and `pi-ai` calls `Value.Convert` on tool parameters. That is only harmless because `Convert` walks recognised TypeBox types and no-ops on a raw JSON Schema, so a proxy-supplied property name never reaches it. If that changed, a property named `(a+)+$` would become an executable backtracking regex tested against model-supplied argument keys.
   - `format` is live on passthrough schemas: it is a proxy-chosen selector of `typebox`'s own regexes, executed against model-supplied strings. The shipped formats are well-anchored, so this is a residual dependency on upstream regex quality, not a hole. Do not assume `format` is ignored.
 - Do not write timing-based tests for any of this. Assert the registered `parameters` and the absence of the exact proxy-supplied regex or ref, and keep the schema-position test lists independent of the implementation's own tables.
+- `litellm.mcp.exposure` and `toolExposure` mirror Pi's `mcp.json` keys and are parsed once by `parseMcpExposurePolicy()`. `codemode-deferred` becomes Pi's `deferred` on the tool definition, while `report.exposures` keeps the MCP value so activation can tell them apart. Activation mirrors the built-in MCP extension's `ensureDiscoveryActive`: codemode for `codemode`/`codemode-deferred`, `tool_search` for `deferred`, one warning when neither is registered, and one warning when `getAllTools()` entries carry no `exposure` (Pi before 0.99, where every tool is direct).
+- Never register `/mcp`, `codemode`, or `tool_search`: Pi 0.99 unloads the built-in extension whose tool, command, or flag an extension re-registers. Pi's own MCP tools are `mcp__<server>__<tool>`, so `mcp_<server>_<tool>_<hash>` never collides with them.
+- Annotations keep only the four boolean hints, as Pi's own MCP client does; `title` and any other proxy-supplied annotation field never reach Pi. Namespace names share the generated tool-name prefix (`mcp_<server>` or `mcp_<alias>_<server>`) and are bounded like tool names; the namespace description is proxy text bounded to 256 bytes.
 
 ## Reasoning Policy
 
