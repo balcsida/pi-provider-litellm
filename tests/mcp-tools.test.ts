@@ -3020,9 +3020,13 @@ describe("Pi tool exposure, namespaces, and annotations", () => {
     const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
 
     expect(definitions.map((definition) => definition.exposure)).toEqual(["direct", "direct"]);
-    expect(definitions.map((definition) => definition.namespace)).toEqual([
-      { name: "mcp_brave_api", description: "Web search" },
-      { name: "mcp_docs", description: "LiteLLM MCP server docs" },
+    expect(definitions.map((definition) => definition.namespace?.name)).toEqual([
+      expect.stringMatching(/^mcp_brave_api_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_docs_[0-9a-f]{6}$/),
+    ]);
+    expect(definitions.map((definition) => definition.namespace?.description)).toEqual([
+      "Web search",
+      "LiteLLM MCP server docs",
     ]);
     expect(definitions.every((definition) => definition.annotations === undefined)).toBe(true);
     expect(report.exposures).toEqual(["direct"]);
@@ -3051,9 +3055,9 @@ describe("Pi tool exposure, namespaces, and annotations", () => {
       [named("mcp_dev_docs_read"), "direct"],
     ]);
     expect(definitions.map((definition) => definition.namespace?.name)).toEqual([
-      "mcp_dev_brave",
-      "mcp_dev_brave",
-      "mcp_dev_docs",
+      expect.stringMatching(/^mcp_dev_brave_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_dev_brave_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_dev_docs_[0-9a-f]{6}$/),
     ]);
     // The report keeps the MCP exposure, so the caller can tell codemode-deferred from deferred.
     expect(report.exposures).toEqual(["codemode-deferred", "direct", "hidden"]);
@@ -3107,5 +3111,22 @@ describe("Pi tool exposure, namespaces, and annotations", () => {
     expect(definition?.namespace?.name.startsWith("mcp_sxxx")).toBe(true);
     expect(Buffer.byteLength(definition?.namespace?.description ?? "")).toBeLessThanOrEqual(256);
     expect(definition?.namespace?.description?.endsWith("…")).toBe(true);
+  });
+
+  it("gives servers whose names sanitize or truncate alike different namespaces", async () => {
+    const long = "s".repeat(100);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "t", server_name: "My-Server", input_schema: objectSchema },
+        { name: "t", server_name: "My_Server", input_schema: objectSchema },
+        { name: "t", server_name: `${long}a`, input_schema: objectSchema },
+        { name: "t", server_name: `${long}b`, input_schema: objectSchema },
+      ]),
+    );
+
+    const names = (await createMcpToolDefinitions(auth)).map((definition) => definition.namespace?.name);
+
+    expect(new Set(names).size).toBe(4);
+    for (const name of names) expect(name?.length).toBeLessThanOrEqual(64);
   });
 });

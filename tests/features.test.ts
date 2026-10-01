@@ -1998,7 +1998,10 @@ describe("LiteLLM MCP exposure", () => {
 
     await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
     expect(mcpTool(pi)?.exposure).toBe("deferred");
-    expect(mcpTool(pi)?.namespace).toEqual({ name: "mcp_brave", description: "LiteLLM MCP server brave" });
+    expect(mcpTool(pi)?.namespace).toEqual({
+      name: expect.stringMatching(/^mcp_brave_[0-9a-f]{6}$/),
+      description: "LiteLLM MCP server brave",
+    });
     await vi.waitFor(() => expect(pi.activeTools).toEqual(["read", "tool_search"]));
   });
 

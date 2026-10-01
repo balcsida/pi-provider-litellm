@@ -907,6 +907,16 @@ function buildPiToolName(tool: LiteLLMMcpTool, namespace?: string): string {
   return `${base.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
 }
 
+// A namespace groups one server's tools, so its name is a pure function of server identity too:
+// `My-Server` and `My_Server` sanitize alike, and long names truncate alike, so a hash keeps them apart.
+function buildNamespaceName(tool: LiteLLMMcpTool, namespace?: string): string {
+  const identity = JSON.stringify([namespace ?? null, tool.server_id ?? tool.server_name, tool.server_name]);
+  const hash = createHash("sha256").update(identity).digest("hex").slice(0, 6);
+  const prefix = namespace === undefined ? "mcp" : `mcp_${sanitizeName(namespace)}`;
+  const base = `${prefix}_${sanitizeName(tool.server_name)}`;
+  return `${base.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
+}
+
 function schemaDepth(value: unknown, depth = 0): number {
   if (!value || typeof value !== "object") return depth;
   if (depth > MAX_SCHEMA_DEPTH) return depth;
@@ -1469,9 +1479,8 @@ export async function createMcpToolDefinitions(
     const boundedDetail = (value: string): string => truncateUtf8(value, MAX_DETAIL_BYTES, SHORT_TRUNCATION_MARKER);
     // Pi 0.99 groups tools by namespace, as its own MCP client does per server. The prefix matches the
     // generated tool names, so a group is recognisable in codemode listings; older Pi ignores it.
-    const namespacePrefix = namespace === undefined ? "mcp" : `mcp_${sanitizeName(namespace)}`;
     const toolNamespace = {
-      name: `${namespacePrefix}_${sanitizeName(mcpTool.server_name)}`.slice(0, MAX_TOOL_NAME_LENGTH),
+      name: buildNamespaceName(mcpTool, namespace),
       description: truncateUtf8(
         mcpTool.server_description ?? `LiteLLM MCP server ${mcpTool.server_name}`,
         MAX_LABEL_BYTES,
