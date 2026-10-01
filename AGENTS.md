@@ -7,7 +7,7 @@
 - Build output is `dist/`; do not edit generated output by hand or publish it.
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
-- Dev dependencies track Pi `0.99.2` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
+- Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
   ignores (extra `ToolDefinition` fields) or feature-detects (an `exposure` field on `pi.getAllTools()` entries), and do
   not import runtime symbols that older `pi-ai`/`pi-coding-agent` lack, such as `isModelType`.
 - Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
