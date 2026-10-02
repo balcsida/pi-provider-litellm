@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-litellm",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "LiteLLM proxy provider extension for Pi",
   "type": "module",
   "license": "MIT",
