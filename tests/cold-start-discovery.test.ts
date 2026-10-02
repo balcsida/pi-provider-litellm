@@ -41,7 +41,6 @@ describe("cold start discovery (issue #137)", () => {
       if (url.endsWith("/model/info")) {
         return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
       }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
 
@@ -66,7 +65,6 @@ describe("cold start discovery (issue #137)", () => {
       if (url.endsWith("/model/info")) {
         return jsonResponse(200, { data: [{ model_name: "sonnet", model_info: { mode: "chat" } }] });
       }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
 
@@ -160,118 +158,6 @@ describe("cold start discovery (issue #137)", () => {
 
     expect(Date.now() - startedAt).toBeLessThan(15_000);
   }, 70_000);
-
-  it("seeds MCP tools before the first turn, not during activation", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-mcp-"));
-    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
-    process.env.LITELLM_API_KEY = "env-key";
-    // Long enough to separate the two phases, short enough not to weigh on the suite.
-    const DELAY_MS = 120;
-    const delayed = async (body: unknown): Promise<Response> => {
-      await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
-      return jsonResponse(200, body);
-    };
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return delayed({ data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        return delayed({
-          tools: [
-            {
-              name: "echo",
-              description: "Echo a message",
-              inputSchema: { type: "object", properties: {} },
-              mcp_info: { server_name: "demo", server_id: "demo-server" },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const runtime = await ModelRuntime.create({
-      authPath: join(agentDir, "auth.json"),
-      modelsPath: join(agentDir, "models.json"),
-    });
-    const pi = createPi();
-    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
-    const beforeAgentStart: Array<(event: unknown, ctx: unknown) => Promise<unknown> | unknown> = [];
-    const on = pi.on.bind(pi);
-    pi.on = (event, handler) => {
-      if (event === "before_agent_start") beforeAgentStart.push(handler);
-      on(event, handler);
-    };
-
-    const startedAt = Date.now();
-    await (await loadExtension(agentDir))(pi);
-    const activationMs = Date.now() - startedAt;
-
-    // Seeding is not paid at activation: registerMcpTools serialises callers
-    // per provider, so registering here would be in-flight when Pi runs its own refresh.
-    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_demo_echo_"))).toBe(false);
-    expect(activationMs).toBeLessThan(DELAY_MS * 2);
-
-    for (const handler of beforeAgentStart) await handler({}, {});
-
-    // Pi core sets allowNetwork only for the TUI and the RPC background refresh, so without this
-    // seeding `-p` and --list-models register no MCP tool at all (issue #136, fixed for models).
-    // Registered names carry a server-identity suffix, so match the stable prefix.
-    expect(pi.tools.some((tool) => tool.name.startsWith("mcp_demo_echo_"))).toBe(true);
-  });
-
-  it("seeds each alias's MCP tools under its own name and calls them with its own auth", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-mcp-alias-"));
-    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
-    process.env.LITELLM_API_KEY = "env-key";
-    await writeFile(
-      join(agentDir, "settings.json"),
-      JSON.stringify({
-        litellm: { providers: { team: { baseUrl: "https://team.example.com", apiKey: "team-key" } } },
-      }),
-      "utf8",
-    );
-    const echo = {
-      name: "echo",
-      description: "Echo a message",
-      inputSchema: { type: "object", properties: {} },
-      mcp_info: { server_name: "demo", server_id: "demo-server" },
-    };
-    const calls: Array<{ url: string; authorization: string | null }> = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [echo] });
-      if (url.endsWith("/mcp-rest/tools/call")) {
-        calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
-        return jsonResponse(200, { result: { content: [{ type: "text", text: "ok" }] } });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-
-    const pi = createPi();
-    const beforeAgentStart: Array<(event: unknown, ctx: unknown) => Promise<unknown> | unknown> = [];
-    const on = pi.on.bind(pi);
-    pi.on = (event, handler) => {
-      if (event === "before_agent_start") beforeAgentStart.push(handler);
-      on(event, handler);
-    };
-    await (await loadExtension(agentDir))(pi);
-    for (const handler of beforeAgentStart) await handler({}, {});
-
-    const names = pi.tools.map((tool) => tool.name);
-    const defaultTool = pi.tools.find((tool) => tool.name.startsWith("mcp_demo_echo_"));
-    const aliasTool = pi.tools.find((tool) => tool.name.startsWith("mcp_team_demo_echo_"));
-    expect(names.filter((name) => name.includes("echo"))).toHaveLength(2);
-    expect(defaultTool).toBeDefined();
-    expect(aliasTool).toBeDefined();
-
-    await aliasTool?.execute?.("call-1", {}, undefined, undefined, undefined as never);
-    expect(calls).toEqual([{ url: "https://team.example.com/mcp-rest/tools/call", authorization: "Bearer team-key" }]);
-  });
 
   it("does not discover when no credentials are configured", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-nocreds-"));

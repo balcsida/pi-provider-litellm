@@ -63,7 +63,6 @@ describe("Pi core model overrides", () => {
           data: [{ model_name: "refreshed-model", model_info: { mode: "chat" } }],
         });
       }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
       throw new Error(`unexpected URL: ${url}`);
     });
 

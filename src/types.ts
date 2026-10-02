@@ -150,29 +150,6 @@ export interface ResolvedCredentials {
   apiKeyFromGcloudAdc?: boolean;
 }
 
-// The boolean MCP tool annotation hints, with the meaning Pi gives `ToolAnnotations`.
-export interface McpToolAnnotations {
-  readOnlyHint?: boolean;
-  destructiveHint?: boolean;
-  idempotentHint?: boolean;
-  openWorldHint?: boolean;
-}
-
-export interface LiteLLMMcpTool {
-  name: string;
-  server_name: string;
-  server_id?: string;
-  description: string;
-  // Absent or `{}` means the proxy supplied no schema; both use the extension-owned envelope.
-  input_schema: Record<string, unknown>;
-  // True when the proxy supplied an `inputSchema`/`input_schema` that was not a JSON object.
-  input_schema_malformed?: boolean;
-  // Boolean hints from the proxy-supplied `annotations`; every other annotation field is dropped.
-  annotations?: McpToolAnnotations;
-  // `mcp_info.description` of the server, when the proxy supplies one.
-  server_description?: string;
-}
-
 export interface LiteLLMSkill {
   id?: string;
   name: string;

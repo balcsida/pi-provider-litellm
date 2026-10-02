@@ -83,21 +83,23 @@ export type TestPi = {
   commands: Map<string, TestCommand>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
   tools: TestTool[];
-  // What `getAllTools()` reports: Pi's own tools, which the extension inspects but does not register.
-  allTools: Array<{ name: string; exposure?: string }>;
-  activeTools: string[];
+  // Registered MCP servers by name, as Pi's `registerMcpServer` replaces an earlier registration.
+  mcpServers: Map<string, Record<string, unknown>>;
   registerProvider(provider: Provider): void;
+  registerMcpServer(name: string, config: Record<string, unknown>): void;
+  unregisterMcpServer(name: string): void;
   registerCommand(name: string, command: TestCommand): void;
   registerTool(tool: TestTool): void;
-  getAllTools(): Array<{ name: string; exposure?: string }>;
-  getActiveTools(): string[];
-  setActiveTools(names: string[]): void;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
-export async function loadExtension(agentDir: string): Promise<(pi: TestPi) => Promise<void>> {
+export async function loadExtension(
+  agentDir: string,
+  { piVersion = "1.0.0" }: { piVersion?: string } = {},
+): Promise<(pi: TestPi) => Promise<void>> {
   vi.resetModules();
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
+    VERSION: piVersion,
     defineTool: (tool: unknown) => tool,
     getAgentDir: () => agentDir,
     readStoredCredential: (provider: string, authPath: string) => {
@@ -118,10 +120,15 @@ export function createPi(): TestPi {
     commands: new Map(),
     handlers: new Map(),
     tools: [],
-    allTools: [],
-    activeTools: [],
+    mcpServers: new Map(),
     registerProvider(provider) {
       this.providers.push(provider);
+    },
+    registerMcpServer(name, config) {
+      this.mcpServers.set(name, structuredClone(config));
+    },
+    unregisterMcpServer(name) {
+      this.mcpServers.delete(name);
     },
     registerCommand(name, command) {
       this.commands.set(name, command);
@@ -132,15 +139,6 @@ export function createPi(): TestPi {
       const existing = this.tools.findIndex((registered) => registered.name === tool.name);
       if (existing >= 0) this.tools[existing] = tool;
       else this.tools.push(tool);
-    },
-    getAllTools() {
-      return this.allTools;
-    },
-    getActiveTools() {
-      return this.activeTools;
-    },
-    setActiveTools(names) {
-      this.activeTools = [...names];
     },
     on(event, handler) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
