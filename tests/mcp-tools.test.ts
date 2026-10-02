@@ -4,10 +4,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMcpToolDefinitions as createMcpToolDefinitionsRaw,
   credentialFingerprint,
+  DEFAULT_MCP_EXPOSURE_POLICY,
   discoverMcpTools as discoverMcpToolsRaw,
   executeMcpTool,
   findSchemaHazard,
+  type McpExposurePolicy,
+  parseMcpExposurePolicy,
   reportMcpPartialDiscovery,
+  resolveMcpExposure,
+  toToolExposure,
 } from "../src/mcp-tools.js";
 
 // Thin wrappers so the bulk of the suite keeps asserting on the shapes it cares about.
@@ -335,7 +340,7 @@ describe("executeMcpTool", () => {
 
     await expect(
       executeMcpTool("http://host.docker.internal", "sk-test", "server", "tool", {}, undefined, undefined, true),
-    ).resolves.toBe(JSON.stringify("ok", null, 2));
+    ).resolves.toMatchObject({ text: JSON.stringify("ok", null, 2) });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://host.docker.internal/mcp-rest/tools/call",
@@ -357,7 +362,7 @@ describe("executeMcpTool", () => {
         { query: "pi" },
         { "X-Team": "agent" },
       ),
-    ).resolves.toBe(JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2));
+    ).resolves.toMatchObject({ text: JSON.stringify({ content: [{ type: "text", text: "found" }] }, null, 2) });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://litellm.example.com/mcp-rest/tools/call",
@@ -477,18 +482,46 @@ describe("executeMcpTool", () => {
     await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
       "denied",
     );
-    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).rejects.toThrow(
-      "failed",
-    );
+    const outcome = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toBe("Error calling search on brave: failed");
+    expect(outcome.structuredContent).toEqual({ isError: true, content: [{ text: "failed" }] });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("bounds structuredContent to 1 MiB, falling back to the text wrapper", async () => {
+    const big = "x".repeat(1024 * 1024 + 1);
+    const small = "y".repeat(1024);
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { result: { content: [{ type: "text", text: big }], _meta: {} } }))
+      .mockResolvedValueOnce(jsonResponse(200, { result: { content: [{ type: "text", text: small }], _meta: {} } }));
+
+    const over = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(over.structuredContent).toEqual({ content: [{ type: "text", text: over.text }] });
+    const under = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(under.structuredContent).toEqual({ content: [{ type: "text", text: small }] });
+  });
+
+  it("returns an object result as structuredContent without _meta and wraps a bare value", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(200, { result: { content: [{ type: "text", text: "hi" }], _meta: { a: 1 }, extra: 2 } }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { result: "ok" }));
+
+    const object = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(object.isError).toBe(false);
+    expect(object.structuredContent).toEqual({ content: [{ type: "text", text: "hi" }], extra: 2 });
+    const bare = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    expect(bare.structuredContent).toEqual({ content: [{ type: "text", text: JSON.stringify("ok", null, 2) }] });
   });
 
   it("accepts an explicit null MCP error as success", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { error: null, result: "ok" }));
 
-    await expect(executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {})).resolves.toBe(
-      JSON.stringify("ok", null, 2),
-    );
+    await expect(
+      executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}),
+    ).resolves.toMatchObject({ text: JSON.stringify("ok", null, 2) });
   });
 
   it("bounds tool-call bodies before parsing", async () => {
@@ -514,7 +547,7 @@ describe("executeMcpTool", () => {
   it("truncates returned result text to 64 KiB with a marker without splitting multibyte text", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { result: "😀".repeat(20 * 1024) }));
 
-    const text = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
+    const { text } = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {});
 
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(64 * 1024);
     expect(text).toContain("[truncated by pi-provider-litellm]");
@@ -527,13 +560,13 @@ describe("executeMcpTool", () => {
   ])("truncates MCP error text to 64 KiB", async (body) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
 
-    const error = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}).catch(
-      (failure: unknown) => failure,
+    const message = await executeMcpTool("https://litellm.example.com", "sk-test", "brave", "search", {}).then(
+      (outcome) => outcome.text,
+      (failure: unknown) => (failure as Error).message,
     );
 
-    expect(error).toBeInstanceOf(Error);
-    expect(Buffer.byteLength((error as Error).message)).toBeLessThanOrEqual(64 * 1024);
-    expect((error as Error).message).toContain("[truncated by pi-provider-litellm]");
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(64 * 1024);
+    expect(message).toContain("[truncated by pi-provider-litellm]");
   });
 
   it("bounds nested MCP error traversal", async () => {
@@ -1132,6 +1165,41 @@ describe("createMcpToolDefinitions", () => {
       headers: expect.objectContaining({ Authorization: "Bearer execution-token", "x-tenant": "new" }),
       body: JSON.stringify({ server_id: "brave-api", name: "search", arguments: { query: "pi" } }),
     });
+  });
+});
+
+describe("MCP tool structured results", () => {
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+  const listing = () =>
+    jsonResponse(200, [{ name: "probe", server_name: "srv", input_schema: { type: "object", properties: {} } }]);
+
+  it("declares the extension-owned CallToolResult outputSchema", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => listing());
+    const [definition] = await createMcpToolDefinitions(auth);
+    expect(JSON.parse(JSON.stringify(definition?.outputSchema))).toEqual({
+      type: "object",
+      properties: {
+        content: { type: "array", items: { type: "object" } },
+        isError: { type: "boolean" },
+        _meta: { type: "object" },
+      },
+      required: ["content"],
+    });
+  });
+
+  it("returns isError results with their content on Pi 0.99, and throws on older Pi", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(listing());
+    const [definition] = await createMcpToolDefinitions(auth);
+    const failure = { result: { isError: true, content: [{ type: "text", text: "nope" }] } };
+    fetchMock.mockImplementation(async () => jsonResponse(200, failure));
+
+    const result = await definition?.execute("c", {}, undefined, undefined, { executeTool: vi.fn() } as never);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: "Error calling probe on srv: nope" }],
+      structuredContent: { isError: true, content: [{ type: "text", text: "nope" }] },
+    });
+    await expect(definition?.execute("c", {}, undefined, undefined, {} as never)).rejects.toThrow("nope");
   });
 });
 
@@ -2844,5 +2912,221 @@ describe("MCP normalization edge cases", () => {
     }));
     expect(result.definitions).toHaveLength(2);
     expect(result.report.dropped).toEqual([]);
+  });
+});
+
+describe("Pi tool exposure, namespaces, and annotations", () => {
+  const objectSchema = { type: "object", properties: {} };
+  const auth = async () => ({ baseUrl: "https://litellm.example.com", apiKey: "sk-test" });
+
+  it("defaults to direct exposure with no overrides", () => {
+    expect(parseMcpExposurePolicy(undefined)).toEqual({ policy: DEFAULT_MCP_EXPOSURE_POLICY, warnings: [] });
+    expect(parseMcpExposurePolicy({ enabled: true })).toEqual({ policy: DEFAULT_MCP_EXPOSURE_POLICY, warnings: [] });
+    expect(DEFAULT_MCP_EXPOSURE_POLICY).toEqual({ exposure: "direct", toolExposure: [] });
+  });
+
+  it("reads Pi's mcp.json exposure keys in settings order", () => {
+    expect(
+      parseMcpExposurePolicy({
+        exposure: "deferred",
+        toolExposure: { "delete_*": "hidden", "github/search_code": "direct" },
+      }),
+    ).toEqual({
+      policy: {
+        exposure: "deferred",
+        toolExposure: [
+          ["delete_*", "hidden"],
+          ["github/search_code", "direct"],
+        ],
+      },
+      warnings: [],
+    });
+  });
+
+  it("falls back to direct and reports unusable exposure settings", () => {
+    const { policy, warnings } = parseMcpExposurePolicy({
+      exposure: "everywhere",
+      toolExposure: { ok: "hidden", broken: "nope", also: 3 },
+    });
+
+    expect(policy).toEqual({ exposure: "direct", toolExposure: [["ok", "hidden"]] });
+    expect(warnings).toEqual([
+      expect.stringContaining(
+        'litellm.mcp.exposure must be one of "direct", "codemode", "codemode-deferred", "deferred", "hidden"',
+      ),
+      expect.stringContaining('litellm.mcp.toolExposure["broken"] must be one of'),
+      expect.stringContaining('litellm.mcp.toolExposure["also"] must be one of'),
+    ]);
+    expect(parseMcpExposurePolicy({ toolExposure: ["delete_*"] })).toEqual({
+      policy: DEFAULT_MCP_EXPOSURE_POLICY,
+      warnings: [expect.stringContaining("litellm.mcp.toolExposure must be an object")],
+    });
+  });
+
+  it("resolves exact keys over patterns and server-qualified keys over bare ones", () => {
+    const policy: McpExposurePolicy = {
+      exposure: "codemode",
+      toolExposure: [
+        ["*", "hidden"],
+        ["search", "direct"],
+        ["brave/search", "deferred"],
+        ["sea*", "codemode-deferred"],
+        ["docs/*", "direct"],
+      ],
+    };
+
+    expect(resolveMcpExposure(policy, "brave", "search")).toBe("deferred");
+    expect(resolveMcpExposure(policy, "other", "search")).toBe("direct");
+    // The first matching pattern in settings order wins, even when a later one is more specific.
+    expect(resolveMcpExposure(policy, "other", "seal")).toBe("hidden");
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["sea*", "direct"]] }, "x", "seal")).toBe(
+      "direct",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["docs/*", "direct"]] }, "docs", "read")).toBe(
+      "direct",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["docs/*", "direct"]] }, "wiki", "read")).toBe(
+      "codemode",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*b*c", "hidden"]] }, "s", "aXbYc")).toBe(
+      "hidden",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*b*c", "hidden"]] }, "s", "ac")).toBe(
+      "codemode",
+    );
+    expect(resolveMcpExposure({ exposure: "codemode", toolExposure: [["a*a", "hidden"]] }, "s", "a")).toBe("codemode");
+    expect(resolveMcpExposure(DEFAULT_MCP_EXPOSURE_POLICY, "s", "anything")).toBe("direct");
+  });
+
+  it("maps codemode-deferred onto Pi's single deferred tool exposure", () => {
+    expect(toToolExposure("codemode-deferred")).toBe("deferred");
+    for (const exposure of ["direct", "codemode", "deferred", "hidden"] as const) {
+      expect(toToolExposure(exposure)).toBe(exposure);
+    }
+  });
+
+  it("registers direct tools grouped by server when no exposure is configured", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "search",
+          input_schema: objectSchema,
+          mcp_info: { server_name: "Brave API", description: "Web search" },
+        },
+        { name: "fetch", server_name: "docs", input_schema: objectSchema },
+      ]),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth);
+
+    expect(definitions.map((definition) => definition.exposure)).toEqual(["direct", "direct"]);
+    expect(definitions.map((definition) => definition.namespace?.name)).toEqual([
+      expect.stringMatching(/^mcp_brave_api_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_docs_[0-9a-f]{6}$/),
+    ]);
+    expect(definitions.map((definition) => definition.namespace?.description)).toEqual([
+      "Web search",
+      "LiteLLM MCP server docs",
+    ]);
+    expect(definitions.every((definition) => definition.annotations === undefined)).toBe(true);
+    expect(report.exposures).toEqual(["direct"]);
+  });
+
+  it("applies the exposure policy per tool and reports the distinct exposures", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "search", server_name: "brave", input_schema: objectSchema },
+        { name: "delete_index", server_name: "brave", input_schema: objectSchema },
+        { name: "read", server_name: "docs", input_schema: objectSchema },
+      ]),
+    );
+
+    const { definitions, report } = await createMcpToolDefinitionsRaw(auth, undefined, undefined, undefined, "dev", {
+      exposure: "codemode-deferred",
+      toolExposure: [
+        ["delete_*", "hidden"],
+        ["docs/read", "direct"],
+      ],
+    });
+
+    expect(definitions.map((definition) => [definition.name, definition.exposure])).toEqual([
+      [named("mcp_dev_brave_search"), "deferred"],
+      [named("mcp_dev_brave_delete_index"), "hidden"],
+      [named("mcp_dev_docs_read"), "direct"],
+    ]);
+    expect(definitions.map((definition) => definition.namespace?.name)).toEqual([
+      expect.stringMatching(/^mcp_dev_brave_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_dev_brave_[0-9a-f]{6}$/),
+      expect.stringMatching(/^mcp_dev_docs_[0-9a-f]{6}$/),
+    ]);
+    // The report keeps the MCP exposure, so the caller can tell codemode-deferred from deferred.
+    expect(report.exposures).toEqual(["codemode-deferred", "direct", "hidden"]);
+  });
+
+  it("passes through boolean annotation hints and drops everything else", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "search",
+          server_name: "brave",
+          input_schema: objectSchema,
+          annotations: {
+            title: "Search",
+            readOnlyHint: true,
+            destructiveHint: "no",
+            openWorldHint: 1,
+            idempotentHint: false,
+          },
+        },
+        { name: "bare", server_name: "brave", input_schema: objectSchema, annotations: null },
+        { name: "empty", server_name: "brave", input_schema: objectSchema, annotations: { title: "Only a title" } },
+      ]),
+    );
+
+    const definitions = await createMcpToolDefinitions(auth);
+
+    expect(definitions.map((definition) => definition.annotations)).toEqual([
+      { readOnlyHint: true, idempotentHint: false },
+      undefined,
+      undefined,
+    ]);
+    expect(Object.hasOwn(definitions[1] ?? {}, "annotations")).toBe(false);
+  });
+
+  it("bounds the namespace name and server description like other proxy-supplied text", async () => {
+    const longServer = `s${"x".repeat(200)}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        {
+          name: "tool",
+          input_schema: objectSchema,
+          mcp_info: { server_name: longServer, description: "d".repeat(1000) },
+        },
+      ]),
+    );
+
+    const [definition] = await createMcpToolDefinitions(auth);
+
+    expect(definition?.namespace?.name).toHaveLength(64);
+    expect(definition?.namespace?.name.startsWith("mcp_sxxx")).toBe(true);
+    expect(Buffer.byteLength(definition?.namespace?.description ?? "")).toBeLessThanOrEqual(256);
+    expect(definition?.namespace?.description?.endsWith("…")).toBe(true);
+  });
+
+  it("gives servers whose names sanitize or truncate alike different namespaces", async () => {
+    const long = "s".repeat(100);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, [
+        { name: "t", server_name: "My-Server", input_schema: objectSchema },
+        { name: "t", server_name: "My_Server", input_schema: objectSchema },
+        { name: "t", server_name: `${long}a`, input_schema: objectSchema },
+        { name: "t", server_name: `${long}b`, input_schema: objectSchema },
+      ]),
+    );
+
+    const names = (await createMcpToolDefinitions(auth)).map((definition) => definition.namespace?.name);
+
+    expect(new Set(names).size).toBe(4);
+    for (const name of names) expect(name?.length).toBeLessThanOrEqual(64);
   });
 });

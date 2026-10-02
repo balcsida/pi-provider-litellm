@@ -7,6 +7,7 @@ import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "
 import {
   createEventBus,
   discoverAndLoadExtensions,
+  type ExtensionAPI,
   ExtensionRunner,
   ModelRegistry,
   ModelRuntime,
@@ -809,6 +810,7 @@ describe("feature parity", () => {
         setActiveTools: () => {},
         refreshTools: () => {},
         getCommands: () => [],
+        getSettings: () => ({}) as ReturnType<ExtensionAPI["getSettings"]>,
         setModel: async () => true,
         getThinkingLevel: () => "off",
         setThinkingLevel: () => {},
@@ -1947,5 +1949,243 @@ describe("feature parity", () => {
 
     expect(result).toBeUndefined();
     expect(usage.cost.total).toBeCloseTo(0.00107175, 10);
+  });
+});
+
+describe("LiteLLM MCP exposure", () => {
+  const searchTool = {
+    name: "search",
+    description: "Search the web",
+    inputSchema: { type: "object", properties: {} },
+    mcp_info: { server_name: "brave" },
+  };
+
+  function mockCatalog(tools: Array<Record<string, unknown>>): void {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+  }
+
+  async function loadWithMcpSettings(mcp: Record<string, unknown>): Promise<(pi: TestPi) => Promise<void>> {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ litellm: { mcp } }), "utf8");
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    return loadExtension(agentDir);
+  }
+
+  // Buffered startup diagnostics flush to stderr once a UI-less session starts.
+  async function startSession(pi: TestPi): Promise<void> {
+    for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { hasUI: false });
+  }
+
+  const mcpTool = (pi: TestPi) => pi.tools.find((tool) => tool.name.startsWith("mcp_"));
+
+  it("registers deferred tools and activates Pi's tool_search to reach them", async () => {
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({ exposure: "deferred" });
+    const pi = createPi();
+    pi.allTools = [
+      { name: "read", exposure: "direct" },
+      { name: "tool_search", exposure: "direct" },
+    ];
+    pi.activeTools = ["read"];
+    await extension(pi);
+    await refreshProvider(pi);
+
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
+    expect(mcpTool(pi)?.exposure).toBe("deferred");
+    expect(mcpTool(pi)?.namespace).toEqual({
+      name: expect.stringMatching(/^mcp_brave_[0-9a-f]{6}$/),
+      description: "LiteLLM MCP server brave",
+    });
+    await vi.waitFor(() => expect(pi.activeTools).toEqual(["read", "tool_search"]));
+  });
+
+  it("activates codemode for codemode-deferred tools, which Pi sees as deferred", async () => {
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({ exposure: "codemode-deferred" });
+    const pi = createPi();
+    pi.allTools = [
+      { name: "read", exposure: "direct" },
+      { name: "codemode", exposure: "direct" },
+      { name: "tool_search", exposure: "direct" },
+    ];
+    pi.activeTools = ["read"];
+    await extension(pi);
+    await refreshProvider(pi);
+
+    await vi.waitFor(() => expect(pi.activeTools).toEqual(["read", "codemode"]));
+    expect(mcpTool(pi)?.exposure).toBe("deferred");
+  });
+
+  it("warns when neither codemode nor tool_search can reach indirect tools", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({ exposure: "codemode" });
+    const pi = createPi();
+    pi.allTools = [{ name: "read", exposure: "direct" }];
+    pi.activeTools = ["read"];
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("neither is available; they cannot be called"),
+      ),
+    );
+    expect(mcpTool(pi)?.exposure).toBe("codemode");
+    expect(pi.activeTools).toEqual(["read"]);
+  });
+
+  it("says once that older Pi ignores the exposure setting and leaves activation alone", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({ exposure: "codemode" });
+    const pi = createPi();
+    // Pi before 0.99 reports tools without an `exposure` field.
+    pi.allTools = [{ name: "read" }, { name: "codemode" }];
+    pi.activeTools = ["read"];
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("this Pi version ignores litellm.mcp.exposure"),
+      ),
+    );
+    expect(pi.activeTools).toEqual(["read"]);
+  });
+
+  async function withdrawAfterSecondPass(allTools: Array<{ name: string; exposure?: string }>) {
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    pi.allTools = allTools;
+    await extension(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
+    const name = mcpTool(pi)?.name ?? "";
+    pi.activeTools = ["read", name];
+    pi.allTools = [
+      ...allTools,
+      { name, ...(allTools.some((tool) => "exposure" in tool) ? { exposure: "direct" } : {}) },
+    ];
+    const setActive = vi.spyOn(pi, "setActiveTools");
+    mockCatalog([{ ...searchTool, name: "other" }]);
+    // A settled catalog is only rediscovered when the credentials change.
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(mcpTool(pi)?.exposure).toBe("hidden"));
+    return { pi, name, setActive };
+  }
+
+  it("withdraws a tool that vanished from the catalog and deactivates it on Pi 0.99", async () => {
+    const { pi, name, setActive } = await withdrawAfterSecondPass([
+      { name: "read", exposure: "direct" },
+      { name: "mcp_brave_search", exposure: "direct" },
+    ]);
+    const stub = pi.tools.find((tool) => tool.name === name);
+    expect(stub?.exposure).toBe("hidden");
+    await expect(stub?.execute?.()).rejects.toThrow("This LiteLLM MCP tool is no longer offered by the proxy.");
+    expect(setActive).toHaveBeenCalled();
+    expect(pi.activeTools).toEqual(["read"]);
+  });
+
+  it("registers the withdrawal stub but leaves the active set alone on older Pi", async () => {
+    const { pi, name, setActive } = await withdrawAfterSecondPass([{ name: "read" }]);
+    const stub = pi.tools.find((tool) => tool.name === name);
+    await expect(stub?.execute?.()).rejects.toThrow("no longer offered by the proxy");
+    expect(setActive).not.toHaveBeenCalled();
+    expect(pi.activeTools).toEqual(["read", name]);
+  });
+
+  it("treats a refused withdrawal stub as a fatal registration failure", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(mcpTool(pi)).toBeDefined());
+    const name = mcpTool(pi)?.name ?? "";
+    const register = pi.registerTool.bind(pi);
+    pi.registerTool = (tool) => {
+      if (tool.name === name) throw new Error("stale extension");
+      register(tool);
+    };
+    mockCatalog([{ ...searchTool, name: "other" }]);
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("no further attempts will be made by this extension instance"),
+      ),
+    );
+  });
+
+  it("withdraws nothing when the catalog comes back empty", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool, { ...searchTool, name: "second" }]);
+    const extension = await loadWithMcpSettings({});
+    const pi = createPi();
+    await extension(pi);
+    await startSession(pi);
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_"))).toHaveLength(2));
+    mockCatalog([]);
+    process.env.LITELLM_API_KEY = "sk-rotated";
+    await refreshProvider(pi);
+    await vi.waitFor(() =>
+      expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        expect.stringContaining("no MCP tools were registered"),
+      ),
+    );
+    expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_")).map((tool) => tool.exposure)).toEqual([
+      "direct",
+      "direct",
+    ]);
+  });
+
+  it("reports an unusable exposure setting at load and registers direct tools", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockCatalog([searchTool]);
+    const extension = await loadWithMcpSettings({ exposure: "everywhere" });
+    const pi = createPi();
+    pi.allTools = [
+      { name: "read", exposure: "direct" },
+      { name: "codemode", exposure: "direct" },
+    ];
+    await extension(pi);
+    await startSession(pi);
+
+    expect(stderr.mock.calls.map((call) => String(call[0]))).toContainEqual(
+      expect.stringContaining("LiteLLM MCP: litellm.mcp.exposure must be one of"),
+    );
+    await refreshProvider(pi);
+    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
+    expect(mcpTool(pi)?.exposure).toBe("direct");
+    expect(pi.activeTools).toEqual([]);
+  });
+
+  it("hides individual tools through toolExposure while the rest stay direct", async () => {
+    mockCatalog([searchTool, { ...searchTool, name: "delete_index" }]);
+    const extension = await loadWithMcpSettings({ toolExposure: { "delete_*": "hidden" } });
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+
+    await vi.waitFor(() => expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_"))).toHaveLength(2));
+    expect(pi.tools.filter((tool) => tool.name.startsWith("mcp_")).map((tool) => [tool.name, tool.exposure])).toEqual([
+      [named("mcp_brave_search"), "direct"],
+      [named("mcp_brave_delete_index"), "hidden"],
+    ]);
+    expect(pi.activeTools).toEqual([]);
   });
 });

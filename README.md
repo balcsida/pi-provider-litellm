@@ -1,6 +1,6 @@
 # pi-provider-litellm
 
-LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.83.0+ is required.
+LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.83.0+ is required; the MCP tool exposure settings need Pi 0.99.0+.
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
@@ -165,7 +165,7 @@ Provider fields:
 
 ### Optional LiteLLM features
 
-LiteLLM Skills and MCP integration are enabled by default. Disable either feature globally in `~/.pi/agent/settings.json`:
+LiteLLM Skills and MCP integration are enabled by default. Disable either feature, or choose how MCP tools reach the model, globally in `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -174,13 +174,20 @@ LiteLLM Skills and MCP integration are enabled by default. Disable either featur
       "enabled": false
     },
     "mcp": {
-      "enabled": false
+      "enabled": true,
+      "exposure": "deferred",
+      "toolExposure": {
+        "delete_*": "hidden",
+        "github/search_code": "direct"
+      }
     }
   }
 }
 ```
 
 Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` disables LiteLLM MCP discovery and tool registration. Restart Pi after changing these settings so previously registered tools are removed.
+
+`mcp.exposure` and `mcp.toolExposure` take the values of a Pi 0.99 `mcp.json` server entry: `direct` (the default; every tool's name, description, and schema is sent with every request), `codemode` or `codemode-deferred` (callable only from Pi's `codemode` scripts; Pi 0.99.2 and later treat `codemode-deferred` as an alias of `codemode` for its own servers, while here the two stay distinct: `codemode` lists the tools in the codemode description and `codemode-deferred` does not), `deferred` (declared to the model only after Pi's `tool_search` loads it), or `hidden` (registered but unreachable). `toolExposure` keys are tool names as the server offers them, or `<server>/<tool>` (a key containing `/` is always read as `<server>/<tool>`, so a tool whose own name contains `/` must be addressed in that qualified form); `*` matches any characters, exact keys win over patterns, and the first matching pattern wins. When a discovery pass registers non-direct tools, the extension activates Pi's `codemode` or `tool_search` tool, as Pi's own MCP support does for its servers, and warns once when neither is available (for example under `--no-extensions`, which since Pi 0.99 also disables the built-in extensions). Pi before 0.99 ignores the setting; the extension says so once and the tools stay direct. Large shared catalogs are the reason to prefer `deferred` or `codemode`; an unusable value is reported and falls back to `direct`.
 
 Treat the configured LiteLLM proxy as trusted: Skills can add instructions to the system prompt, and MCP can expose tools the agent may call. Disable these integrations when the proxy, its administrators, or its configured content are not fully trusted.
 
@@ -211,7 +218,7 @@ Native Messages authenticates with `x-api-key`; every transport carries the `x-l
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only when their stored canonical proxy root exactly matches the active credential root, including any path prefix. URL-standard host casing and default ports are canonicalized, but paths remain case-sensitive. |
-| `PI_OFFLINE` | unset | Pi documents it as disabling automatic network activity, including model catalog refreshes. Through Pi 0.87.1, any set value (including `0` or an empty string) disables startup model discovery and `/model` network refreshes. Run `/litellm-refresh`, or unset it, to discover; cached models can still be used offline. |
+| `PI_OFFLINE` | unset | Pi documents it as disabling automatic network activity, including model catalog refreshes. Through Pi 1.0.0, any set value (including `0` or an empty string) disables startup model discovery and `/model` network refreshes. Run `/litellm-refresh`, or unset it, to discover; cached models can still be used offline. |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_CLI_JWT_EXPIRATION_HOURS` | `24` | CLI SSO token lifetime fallback for older proxies whose poll response omits `expires_in`; mirror a non-default proxy setting locally |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model and MCP discovery (login, refresh, startup), including startup skip reasons, defaulted `/model/info` context windows, and MCP prepared/registered/dropped counts. Progress messages are off by default; MCP safety diagnostics (see below) are always reported regardless of this setting |
@@ -244,6 +251,8 @@ If your LiteLLM proxy exposes MCP REST endpoints, this extension discovers tools
 - `POST /mcp-rest/tools/call`
 
 An MCP access denial pauses discovery until a successful `/login litellm` (SSO or API key); an alias provider, which has no login, stays paused until its credentials, base URL, or headers change. The pause survives restarts in `~/.pi/agent/litellm-mcp-pauses/`, scoped to the proxy, login, and headers with salted credential fingerprints. A new API key or header configuration has its own scope. Each explicit login creates a fresh opaque `litellmMcpSession` identifier in Pi's stored credential, even when the key is unchanged; automatic OAuth refresh preserves that identifier and its pause. Older Pi processes cannot pause the new login. Pause files contain no credentials or proxy error text. Model discovery and chat continue normally. Grant MCP access on the proxy before signing in again. An explicit `litellm.mcp.enabled: false` setting remains disabled after login.
+
+Pi 0.99 ships its own MCP client, which reads `mcp.json` and names tools `mcp__<server>__<tool>`. This extension names its tools `mcp_<server>_<tool>_<hash>` and registers none of `/mcp`, `codemode`, or `tool_search`, so both load side by side without replacing each other. Each tool carries a `namespace` (`mcp_<server>_<hash>`, or `mcp_<alias>_<server>_<hash>` for an alias provider) built from the server name plus a 6-character hash of the server identity so distinct servers never share a group, with the server description LiteLLM reports, and the boolean MCP annotation hints the proxy passes through (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), which permission extensions can read from `pi.getAllTools()`; other annotation fields are dropped. To let Pi's client talk to LiteLLM's streamable HTTP MCP endpoint instead, add its `/mcp` URL to `mcp.json` with the header LiteLLM documents for its MCP gateway and set `litellm.mcp.enabled` to `false`; that path uses a static key and Pi's own client rather than this extension's credentials, access-denied pauses, and schema guard.
 
 Each discovered tool is registered as a native Pi tool named `mcp_<server>_<tool>_<hash>`, at most 64 characters, using only `[a-z0-9_]`. The trailing 10-character hash is derived from the tool's identity (`server_id`, `server_name`, `name`) and is always present, so a name depends only on that tool and never on which other tools happen to be in the same catalog — adding or removing a sibling never renames a survivor. When the readable prefix would overflow 64 characters it is truncated from the right, so a long server name can leave little or none of the tool name visible; the hash is what distinguishes such tools. Tools from different servers therefore never overwrite each other, and exact duplicate identities are registered once. Each alias provider discovers its own catalog: its tools are named `mcp_<alias>_<server>_<tool>_<hash>`, with the alias name also folded into the hash, and are called with that alias's credentials, so two providers exposing the same server never replace each other's tools. The default `litellm` provider keeps unprefixed names, and diagnostics for an alias read `LiteLLM MCP ("<alias>"):`.
 
@@ -283,9 +292,9 @@ Pi registers a tool synchronously, replacing any existing tool of the same name,
 
 So a pass that is refused partway leaves the tools registered up to that point, reports one bounded diagnostic, and makes no further attempt from that extension instance — retrying would re-run discovery on every refresh and could never succeed. A reload creates a fresh instance, which starts clean on its own. Because names are stable and registration replaces by name, any retry that does happen is idempotent.
 
-Network discovery is separate and remains retryable: a catalog that yields no registrable tool is not recorded as settled, so a later refresh tries again, and the empty result is reported rather than passing in silence. A tool that disappears from the proxy's catalog stays registered until Pi restarts.
+Network discovery is separate and remains retryable: a catalog that yields no registrable tool is not recorded as settled, so a later refresh tries again, and the empty result is reported rather than passing in silence. A tool that disappears from the proxy's catalog is, on the next discovery pass, re-registered as a hidden withdrawal stub and removed from the active tools on Pi 0.99. Older Pi ignores `hidden`, so the stub stays visible but reports the withdrawal instead of calling the proxy.
 
-MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once: timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text to 64 KiB with a truncation marker.
+MCP tools run in Pi's parallel tool mode. Each side-effecting `POST /mcp-rest/tools/call` is attempted exactly once: timeouts, connection failures, HTTP errors, and malformed responses are returned to Pi as tool errors rather than retried. Pi cancellation aborts an in-flight call and preserves its original cancellation reason. Tool-call response bodies are limited to 5 MiB before JSON parsing, and returned result or error text to 64 KiB with a truncation marker. Results also carry `structuredContent` (the MCP `CallToolResult`, or a text wrapper when the proxy returns a bare value) limited to 1 MiB (larger results fall back to the text wrapper), under a declared `outputSchema`, so Pi 0.99 codemode scripts receive data rather than the truncated text; server `isError` results are returned as error results that keep their content (Pi before 0.99 raises them as tool errors instead).
 
 A passed-through schema's `format` keyword is evaluated, using the validator's own built-in expressions rather than anything the proxy supplies.
 
@@ -423,6 +432,7 @@ The development probe runs against minimized snapshots with `npm run probe:proxy
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
 | MCP tools not showing | Verify the proxy exposes `/mcp-rest/tools/list` and open `/model` after fixing the proxy |
+| MCP tools registered but the model cannot call them | Check `litellm.mcp.exposure`: `codemode` and `codemode-deferred` tools need Pi's `codemode` tool and `deferred` tools need `tool_search`, both built into Pi 0.99 and disabled by `--no-extensions`. Use `direct` to declare the tools on every request |
 | Some MCP tools missing or unvalidated | Check Pi notifications (stderr in non-interactive mode) for `LiteLLM MCP:` messages. Dropped tools are reported under `invalid-tool`, `duplicate-identity`, `invalid-schema`, `name-collision`, or `tool-cap`, each with a count and a bounded sample of generated names. A tool reported under `schema-envelope` is still present but uses the `args` envelope instead of its own schema. A refused registration pass is reported once. Set `LITELLM_VERBOSE_DISCOVERY=1` for per-refresh raw/prepared/enveloped/registered counts |
 | Skills not affecting prompts | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills |
 

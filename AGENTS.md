@@ -7,6 +7,11 @@
 - Build output is `dist/`; do not edit generated output by hand or publish it.
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
+- Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
+  ignores (extra `ToolDefinition` fields) or feature-detects (an `exposure` field on `pi.getAllTools()` entries), and do
+  not import runtime symbols that older `pi-ai`/`pi-coding-agent` lack, such as `isModelType`.
+- Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
+  before reading chat-only fields.
 
 ## Commands
 
@@ -85,11 +90,15 @@
 - Diagnostics dedupe on full membership, not on the printed sample, and a class that stops occurring is cleared. Never interpolate proxy-supplied text or credentials into stderr; use generated names for normalized tools and positional labels for entries that failed normalization, which may have no usable name. Derive malformed-entry identities with queued work bounded by nesting depth; retain at most one key list per open object rather than one work item per child.
 - The MCP catalog identity must not hold credential material. `credentialFingerprint()` reduces the API key **and** the headers (`LITELLM_HEADERS` can carry its own authorization) to a per-process salted HMAC, so a change to either still forces re-registration while nothing reversible is retained. Note `src/gcloud-token.ts` builds its cache key from the raw refresh token — same defect class, untouched baseline, out of scope here.
 - `pi.registerTool` is a synchronous replace-by-name whose only failure is a never-reset staleness check, so a refusal is fatal for the pass and for that extension instance. Do not model it as a per-tool rejection or add retry; a reload provides a clean instance.
+- Tools cannot be unregistered, so a generated name missing from the next successful, non-empty, non-partial pass is re-registered as a `hidden` stub whose `execute` fails with extension-owned text (never a proxy call, since older Pi ignores `exposure`). It leaves the active set only when Pi honors exposure (`piHonorsToolExposure()`).
 - `POST /mcp-rest/tools/call` is side-effecting and must stay exactly-once, and cancellation must preserve the caller's original abort reason. Keep the tests that assert call counts and reason identity.
 - Two upstream behaviors keep passthrough schemas safe and are not controlled here. Both are pinned by tests in `tests/mcp-tools.test.ts`; if a dependency bump breaks either, fix it there before shipping.
   - `typebox`'s `value/convert/from_object.mjs` turns `properties` keys into `new RegExp(`^${key}$`)` with **no escaping**, and `pi-ai` calls `Value.Convert` on tool parameters. That is only harmless because `Convert` walks recognised TypeBox types and no-ops on a raw JSON Schema, so a proxy-supplied property name never reaches it. If that changed, a property named `(a+)+$` would become an executable backtracking regex tested against model-supplied argument keys.
   - `format` is live on passthrough schemas: it is a proxy-chosen selector of `typebox`'s own regexes, executed against model-supplied strings. The shipped formats are well-anchored, so this is a residual dependency on upstream regex quality, not a hole. Do not assume `format` is ignored.
 - Do not write timing-based tests for any of this. Assert the registered `parameters` and the absence of the exact proxy-supplied regex or ref, and keep the schema-position test lists independent of the implementation's own tables.
+- `litellm.mcp.exposure` and `toolExposure` mirror Pi's `mcp.json` keys and are parsed once by `parseMcpExposurePolicy()`. `codemode-deferred` becomes Pi's `deferred` on the tool definition, while `report.exposures` keeps the MCP value so activation can tell them apart. Activation mirrors the built-in MCP extension's `ensureDiscoveryActive`: codemode for `codemode`/`codemode-deferred`, `tool_search` for `deferred`, one warning when neither is registered, and one warning when `getAllTools()` entries carry no `exposure` (Pi before 0.99, where every tool is direct).
+- Never register `/mcp`, `codemode`, or `tool_search`: Pi 0.99 unloads the built-in extension whose tool, command, or flag an extension re-registers. Pi's own MCP tools are `mcp__<server>__<tool>`, so `mcp_<server>_<tool>_<hash>` never collides with them.
+- Annotations keep only the four boolean hints, as Pi's own MCP client does; `title` and any other proxy-supplied annotation field never reach Pi. Namespace names share the generated tool-name prefix (`mcp_<server>_<hash>` or `mcp_<alias>_<server>_<hash>`) and are bounded like tool names; the trailing 6-hex hash covers `server_id`, `server_name` and the alias, so servers whose names sanitize or truncate alike never share a namespace; the namespace description is proxy text bounded to 256 bytes.
 
 ## Reasoning Policy
 
@@ -107,6 +116,10 @@
 - Provider-specific request compatibility belongs in discovered model `compat` metadata, not broad runtime mutation.
 - Native Messages requires unanimous compatible Claude deployment evidence; evidence-free fallback and health discovery never select it. Keep Messages compatibility separate from Chat and Responses fields.
 - Strict tools require every deployment's declared routing (`custom_llm_provider` and the `litellm_params.model` prefix) to name Anthropic. `model_info.litellm_provider` is a cost-map lookup of `base_model`, not routing, and `supports_response_schema` / `supports_native_structured_output` describe JSON output, not tool definitions; neither is strict-tool evidence.
+- Chat Completions `strict` tool schemas: since Pi 0.87 the `openai-completions` default for unknown endpoints is
+  `supportsStrictMode: false`, so LiteLLM Chat routes send no `strict` field. Pi only ever sent `strict: true` for tools
+  that opt in through `constrainedSampling`, which nothing here uses, so this is left at Pi's fail-closed default;
+  revisit only if such a tool needs strict enforcement on OpenAI/Azure-routed deployments.
 - Kimi/Moonshot-style compatibility is split across `completionsCompat()` and `responsesCompat()`; `buildCompat()` is retained only as the completions alias. Keep regression tests with model discovery changes.
 - Anthropic-backed aliases using `openai-completions` need `cacheControlFormat: "anthropic"` so Pi forwards prompt-cache markers through LiteLLM; `openai-responses` uses its native prompt cache fields instead.
 

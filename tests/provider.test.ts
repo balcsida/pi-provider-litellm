@@ -235,6 +235,21 @@ describe("createLiteLLMProvider", () => {
     expect(discover).not.toHaveBeenCalled();
   });
 
+  it("ignores non-chat entries in Pi's model store", async () => {
+    const discover = vi.fn(async () => discovered("fresh"));
+    const current = (id: string) => ({ ...native(id), litellmDiscoveryVersion: 3 as const });
+    const untyped = current("untyped-chat");
+    const typed = { ...current("typed-chat"), type: "chat" as const };
+    const image = { ...current("image"), type: "image" as const };
+    const classifier = { ...current("classifier"), type: "classifier" as const };
+    const value = controller({ discover });
+
+    await value.refreshModels?.(context([untyped, image, typed, classifier] as never, false));
+
+    expect(value.getModels().map((model) => model.id)).toEqual(["untyped-chat", "typed-chat"]);
+    expect(discover).not.toHaveBeenCalled();
+  });
+
   it("replaces legacy stored models after a successful forced refresh", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const refreshContext = context([native("stored")], true);

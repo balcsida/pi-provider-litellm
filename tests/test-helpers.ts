@@ -69,14 +69,29 @@ type TestCommand = {
   handler: (args: string, ctx: TestCommandContext) => Promise<void> | void;
 };
 
+export type TestTool = {
+  name: string;
+  description: string;
+  exposure?: string;
+  namespace?: { name: string; description?: string };
+  annotations?: Record<string, boolean>;
+  execute?: (...args: any[]) => Promise<any> | any;
+};
+
 export type TestPi = {
   providers: Provider[];
   commands: Map<string, TestCommand>;
   handlers: Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>;
-  tools: Array<{ name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }>;
+  tools: TestTool[];
+  // What `getAllTools()` reports: Pi's own tools, which the extension inspects but does not register.
+  allTools: Array<{ name: string; exposure?: string }>;
+  activeTools: string[];
   registerProvider(provider: Provider): void;
   registerCommand(name: string, command: TestCommand): void;
-  registerTool(tool: { name: string; description: string; execute?: (...args: any[]) => Promise<any> | any }): void;
+  registerTool(tool: TestTool): void;
+  getAllTools(): Array<{ name: string; exposure?: string }>;
+  getActiveTools(): string[];
+  setActiveTools(names: string[]): void;
   on(event: string, handler: (event: any, ctx?: any) => Promise<any> | any): void;
 };
 
@@ -103,6 +118,8 @@ export function createPi(): TestPi {
     commands: new Map(),
     handlers: new Map(),
     tools: [],
+    allTools: [],
+    activeTools: [],
     registerProvider(provider) {
       this.providers.push(provider);
     },
@@ -115,6 +132,15 @@ export function createPi(): TestPi {
       const existing = this.tools.findIndex((registered) => registered.name === tool.name);
       if (existing >= 0) this.tools[existing] = tool;
       else this.tools.push(tool);
+    },
+    getAllTools() {
+      return this.allTools;
+    },
+    getActiveTools() {
+      return this.activeTools;
+    },
+    setActiveTools(names) {
+      this.activeTools = [...names];
     },
     on(event, handler) {
       this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);

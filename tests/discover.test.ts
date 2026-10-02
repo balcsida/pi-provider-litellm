@@ -2929,7 +2929,9 @@ describe("discoverModels via /model/info", () => {
   });
 
   // models.dev serves ChatGPT routes from OpenAI's key, but a field it omits must
-  // still come from the subscription's Codex catalog, not OpenAI API pricing.
+  // still come from the subscription's Codex catalog, not OpenAI API pricing. Pi's catalogs
+  // currently price gpt-5.6-sol alike on both, so the expectation is read from the Codex catalog
+  // instead of pinning numbers that drift with Pi releases.
   it("keeps Codex catalog pricing for a partial models.dev ChatGPT record", async () => {
     vi.resetModules();
     const { discoverModels: isolatedDiscoverModels } = await import("../src/discover.js");
@@ -2960,7 +2962,11 @@ describe("discoverModels via /model/info", () => {
       modelsDevCachePath: join(await mkdtemp(join(agentDir, "public-efforts-")), "models-dev.json"),
     });
 
-    expect(result.models[0]?.cost).toMatchObject({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
+    const codexCost = getModel("openai-codex", "gpt-5.6-sol")?.cost;
+    if (!codexCost) throw new Error("Pi's Codex catalog no longer lists gpt-5.6-sol");
+    expect(codexCost.input).toBeGreaterThan(0);
+    const { input, output, cacheRead, cacheWrite } = codexCost;
+    expect(result.models[0]?.cost).toMatchObject({ input, output, cacheRead, cacheWrite });
   });
 
   it.each(["azure", "azure_ai"])(
@@ -5961,7 +5967,7 @@ describe("catalog provider candidates", () => {
     expect(result.models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
   it.each([
-    ["decorated mixed-case Kimi", "ToGeThEr/MoOnShOtAi/KiMi-K2.6@prod", "together_ai", 262_144],
+    ["decorated mixed-case Kimi", "ToGeThEr/MoOnShOtAi/KiMi-K3@prod", "together_ai", 1_048_576],
     ["mixed-case Claude", "AnThRoPiC/ClAuDe-SoNnEt-4-6", undefined, 1_000_000],
     ["decorated Claude", "BeDrOcK/US.AnThRoPiC.ClAuDe-SoNnEt-4-6-V1:0", "bedrock", 1_000_000],
   ])("retains catalog metadata for a %s provider-qualified backend", async (_case, backend, adapter, context) => {

@@ -15,6 +15,7 @@ import type {
   OAuthCredentials,
   ProviderAuth,
 } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
@@ -24,6 +25,8 @@ import {
   createMcpToolDefinitions,
   credentialFingerprint,
   McpAccessDeniedError,
+  type McpExposure,
+  parseMcpExposurePolicy,
   reportMcpCatalogOutcome,
   reportMcpPartialDiscovery,
   reportMcpRegistrationFatal,
@@ -1859,6 +1862,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
+  const mcpExposure = parseMcpExposurePolicy(settings?.mcp);
   const providerNames = new Set(definitions.map((definition) => definition.name));
   const oauthRuntimeRoots = new Map<string, { apiKey: string; root: string }>();
   let mcpUI: ExtensionContext["ui"] | undefined;
@@ -1884,6 +1888,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     sessionStarted = false;
     pendingMcpMessages.clear();
   });
+  for (const warning of mcpExposure.warnings) notifyMcp(`LiteLLM MCP: ${warning}`);
 
   function discoveryDisabledReason(): string | null {
     if (isOffline()) return `${ENV_OFFLINE}=1`;
@@ -1936,6 +1941,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   // Each provider owns its own MCP catalog, keyed by provider name.
   const registeredMcpIdentities = new Map<string, string>();
+  // Generated tool names each provider registered in its last successful pass; Pi cannot unregister,
+  // so names that vanish from the catalog are withdrawn by re-registering them hidden.
+  const registeredMcpToolNames = new Map<string, Set<string>>();
   let mcpSeeded = false;
   const mcpRegistrations = new Map<string, Promise<void>>();
   // Pi's registerTool throws only from assertActive(), whose staleness flag is set with `??=` and
@@ -2101,6 +2109,65 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     });
   }
 
+  // Pi before 0.99 reports no `exposure` and declares every registered tool.
+  function piHonorsToolExposure(): boolean {
+    return pi.getAllTools().some((tool) => "exposure" in tool);
+  }
+
+  const WITHDRAWN_MCP_MESSAGE = "This LiteLLM MCP tool is no longer offered by the proxy.";
+  function withdrawMcpTools(names: ReadonlySet<string>): void {
+    for (const name of names) {
+      // Older Pi ignores `exposure`, so the stub stays callable and must fail without calling the proxy.
+      pi.registerTool({
+        name,
+        label: "Withdrawn LiteLLM MCP tool",
+        description: WITHDRAWN_MCP_MESSAGE,
+        parameters: Type.Object({}),
+        exposure: "hidden",
+        async execute() {
+          throw new Error(WITHDRAWN_MCP_MESSAGE);
+        },
+      });
+    }
+    if (piHonorsToolExposure()) pi.setActiveTools(pi.getActiveTools().filter((name) => !names.has(name)));
+  }
+
+  let warnedMcpExposureIgnored = false;
+  let warnedMcpUnreachable = false;
+  // As in Pi's own MCP extension: tools that are not declared to the model are reached through
+  // codemode (`codemode`, `codemode-deferred`) or tool_search (`deferred`). Activate the one the
+  // configured exposure needs, and say so once when neither is available.
+  function activateMcpDiscoveryTools(exposures: readonly McpExposure[]): void {
+    const needsCodemode = exposures.includes("codemode") || exposures.includes("codemode-deferred");
+    const needsToolSearch = exposures.includes("deferred");
+    if (!needsCodemode && !needsToolSearch) return;
+    const tools = pi.getAllTools();
+    // Without exposure support every registered tool is declared, so nothing needs activating.
+    if (!piHonorsToolExposure()) {
+      if (warnedMcpExposureIgnored) return;
+      warnedMcpExposureIgnored = true;
+      notifyMcp(
+        "LiteLLM MCP: this Pi version ignores litellm.mcp.exposure; MCP tools are declared directly to the model.",
+      );
+      return;
+    }
+    const hasCodemode = tools.some((tool) => tool.name === "codemode");
+    const hasToolSearch = tools.some((tool) => tool.name === "tool_search");
+    const active = pi.getActiveTools();
+    const activate = [
+      ...(needsCodemode && hasCodemode && !active.includes("codemode") ? ["codemode"] : []),
+      ...(needsToolSearch && hasToolSearch && !active.includes("tool_search") ? ["tool_search"] : []),
+    ];
+    if (activate.length > 0) pi.setActiveTools([...active, ...activate]);
+    const reachable = [...active, ...activate];
+    if ((hasCodemode && reachable.includes("codemode")) || (hasToolSearch && reachable.includes("tool_search"))) return;
+    if (warnedMcpUnreachable) return;
+    warnedMcpUnreachable = true;
+    notifyMcp(
+      "LiteLLM MCP: tools with codemode or deferred exposure are reachable only through Pi's codemode or tool_search tool, and neither is available; they cannot be called.",
+    );
+  }
+
   async function registerMcpTools(
     definition: ProviderDefinition,
     auth: McpRuntimeAuth,
@@ -2141,6 +2208,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           signal,
           notify,
           namespace,
+          mcpExposure.policy,
         );
         signal?.throwIfAborted();
         if (loginGeneration !== mcpLoginGeneration(definition.name)) return;
@@ -2163,6 +2231,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         }
         reportMcpRegistrationSuccess(notify);
         reportMcpPartialDiscovery(report.partialFailure, registeredNames, notify);
+        const previousNames = registeredMcpToolNames.get(definition.name) ?? new Set<string>();
+        const currentNames = new Set(registeredNames);
+        // A partial or empty catalog may omit live tools, so it withdraws nothing and keeps the old names.
+        const settled = definitions.length > 0 && !report.partialFailure;
+        const withdrawn = settled ? new Set([...previousNames].filter((n) => !currentNames.has(n))) : new Set<string>();
+        try {
+          if (withdrawn.size > 0) withdrawMcpTools(withdrawn);
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          mcpRegistrationFatal = true;
+          reportMcpRegistrationFatal(registeredNames.length, definitions.length, error, notify);
+          return;
+        }
+        if (definitions.length > 0) {
+          if (!settled) for (const name of previousNames) currentNames.add(name);
+          registeredMcpToolNames.set(definition.name, currentNames);
+        }
+        if (withdrawn.size > 0 && isVerboseDiscovery()) {
+          notifyMcp(`${label}: withdrew ${withdrawn.size} MCP tools no longer offered by the proxy.`, "info");
+        }
+        activateMcpDiscoveryTools(report.exposures);
         if (isVerboseDiscovery()) {
           notifyMcp(
             `${label}: registered ${registeredNames.length} of ${definitions.length} prepared MCP tools ` +

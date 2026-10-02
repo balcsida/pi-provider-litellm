@@ -260,6 +260,20 @@ describe("createSkillToolDefinitions", () => {
     ]);
   });
 
+  it("groups the tools under one namespace with truthful annotation hints", () => {
+    const definitions = createSkillToolDefinitions(async () => ({
+      baseUrl: "https://litellm.example.com",
+      apiKey: "sk-test",
+    }));
+
+    expect(new Set(definitions.map((definition) => definition.namespace?.name))).toEqual(new Set(["litellm_skills"]));
+    expect(definitions.map((definition) => definition.annotations)).toEqual([
+      { readOnlyHint: true, openWorldHint: false },
+      { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    ]);
+  });
+
   it("executes the list tool with a fresh token", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, [{ id: "skill-1", name: "terraform", description: "Terraform conventions" }]),
