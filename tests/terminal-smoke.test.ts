@@ -68,13 +68,13 @@ it("dismisses command autocomplete without inspecting form values", async () => 
     },
   } as unknown as Session;
 
-  await submit(session, "/login litellm", "LiteLLM · subscription/API key");
+  await submit(session, "/login litellm", "LiteLLM · account/API key");
   await submit(session, "sk-ci-litellm-smoke");
 
   expect(calls).toEqual([
     "type",
     ["waitForText", "/login litellm", { timeoutMs: 90_000 }],
-    ["waitForText", "LiteLLM · subscription/API key", { timeoutMs: 90_000 }],
+    ["waitForText", "LiteLLM · account/API key", { timeoutMs: 90_000 }],
     "Escape",
     ["waitForIdle", { timeoutMs: 90_000 }],
     "Enter",
@@ -122,7 +122,7 @@ describe.skipIf(!enabled)("interactive Pi terminal smoke", () => {
         // "Warning: No models available", which activation-time discovery now prevents (#137).
         await session.screen.waitForText("[Extensions]", { timeoutMs: waitTimeoutMs });
         await session.screen.waitForIdle({ timeoutMs: waitTimeoutMs });
-        await submit(session, "/login litellm", "LiteLLM · subscription/API key");
+        await submit(session, "/login litellm", "LiteLLM · account/API key");
         await selectApiKeyAuthMethod(session);
         // The proxy URL is offered from LITELLM_BASE_URL, so signing in costs one keypress (#147).
         await session.screen.waitForText("LiteLLM proxy URL", { timeoutMs: waitTimeoutMs });
