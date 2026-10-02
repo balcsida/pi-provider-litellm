@@ -80,7 +80,7 @@ describe("package gallery metadata", () => {
     });
 
     expect(manifest.pi.image).toBe(
-      "https://raw.githubusercontent.com/balcsida/pi-provider-litellm/refs/heads/main/assets/pi_litellm_gallery.png",
+      "https://raw.githubusercontent.com/balcsida/pi-provider-litellm/refs/heads/main/assets/pi_litellm_gallery.svg",
     );
   });
 
