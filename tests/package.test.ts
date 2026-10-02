@@ -403,11 +403,21 @@ describe("dependency security overrides", () => {
           .map(([path, pkg]) => [path, pkg.version ?? "missing"]),
       );
 
+    // Floors, not pins: an upgrade past the patched version must pass, a copy below it must not.
     // basic-ftp left the dependency tree entirely; its override is vestigial.
-    expect(Object.values(copiesOf("basic-ftp")).every((version) => version === "6.0.1")).toBe(true);
-    expect(Object.values(copiesOf("brace-expansion"))).toEqual(["5.0.9"]);
-    expect(Object.values(copiesOf("nanoid"))).toEqual(["3.3.18"]);
-    expect(Object.values(copiesOf("undici"))).toEqual(["8.10.2"]);
-    expect(Object.values(copiesOf("protobufjs"))).toEqual(["8.7.1"]);
+    const floors = {
+      "basic-ftp": "6.0.1",
+      "brace-expansion": "5.0.9",
+      nanoid: "3.3.18",
+      undici: "8.10.2",
+      protobufjs: "8.7.1",
+    };
+    for (const [name, floor] of Object.entries(floors)) {
+      for (const [path, version] of Object.entries(copiesOf(name))) {
+        expect(version.localeCompare(floor, undefined, { numeric: true }), `${path}@${version}`).toBeGreaterThanOrEqual(
+          0,
+        );
+      }
+    }
   });
 });
