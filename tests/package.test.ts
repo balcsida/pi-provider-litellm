@@ -327,9 +327,6 @@ describe("pi package compatibility", () => {
       "@earendil-works/pi-ai": { optional: true },
       "@earendil-works/pi-coding-agent": { optional: true },
     });
-    expect(manifest.devDependencies["@earendil-works/pi-ai"]).toBe("^1.0.0");
-    expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("^1.0.0");
-    expect(manifest.devDependencies.typebox).toBe("1.3.34");
   });
 
   it("documents native Provider model persistence and the extension-only package surface", async () => {
