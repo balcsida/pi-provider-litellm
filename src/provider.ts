@@ -29,7 +29,7 @@ export type LiteLLMProviderOptions = {
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
 };
 
-// Chat models may omit `type`; Pi's `isModelType()` is newer than the peer floor, so keep the check local.
+// Chat models may omit `type`.
 function isChatModel(model: AnyModel): model is Model<Api> {
   return (model.type ?? "chat") === "chat";
 }

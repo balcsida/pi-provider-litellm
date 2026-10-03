@@ -48,8 +48,8 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0"
+    "@earendil-works/pi-ai": ">=0.99.2",
+    "@earendil-works/pi-coding-agent": ">=0.99.2"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {

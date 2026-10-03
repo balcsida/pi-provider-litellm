@@ -169,8 +169,7 @@ function parseJsonObject(value: string, fieldName: string): Record<string, unkno
   return parsed as Record<string, unknown>;
 }
 
-// Pi 0.99 groups tools by namespace and lets permission extensions read annotation hints; older
-// Pi ignores both fields.
+// Pi groups tools by namespace and lets permission extensions read annotation hints.
 const SKILLS_NAMESPACE = { name: "litellm_skills", description: "LiteLLM Skills Gateway" };
 
 export function createSkillToolDefinitions(

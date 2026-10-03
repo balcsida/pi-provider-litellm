@@ -212,6 +212,24 @@ describe("extension startup", () => {
     expect(pi.commands.has("litellm-refresh")).toBe(true);
   });
 
+  it.each(["0.99.1", "0.99.2-rc.1"])("refuses to load on Pi %s, before registering anything", async (piVersion) => {
+    const pi = createPi();
+
+    await expect((await loadExtension(await makeAgentDir(), { piVersion }))(pi)).rejects.toThrow(
+      `pi-provider-litellm needs Pi 0.99.2 or newer; this is Pi ${piVersion}`,
+    );
+    expect(pi.providers).toEqual([]);
+    expect(pi.handlers.size).toBe(0);
+  });
+
+  it("loads on Pi 0.99.2", async () => {
+    const pi = createPi();
+
+    await (await loadExtension(await makeAgentDir(), { piVersion: "0.99.2" }))(pi);
+
+    expect(pi.providers.map((provider) => provider.id)).toEqual(["litellm"]);
+  });
+
   it("warns once per provider and route when a LiteLLM fallback serves the request", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(

@@ -159,6 +159,7 @@ export async function createCompatibilityHarness(
 }> {
   agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-compat-"));
   vi.doMock("@earendil-works/pi-coding-agent", () => ({
+    VERSION: "1.0.0",
     defineTool: (tool: unknown) => tool,
     getAgentDir: () => agentDir,
   }));
