@@ -93,17 +93,31 @@ export function normalizeBaseUrl(input: string, allowInsecureHttp = false): stri
 const ANTHROPIC_MODEL_PATTERN = /(?:^|[-_/.:])(?:anthropic\/|(?:claude|fable|opus|sonnet|haiku)(?=$|[-_/.:]))/i;
 const MOONSHOT_MODEL_PATTERN = /^(moonshotai\/|moonshot\/|kimi[-/])/i;
 const FORCED_THINKING_MODEL_PATTERN = /(?:^|[-/])thinking(?:[-/]|$)/i;
-// Deployments expose the gpt-5.5 route under varying names (`llm-gateway/gpt-5.5`,
-// bare `gpt-5.5`, dated ids like `gpt-5.5-20260504143601`); match them all so the
-// tool+reasoning workaround survives route renames.
-const GPT55_MODEL_PATTERN = /(?:^|\/)gpt-5\.5(?:$|[-.])/i;
+// GPT ids appear bare, prefixed, or dated (`gpt-6-sol`, `llm-gateway/gpt-5.5`,
+// `gpt-5.5-20260504143601`); match them all so the tool+reasoning workaround
+// survives renames. `gpt-4o` and `gpt-oss` carry no generation number here.
+const GPT_GENERATION_PATTERN = /(?:^|\/)gpt-(\d+)(?:\.(\d+))?(?=$|[-.])/i;
 
 export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
 }
 
-export function isGpt55Model(modelId: string): boolean {
-  return GPT55_MODEL_PATTERN.test(modelId);
+function gptGeneration(modelId: string): [major: number, minor: number] | undefined {
+  const match = GPT_GENERATION_PATTERN.exec(modelId);
+  return match ? [Number(match[1]), Number(match[2] ?? 0)] : undefined;
+}
+
+// GPT-5.5 and later reject `reasoning_effort` alongside function tools on
+// /v1/chat/completions ("use /v1/responses").
+export function isGpt55OrNewerModel(modelId: string): boolean {
+  const generation = gptGeneration(modelId);
+  return generation !== undefined && (generation[0] > 5 || (generation[0] === 5 && generation[1] >= 5));
+}
+
+// GPT-6 also rejects an omitted effort there: it falls back to its default effort.
+export function isGpt6OrNewerModel(modelId: string): boolean {
+  const generation = gptGeneration(modelId);
+  return generation !== undefined && generation[0] >= 6;
 }
 
 function shouldSuppressReasoningContent(modelId: string): boolean {
@@ -736,13 +750,29 @@ function mapFromModelInfoGroup(
     !hasConflictingFamily &&
     (reduced.deploymentFamilies.includes("kimi") || (unlabeled && isMoonshotModel(reduced.id)));
   if (moonshotEvidence && !unanimousMoonshot) options.withheldRepairRoutes?.push(reduced.id);
-  const modelPolicy = requestPolicy(
+  const familyPolicy = requestPolicy(
     reduced.id,
     reduced.deploymentFamilies,
     reduced.normalizeThinkTags,
     reduced.suppressReasoningVisibility,
     unanimousMoonshot,
   );
+  // One GPT-5.5+ deployment is enough: a tool request routed to it fails with
+  // reasoning attached, while dropping reasoning elsewhere only loses effort.
+  const chatBackendIds =
+    api === "openai-completions"
+      ? entries.flatMap((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.modelId ?? [])
+      : [];
+  const modelPolicy: LiteLLMModelPolicy | undefined = chatBackendIds.some(isGpt55OrNewerModel)
+    ? {
+        normalizeStrictToolMessages: false,
+        normalizeThinkTags: false,
+        suppressReasoningVisibility: false,
+        ...familyPolicy,
+        dropToolReasoning: true,
+        ...(chatBackendIds.some(isGpt6OrNewerModel) ? { explicitToolReasoningOff: true } : {}),
+      }
+    : familyPolicy;
   return {
     id: reduced.id,
     // Reduced groups never borrow the ` (no metadata)` sentinel, which authorizes
@@ -1008,6 +1038,10 @@ function applyWildcardEvidence(
           ...(policies.every((policy) => policy.normalizeGeminiReasoningEffort)
             ? { normalizeGeminiReasoningEffort: true as const }
             : {}),
+          ...(policies.some((policy) => policy.dropToolReasoning) ? { dropToolReasoning: true as const } : {}),
+          ...(policies.some((policy) => policy.explicitToolReasoningOff)
+            ? { explicitToolReasoningOff: true as const }
+            : {}),
         }
       : undefined;
   const {
@@ -1061,6 +1095,12 @@ function mapFromWildcardExpansion(
           modelPolicies.every((policy) => policy?.suppressReasoningVisibility === true),
         ...(modelPolicies.every((policy) => policy?.normalizeGeminiReasoningEffort === true)
           ? { normalizeGeminiReasoningEffort: true as const }
+          : {}),
+        ...(api === "openai-completions" && modelPolicies.some((policy) => policy?.dropToolReasoning === true)
+          ? { dropToolReasoning: true as const }
+          : {}),
+        ...(api === "openai-completions" && modelPolicies.some((policy) => policy?.explicitToolReasoningOff === true)
+          ? { explicitToolReasoningOff: true as const }
           : {}),
       }
     : !hasFamilyEvidence && isMoonshotModel(id)
@@ -1329,7 +1369,26 @@ export function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
     // re-proven offline, so fail closed until the forced network refresh below.
     restored = { ...cached, compat: Object.keys(compat).length > 0 ? compat : undefined };
   }
-  if (restored.litellmPolicy || !hasMoonshotCompatEvidence(restored.compat)) return restored;
+  if (restored.litellmPolicy) return restored;
+  // The cache no longer holds the deployment rows that prove a GPT-5.5+ backend, so an
+  // OpenAI-family Chat entry fails toward the tool-reasoning workaround until refreshed.
+  if (
+    restored.api === "openai-completions" &&
+    restored.litellmBackendFamily === "openai" &&
+    isGpt55OrNewerModel(restored.id)
+  ) {
+    return {
+      ...restored,
+      litellmPolicy: {
+        normalizeStrictToolMessages: false,
+        normalizeThinkTags: false,
+        suppressReasoningVisibility: false,
+        dropToolReasoning: true,
+        ...(isGpt6OrNewerModel(restored.id) ? { explicitToolReasoningOff: true } : {}),
+      },
+    } as LiteLLMModel;
+  }
+  if (!hasMoonshotCompatEvidence(restored.compat)) return restored;
   return { ...restored, litellmPolicy: moonshotPolicy(restored.id) } as LiteLLMModel;
 }
 
