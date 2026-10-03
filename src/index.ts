@@ -15,7 +15,7 @@ import type {
   ProviderAuth,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, McpServerConfig } from "@earendil-works/pi-coding-agent";
-// A namespace import, so an older Pi without `VERSION` still loads the extension.
+// A namespace import, so a Pi without `VERSION` reaches the version check instead of failing to link.
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
@@ -1878,6 +1878,14 @@ function normalizeThinkTags(
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
+  // Pi installs packages without resolving peerDependencies, so only this check keeps an older Pi from
+  // loading the extension. It runs before anything registers; Pi reports the error and starts without it.
+  if (!isPiVersionAtLeast(piCodingAgent.VERSION, [0, 99, 2])) {
+    throw new Error(
+      `pi-provider-litellm needs Pi 0.99.2 or newer; this is Pi ${piCodingAgent.VERSION}. ` +
+        "Update Pi, or install the last release for older Pi: pi install npm:pi-provider-litellm@3.4.0",
+    );
+  }
   const settings = await readGlobalLiteLLMSettings();
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
@@ -1919,9 +1927,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // credential on every request, so token refreshes and key helpers apply without registering
   // again; only a new proxy root or new headers change the registration.
   const mcpSettings = isPlainObject(settings?.mcp) ? settings.mcp : undefined;
-  // `registerMcpServer` arrived in Pi 0.99.0, `auth.provider` in 0.99.2.
-  const mcpSupported =
-    typeof pi.registerMcpServer === "function" && isPiVersionAtLeast(piCodingAgent.VERSION, [0, 99, 2]);
   // The last config attempted for each provider, and whether Pi accepted it. Headers can carry
   // credentials, so the config is remembered as a keyed digest.
   const mcpAttempts = new Map<string, { identity: string; registered: boolean }>();
@@ -2296,10 +2301,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
   });
 
-  if (mcpEnabled && !mcpSupported) {
-    notifyMcp("LiteLLM MCP: MCP tools need Pi 0.99.2 or newer; this Pi version registers none.");
-  }
-  if (mcpEnabled && mcpSupported) {
+  if (mcpEnabled) {
     // Servers registered while the extension loads connect when the session starts. Each turn
     // picks up a login that changed the proxy root, and a logout that removed it.
     for (const definition of definitions) syncMcpServer(definition);

@@ -1,6 +1,6 @@
 # pi-provider-litellm
 
-LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.83.0+ is required; LiteLLM MCP tools need Pi 0.99.2+.
+LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.99.2+ is required; on older Pi, install `npm:pi-provider-litellm@3.4.0`.
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 

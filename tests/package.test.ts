@@ -321,8 +321,8 @@ describe("pi package compatibility", () => {
       with: { type: "json" },
     });
 
-    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.83.0");
-    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.83.0");
+    expect(manifest.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.99.2");
+    expect(manifest.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.99.2");
     expect(manifest.peerDependenciesMeta).toEqual({
       "@earendil-works/pi-ai": { optional: true },
       "@earendil-works/pi-coding-agent": { optional: true },
@@ -332,7 +332,7 @@ describe("pi package compatibility", () => {
   it("documents native Provider model persistence and the extension-only package surface", async () => {
     const readme = await readFile(join(repoRoot, "README.md"), "utf8");
 
-    expect(readme).toContain("Pi 0.83.0+ is required");
+    expect(readme).toContain("Pi 0.99.2+ is required");
     expect(readme).not.toContain("smoke-tested with Pi 0.81.0");
     expect(readme).toMatch(/no\s+longer exposes that library import/);
     expect(readme).toContain("native Provider");
