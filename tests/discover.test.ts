@@ -6966,6 +6966,31 @@ describe("native Messages discovery", () => {
       }),
     ).toMatchObject({ messagesCompat: expect.anything() });
   });
+
+  // The shape LiteLLM v1.100 reports for Bedrock-served Claude: its model map has no endpoint list
+  // for the model, so `get_model_info` fills `supported_endpoints` with null.
+  it("selects native Messages for Bedrock Claude reported with null supported_endpoints", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, {
+        data: [
+          {
+            model_name: "claude-sonnet-4-6",
+            litellm_params: { model: "bedrock/us.anthropic.claude-sonnet-4-6-v1:0" },
+            model_info: {
+              mode: "chat",
+              litellm_provider: "bedrock_converse",
+              base_model: "us.anthropic.claude-sonnet-4-6-v1:0",
+              supported_endpoints: null,
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.api).toBe("anthropic-messages");
+  });
 });
 
 describe("Moonshot transport suppression", () => {
