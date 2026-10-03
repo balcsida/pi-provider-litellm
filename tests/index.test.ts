@@ -262,9 +262,12 @@ describe("extension startup", () => {
     respond("litellm-alias", "high", "2");
 
     expect(notify.mock.calls).toEqual([
-      [expect.stringContaining('LiteLLM ("litellm"): a fallback served "high"'), "warning"],
-      [expect.stringContaining('LiteLLM ("litellm"): a fallback served "low"'), "warning"],
-      [expect.stringContaining('LiteLLM ("litellm-alias"): a fallback served "high"'), "warning"],
+      [expect.stringContaining('LiteLLM ("litellm"): the request for "high" was answered by a fallback'), "warning"],
+      [expect.stringContaining('LiteLLM ("litellm"): the request for "low" was answered by a fallback'), "warning"],
+      [
+        expect.stringContaining('LiteLLM ("litellm-alias"): the request for "high" was answered by a fallback'),
+        "warning",
+      ],
     ]);
   });
 
@@ -315,7 +318,7 @@ describe("extension startup", () => {
     }
     expect(stderr).toHaveBeenCalledTimes(1);
     const output = String(stderr.mock.calls[0]?.[0]);
-    expect(output).toContain('a fallback served "high\\"\\n\\u001b[31m"');
+    expect(output).toContain('the request for "high\\"\\n\\u001b[31m" was answered by a fallback');
     expect(output.trimEnd()).not.toContain("\n");
     expect(output).not.toContain("\u001b");
     expect(output).toContain('LiteLLM ("alias\\"\\n\\u001b[31m"):');

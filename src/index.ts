@@ -2263,8 +2263,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     warnedFallbackRoutes.add(key);
     const route = JSON.stringify(model.id);
     const message =
-      `LiteLLM (${JSON.stringify(model.provider)}): a fallback served ${route}, but protocol and model handling were chosen ` +
-      `for ${route}'s own deployments. If its fallbacks cross model families, pin the protocol with ` +
+      `LiteLLM (${JSON.stringify(model.provider)}): the request for ${route} was answered by a fallback, but protocol and model handling were chosen ` +
+      `for ${route}'s own deployments, not the fallback's. If its fallbacks cross model families, pin the protocol with ` +
       "`model_info.supported_endpoints`.";
     if (ctx.hasUI) ctx.ui.notify(message, "warning");
     else process.stderr.write(`${message}\n`);
