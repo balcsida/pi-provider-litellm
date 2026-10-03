@@ -25,7 +25,6 @@ function mockProxies(overrides: Record<string, () => Response> = {}): string[] {
       const route = new URL(url).hostname.split(".")[0];
       return jsonResponse(200, { data: [{ model_name: `${route}-gpt-4o`, model_info: { mode: "chat" } }] });
     }
-    if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools: [] });
     throw new Error(`unexpected URL: ${url}`);
   });
   return seen;

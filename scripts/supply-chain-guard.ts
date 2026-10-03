@@ -71,7 +71,6 @@ export const allowedSourceModules = [
   "discover",
   "gcloud-token",
   "index",
-  "mcp-tools",
   "protocols",
   "model-groups",
   "provider",

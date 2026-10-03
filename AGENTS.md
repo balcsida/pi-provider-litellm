@@ -8,7 +8,7 @@
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
 - Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
-  ignores (extra `ToolDefinition` fields) or feature-detects (an `exposure` field on `pi.getAllTools()` entries), and do
+  ignores (extra `ToolDefinition` fields) or feature-detects (`pi.registerMcpServer`, added in Pi 0.99), and do
   not import runtime symbols that older `pi-ai`/`pi-coding-agent` lack, such as `isModelType`.
 - Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
   before reading chat-only fields.
@@ -76,30 +76,25 @@
 - `before_provider_headers` sends Pi's canonical session id as `x-litellm-session-id`, scoped to the configured LiteLLM provider names; no session field is added to request bodies.
 - Kimi/Moonshot responses may include `<think>` text; Pi-visible normalization in `message_end` follows discovered response policy. Request-side visibility suppression additionally requires every deployment's routing provider to be Moonshot. Keep hosted Kimi paths covered by feature tests.
 
-## LiteLLM MCP Tools
+## LiteLLM MCP
 
-- Everything a LiteLLM MCP server returns is untrusted input: tool names, server names, descriptions, schemas, and results.
-- Refuse `pattern`/`patternProperties` at a keyword position regardless of value type. The current TypeBox only compiles a string-valued `pattern`, but the expression text would still reach Pi and the provider, and the guard should not rest on an upstream type check.
-- The safety invariant is that **no proxy-supplied regular expression, and no reference the validator cannot safely resolve, reaches Pi or TypeBox**. `pattern` and `patternProperties` keys are compiled into backtracking regexes with no time limit; `$ref` is resolved as an arbitrary JSON pointer and whatever it lands on is then treated as a schema.
-- Do not implement that check by enumerating the schema positions where a subschema may appear. A `$ref` resolves an arbitrary JSON pointer, so a regex can hide under any key, including data-only ones like `default` and `examples`. `findSchemaHazard()` in `src/mcp-tools.ts` walks the entire supplied graph instead, bounded by depth, a node budget, and identity-based cycle detection; an incomplete walk is a hazard, not a pass.
-- Covering the graph is necessary but not sufficient for references: a local pointer must also *resolve* to a usable subschema, and the reference chain must be proven acyclic. Object identity cannot see a pointer cycle, because each hop is a different object.
-- Test the guard by exercising the consumer, not just by asserting a marker string is absent. `tests/mcp-tools.test.ts` compiles every registered schema with the same TypeBox the runtime uses and watches the `RegExp` constructor, covering executable expressions that do not contain an expected marker string.
-- A hazard degrades the tool to the extension-owned `args` envelope; it does not drop the tool. Real MCP schemas commonly use `pattern`, so dropping them costs real functionality. The envelope's own library-generated `patternProperties` is fine because it is not proxy-supplied.
-- A present-but-non-object `inputSchema` is `invalid-schema`, never treated as schemaless. Only an absent or empty schema takes the envelope as its normal path.
-- Tool names must stay a pure function of tool identity. Always append the identity hash; never make the hash conditional on what else is in the catalog, or adding a sibling will rename a survivor and Pi cannot unregister the old name.
-- Every raw catalog entry must land in exactly one count or class, so `raw = prepared + dropped + beyond-the-cap` always reconciles. A registration refusal is reported separately because registered may be less than prepared. Add a class rather than letting a loss go unreported.
-- Diagnostics dedupe on full membership, not on the printed sample, and a class that stops occurring is cleared. Never interpolate proxy-supplied text or credentials into stderr; use generated names for normalized tools and positional labels for entries that failed normalization, which may have no usable name. Derive malformed-entry identities with queued work bounded by nesting depth; retain at most one key list per open object rather than one work item per child.
-- The MCP catalog identity must not hold credential material. `credentialFingerprint()` reduces the API key **and** the headers (`LITELLM_HEADERS` can carry its own authorization) to a per-process salted HMAC, so a change to either still forces re-registration while nothing reversible is retained. Note `src/gcloud-token.ts` builds its cache key from the raw refresh token — same defect class, untouched baseline, out of scope here.
-- `pi.registerTool` is a synchronous replace-by-name whose only failure is a never-reset staleness check, so a refusal is fatal for the pass and for that extension instance. Do not model it as a per-tool rejection or add retry; a reload provides a clean instance.
-- Tools cannot be unregistered, so a generated name missing from the next successful, non-empty, non-partial pass is re-registered as a `hidden` stub whose `execute` fails with extension-owned text (never a proxy call, since older Pi ignores `exposure`). It leaves the active set only when Pi honors exposure (`piHonorsToolExposure()`).
-- `POST /mcp-rest/tools/call` is side-effecting and must stay exactly-once, and cancellation must preserve the caller's original abort reason. Keep the tests that assert call counts and reason identity.
-- Two upstream behaviors keep passthrough schemas safe and are not controlled here. Both are pinned by tests in `tests/mcp-tools.test.ts`; if a dependency bump breaks either, fix it there before shipping.
-  - `typebox`'s `value/convert/from_object.mjs` turns `properties` keys into `new RegExp(`^${key}$`)` with **no escaping**, and `pi-ai` calls `Value.Convert` on tool parameters. That is only harmless because `Convert` walks recognised TypeBox types and no-ops on a raw JSON Schema, so a proxy-supplied property name never reaches it. If that changed, a property named `(a+)+$` would become an executable backtracking regex tested against model-supplied argument keys.
-  - `format` is live on passthrough schemas: it is a proxy-chosen selector of `typebox`'s own regexes, executed against model-supplied strings. The shipped formats are well-anchored, so this is a residual dependency on upstream regex quality, not a hole. Do not assume `format` is ignored.
-- Do not write timing-based tests for any of this. Assert the registered `parameters` and the absence of the exact proxy-supplied regex or ref, and keep the schema-position test lists independent of the implementation's own tables.
-- `litellm.mcp.exposure` and `toolExposure` mirror Pi's `mcp.json` keys and are parsed once by `parseMcpExposurePolicy()`. `codemode-deferred` becomes Pi's `deferred` on the tool definition, while `report.exposures` keeps the MCP value so activation can tell them apart. Activation mirrors the built-in MCP extension's `ensureDiscoveryActive`: codemode for `codemode`/`codemode-deferred`, `tool_search` for `deferred`, one warning when neither is registered, and one warning when `getAllTools()` entries carry no `exposure` (Pi before 0.99, where every tool is direct).
-- Never register `/mcp`, `codemode`, or `tool_search`: Pi 0.99 unloads the built-in extension whose tool, command, or flag an extension re-registers. Pi's own MCP tools are `mcp__<server>__<tool>`, so `mcp_<server>_<tool>_<hash>` never collides with them.
-- Annotations keep only the four boolean hints, as Pi's own MCP client does; `title` and any other proxy-supplied annotation field never reach Pi. Namespace names share the generated tool-name prefix (`mcp_<server>_<hash>` or `mcp_<alias>_<server>_<hash>`) and are bounded like tool names; the trailing 6-hex hash covers `server_id`, `server_name` and the alias, so servers whose names sanitize or truncate alike never share a namespace; the namespace description is proxy text bounded to 256 bytes.
+- MCP goes through Pi's built-in client. Each provider registers `<root>/mcp` with
+  `pi.registerMcpServer(name, { url, auth: { provider: name }, headers?, exposure?, toolExposure? })`. Do not
+  reimplement tool discovery, naming, exposure, schema handling, or calls here.
+- The registration never copies the provider's key. `auth.provider` makes Pi read the provider's current credential on
+  every request, which is what keeps OAuth refresh, ADC, and key helpers working. Never put the key in `headers`; it
+  would be frozen at registration. Custom headers are already resolved, so `piLiteral()` escapes `$` and a leading `!`
+  before Pi's own `${VAR}`/`!cmd` resolution sees them.
+- Because the token is read per request, a connection must never outlive its proxy root: `/login` drops the server when
+  it starts, before the new credential is stored, and every replacement unregisters the old server first. Pi before
+  0.99.2 has no `auth.provider`; gate on `VERSION`, read through a namespace import.
+- Pass `exposure` and `toolExposure` through unparsed. Pi validates them, and the error `registerMcpServer` throws is
+  the report; do not add defaults or a second validator.
+- The remembered registration identity is an HMAC of the config, because custom headers can carry credentials. Register
+  again only when it changes, unregister when no proxy root remains (logout), and register nothing under
+  `LITELLM_OFFLINE`, a zero discovery timeout, or `PI_OFFLINE`.
+- Never register `/mcp`, `codemode`, or `tool_search`: Pi unloads the built-in extension whose tool, command, or flag an
+  extension re-registers.
 
 ## Reasoning Policy
 

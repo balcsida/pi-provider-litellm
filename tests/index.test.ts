@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -85,9 +85,6 @@ function createModelsStore(models: readonly any[] = []): ModelsStore {
     },
   };
 }
-
-// Generated tool names carry a 10-hex identity hash; assert the contract, not a literal digest.
-const named = (base: string) => expect.stringMatching(new RegExp(`^${base}_[a-f0-9]{10}$`));
 
 async function refreshProvider(
   provider: Provider,
@@ -357,46 +354,13 @@ describe("extension startup", () => {
     expect(pi.providers).toHaveLength(1);
   });
 
-  it("ignores legacy cache files without deleting them", async () => {
-    process.env.LITELLM_OFFLINE = "1";
-    const agentDir = await makeAgentDir();
-    const cachePath = join(agentDir, "litellm-models.json");
-    const legacyCache = JSON.stringify({ models: [{ id: "legacy-model" }] });
-    await writeFile(cachePath, legacyCache, "utf8");
-    const extension = await loadExtension(agentDir);
-    const pi = createPi();
-
-    await extension(pi);
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: false,
-      credential: { type: "api_key", key: "sk-test" },
-      store: createModelsStore(),
-    });
-
-    expect(await readFile(cachePath, "utf8")).toBe(legacyCache);
-    expect(pi.providers[0]?.getModels()).toEqual([]);
-  });
-
-  it("registers MCP tools after an online Pi-managed model restore", async () => {
+  it("keeps Pi-managed models when an online refresh fails", async () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
     const requestedUrls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      requestedUrls.push(url);
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        return jsonResponse(200, {
-          tools: [
-            {
-              name: "search",
-              description: "Search",
-              inputSchema: { type: "object", properties: {} },
-              mcp_info: { server_name: "brave", server_id: "brave-api" },
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
+      requestedUrls.push(String(input));
+      throw new Error(`unexpected URL: ${String(input)}`);
     });
     const extension = await loadExtension(await makeAgentDir());
     const pi = createPi();
@@ -420,364 +384,37 @@ describe("extension startup", () => {
     await expect(
       refreshProvider(pi.providers[0]!, {
         allowNetwork: true,
-        credential: {
-          type: "api_key",
-          key: "sk-test",
-          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-        },
+        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
         store: createModelsStore([stored]),
       }),
     ).rejects.toThrow("unexpected URL");
 
-    expect(requestedUrls).toEqual([
-      "https://proxy.example.com/model/info",
-      "https://proxy.example.com/mcp-rest/tools/list",
-    ]);
-    // MCP registration runs in the background so a hanging /mcp-rest endpoint
-    // cannot block model refresh; wait for it to finish before asserting.
-    await vi.waitFor(() => {
-      expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search"));
-    });
+    expect(requestedUrls).toEqual(["https://proxy.example.com/model/info"]);
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
-  it.each([
-    ["unexpected_error", "MCP discovery reported an unexpected proxy error"],
-    ["proxy-owned-tag", "MCP discovery reported an error"],
-  ])("does not expose the %s discovery envelope in stderr", async (proxyTag, expectedText) => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const proxyMessage = "private proxy details";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        return jsonResponse(200, { tools: [], error: proxyTag, message: proxyMessage });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: {
-        type: "api_key",
-        key: "sk-test",
-        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-      },
-    });
-    await vi.waitFor(() =>
-      expect(stderr.mock.calls.map(([message]) => String(message)).join("")).toContain(expectedText),
-    );
-
-    const output = stderr.mock.calls.map(([message]) => String(message)).join("");
-    expect(output).not.toContain(proxyTag);
-    expect(output).not.toContain(proxyMessage);
-  });
-
-  it.each(["api_key", "oauth"] as const)(
-    "keeps denied MCP discovery paused across restarts until %s login succeeds",
-    async (loginType) => {
-      process.env.LITELLM_MODELS_DEV = "0";
-      const agentDir = await makeAgentDir();
-      let listCalls = 0;
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-        const url = String(input);
-        if (url.endsWith("/token"))
-          return jsonResponse(200, {
-            access_token: "rotated-access",
-            refresh_token: "rotated-refresh",
-            token_type: "bearer",
-            expires_in: 3600,
-          });
-        if (url.endsWith("/model/info"))
-          return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-        if (url.endsWith("/mcp-rest/tools/list")) {
-          listCalls += 1;
-          return listCalls === 1
-            ? jsonResponse(200, {
-                tools: [],
-                error: "unexpected_error",
-                message: "The key is not allowed to access any MCP servers.",
-              })
-            : jsonResponse(200, {
-                tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-              });
-        }
-        throw new Error(`unexpected URL: ${url}`);
-      });
-      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      let pi = createPi();
-      await (await loadExtension(agentDir))(pi);
-      const credential: Credential = {
-        type: "oauth",
-        access: "old-access",
-        refresh: "old-refresh",
-        expires: Date.now() + 3600000,
-        baseUrl: "https://proxy.example.com",
-        flow: "litellm_cli_pkce",
-        clientId: "llm_dcrc_client",
-        tokenEndpoint: "https://proxy.example.com/token",
-        resource: "https://proxy.example.com",
-      };
-      const refresh = (current: Credential = credential) =>
-        refreshProvider(pi.providers[0]!, { allowNetwork: true, credential: current });
-
-      await refresh();
-      await vi.waitFor(() => expect(stderr.mock.calls.flat().join("")).toContain("MCP"));
-      await refresh();
-      expect(listCalls).toBe(1);
-
-      const rotated = await pi.providers[0]!.auth.oauth!.refresh(credential, TEST_SIGNAL);
-      pi = createPi();
-      await (await loadExtension(agentDir))(pi);
-      await refresh(rotated);
-      expect(listCalls).toBe(1);
-      expect(pi.providers[0]?.getModels().map((model) => model.id)).toEqual(["fresh-model"]);
-
-      await expect(
-        pi.providers[0]?.auth[loginType === "oauth" ? "oauth" : "apiKey"]?.login?.(
-          interaction(async () => {
-            throw new Error("login cancelled");
-          }),
-        ),
-      ).rejects.toThrow("login cancelled");
-      await refresh();
-      expect(listCalls).toBe(1);
-
-      const current =
-        loginType === "oauth"
-          ? await loginOAuth(pi.providers[0]!, {
-              onPrompt: vi
-                .fn()
-                .mockResolvedValueOnce("https://proxy.example.com")
-                .mockResolvedValueOnce("new-access")
-                .mockResolvedValueOnce("n"),
-            })
-          : await pi.providers[0]?.auth.apiKey?.login?.(
-              interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce("sk-new")),
-            );
-      await refresh(current);
-      await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
-      expect(listCalls).toBe(2);
-
-      // Other processes can still use the old login after this one signs in successfully.
-      pi = createPi();
-      await (await loadExtension(agentDir))(pi);
-      await refresh(rotated);
-      expect(listCalls).toBe(2);
-    },
-  );
-
-  it.each(["key change", "header change", "same-key login"] as const)(
-    "isolates persisted MCP pauses across processes for %s",
-    async (changed) => {
-      process.env.LITELLM_MODELS_DEV = "0";
-      const agentDir = await makeAgentDir();
-      let releaseOld!: (response: Response) => void;
-      const pendingOld = new Promise<Response>((resolve) => {
-        releaseOld = resolve;
-      });
-      const calls: string[] = [];
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-        const url = String(input);
-        if (url.endsWith("/model/info"))
-          return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-        if (url.endsWith("/mcp-rest/tools/list")) {
-          const headers = new Headers(init?.headers);
-          const scope = `${headers.get("Authorization")}:${headers.get("x-auth")}`;
-          calls.push(scope);
-          return calls.length === 1
-            ? pendingOld
-            : jsonResponse(200, {
-                tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-              });
-        }
-        throw new Error(`unexpected URL: ${url}`);
-      });
-      const oldCredential: Credential = {
-        type: "api_key",
-        key: "sk-old",
-        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-      };
-      const oldPi = createPi();
-      await (await loadExtension(agentDir))(oldPi);
-      await refreshProvider(oldPi.providers[0]!, { allowNetwork: true, credential: oldCredential });
-      await vi.waitFor(() => expect(calls).toHaveLength(1));
-      // Module isolation models independent Pi processes with independent per-process hash salts.
-      const newPi = createPi();
-      await (await loadExtension(agentDir))(newPi);
-      const newCredential =
-        changed === "same-key login"
-          ? await newPi.providers[0]?.auth.apiKey?.login?.(
-              interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce("sk-old")),
-            )
-          : { ...oldCredential, key: changed === "key change" ? "sk-new" : "sk-old" };
-      releaseOld(jsonResponse(403, {}));
-      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      await vi.waitFor(() => expect(stderr.mock.calls.flat().join("")).toContain("discovery paused"));
-      if (changed === "header change") process.env.LITELLM_HEADERS = JSON.stringify({ "x-auth": "new-header-secret" });
-      // Start again after the old process writes its denial, before discovering the new catalog.
-      const restartedPi = createPi();
-      await (await loadExtension(agentDir))(restartedPi);
-      await refreshProvider(restartedPi.providers[0]!, { allowNetwork: true, credential: newCredential });
-      await vi.waitFor(() =>
-        expect(restartedPi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")),
-      );
-      expect(calls).toHaveLength(2);
-      delete process.env.LITELLM_HEADERS;
-      await refreshProvider(oldPi.providers[0]!, { allowNetwork: true, credential: oldCredential });
-      expect(calls).toHaveLength(2);
-      const entries = await readdir(join(agentDir, "litellm-mcp-pauses"));
-      expect(entries.join(" ")).not.toMatch(/sk-old|sk-new|new-header-secret/);
-      for (const name of entries.filter((name) => name.startsWith("paused-")))
-        expect(await readFile(join(agentDir, "litellm-mcp-pauses", name), "utf8")).toBe("");
-    },
-  );
-
-  it.each([true, false])("preserves a late MCP denial across OAuth refresh (persistence: %s)", async (persistent) => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const agentDir = await makeAgentDir();
-    if (!persistent) await writeFile(join(agentDir, "litellm-mcp-pauses"), "unavailable directory");
-    let release!: (response: Response) => void;
-    const pending = new Promise<Response>((resolve) => {
-      release = resolve;
-    });
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/token"))
-        return jsonResponse(200, {
-          access_token: "new-access",
-          refresh_token: "new-refresh",
-          expires_in: 3600,
-          token_type: "bearer",
-        });
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        return pending;
-      }
-      return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-    });
-    const oldCredential: Credential = {
-      type: "oauth",
-      access: "old-access",
-      refresh: "old-refresh",
-      expires: Date.now() + 3600000,
-      flow: "litellm_cli_pkce",
-      clientId: "client",
-      tokenEndpoint: "https://proxy.example.com/token",
-      resource: "https://proxy.example.com",
-      baseUrl: "https://proxy.example.com",
-    };
-    const pi = createPi();
-    await (await loadExtension(agentDir))(pi);
-    await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential: oldCredential });
-    await vi.waitFor(() => expect(listCalls).toBe(1));
-    const refreshed = await pi.providers[0]!.auth.oauth!.refresh(oldCredential, TEST_SIGNAL);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    release(jsonResponse(403, {}));
-    await vi.waitFor(() => expect(stderr.mock.calls.flat().join("")).toContain("discovery paused"));
-    const restartedPi = persistent ? createPi() : pi;
-    if (persistent) await (await loadExtension(agentDir))(restartedPi);
-    await refreshProvider(restartedPi.providers[0]!, { allowNetwork: true, credential: refreshed });
-    expect(listCalls).toBe(1);
-
-    await restartedPi.providers[0]!.auth.apiKey!.login!(
-      interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce("sk-new")),
-    );
-    await refreshProvider(restartedPi.providers[0]!, { allowNetwork: true, credential: refreshed });
-    expect(listCalls).toBe(1);
-  });
-
-  it("keeps keyless helper credentials paused when the helper rotates tokens", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const agentDir = await makeAgentDir();
-    process.env.LITELLM_API_KEY_HELPER = await writeHelper(agentDir, ["first", "second", "third", "fourth"]);
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      if (String(input).endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        return jsonResponse(403, {});
-      }
-      return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-    });
-    const pi = createPi();
-    await (await loadExtension(agentDir))(pi);
-    const credential: Credential = { type: "api_key", env: { LITELLM_BASE_URL: "https://proxy.example.com" } };
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential });
-    await vi.waitFor(() => expect(stderr.mock.calls.flat().join("")).toContain("discovery paused"));
-    await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential });
-    expect(listCalls).toBe(1);
-    expect(await readHelperCount(agentDir)).toBeGreaterThan(2);
-  });
-
-  it("ignores an MCP denial from a request started before a successful login", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    let release!: (response: Response) => void;
-    const pending = new Promise<Response>((resolve) => {
-      release = resolve;
-    });
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info"))
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        return listCalls === 1
-          ? pending
-          : jsonResponse(200, {
-              tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-            });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const pi = createPi();
-    await (await loadExtension(await makeAgentDir()))(pi);
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "sk-old", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-    });
-    await vi.waitFor(() => expect(listCalls).toBe(1));
-    const credential = await pi.providers[0]?.auth.apiKey?.login?.(
-      interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce("sk-new")),
-    );
-    release(jsonResponse(403, { detail: "access denied" }));
-    await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential });
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
-    expect(listCalls).toBe(2);
-  });
-
-  it("does not start MCP discovery from a model refresh that predates login", async () => {
+  it("does not cache the credential of a model refresh that predates login", async () => {
     process.env.LITELLM_MODELS_DEV = "0";
     let release!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => {
       release = resolve;
     });
     let modelCalls = 0;
-    const mcpKeys: Array<string | null> = [];
+    const skillKeys: Array<string | null> = [];
     const models = () => jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return ++modelCalls === 1 ? pending : models();
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        mcpKeys.push(new Headers(init?.headers).get("Authorization"));
-        return mcpKeys.at(-1) === "Bearer sk-old"
-          ? jsonResponse(403, {})
-          : jsonResponse(200, {
-              tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-            });
+      if (url.endsWith("/claude-code/marketplace.json")) {
+        skillKeys.push(new Headers(init?.headers).get("Authorization"));
+        return jsonResponse(200, { plugins: [] });
       }
       throw new Error(`unexpected URL: ${url}`);
     });
     const pi = createPi();
     await (await loadExtension(await makeAgentDir()))(pi);
+    // Without a context, the Skills tools use the credential the last model refresh cached.
+    const listSkills = pi.tools.find((tool) => tool.name === "litellm_skill_list")!;
     const oldRefresh = refreshProvider(pi.providers[0]!, {
       allowNetwork: true,
       credential: { type: "api_key", key: "sk-old", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
@@ -788,598 +425,31 @@ describe("extension startup", () => {
     );
     release(models());
     await oldRefresh;
-    expect(mcpKeys).toEqual([]);
+    await expect(listSkills.execute?.("test-call", {}, TEST_SIGNAL)).rejects.toThrow("no credentials for litellm");
+
     await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential });
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
-    expect(mcpKeys).toEqual(["Bearer sk-new"]);
+    await listSkills.execute?.("test-call", {}, TEST_SIGNAL);
+    expect(skillKeys).toEqual(["Bearer sk-new"]);
   });
 
-  it.each([
-    [403, {}, "discovery paused until /login litellm"],
-    [200, { tools: [], error: "unexpected_error", message: "private-proxy-text" }, "unexpected proxy error"],
-    [200, { tools: [] }, "no MCP tools were registered"],
-    [200, "x".repeat(5 * 1024 * 1024 + 1), "exceeded its 5242880-byte limit"],
-    [
-      200,
-      {
-        tools: [
-          {
-            name: "search",
-            server_name: "server",
-            inputSchema: { type: "object", properties: { query: { type: "string", pattern: "private-proxy-text" } } },
-          },
-        ],
-      },
-      "safe args envelope",
-    ],
-  ])("routes MCP diagnostics through the active UI %#", async (status, body, expected) => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      if (String(input).endsWith("/mcp-rest/tools/list")) return jsonResponse(status, body);
-      return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-    });
+  it("ignores legacy cache files without deleting them", async () => {
+    process.env.LITELLM_OFFLINE = "1";
+    const agentDir = await makeAgentDir();
+    const cachePath = join(agentDir, "litellm-models.json");
+    const legacyCache = JSON.stringify({ models: [{ id: "legacy-model" }] });
+    await writeFile(cachePath, legacyCache, "utf8");
+    const extension = await loadExtension(agentDir);
     const pi = createPi();
-    await (await loadExtension(await makeAgentDir()))(pi);
-    const notify = vi.fn();
-    for (const handler of pi.handlers.get("session_start") ?? [])
-      await handler({ type: "session_start" }, { hasUI: true, ui: { notify } });
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    process.env.LITELLM_VERBOSE_DISCOVERY = "1";
+
+    await extension(pi);
     await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-    });
-    await vi.waitFor(() => expect(notify.mock.calls.flat().join("\n")).toContain(expected));
-    expect(notify.mock.calls.flat().join("\n")).toContain("Querying MCP tools/list endpoint");
-    expect(notify.mock.calls.flat().join("\n")).not.toContain("private-proxy-text");
-    expect(stderr.mock.calls.flat().join("\n")).not.toContain("MCP");
-  });
-
-  it("routes MCP tool-call safety diagnostics through the active UI", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/mcp-rest/tools/call")) return new Response("x".repeat(5 * 1024 * 1024 + 1));
-      if (url.endsWith("/mcp-rest/tools/list"))
-        return jsonResponse(200, {
-          tools: [{ name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-        });
-      return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-    });
-    const pi = createPi();
-    await (await loadExtension(await makeAgentDir()))(pi);
-    const notify = vi.fn();
-    for (const handler of pi.handlers.get("session_start") ?? [])
-      await handler({ type: "session_start" }, { hasUI: true, ui: { notify } });
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-    });
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
-    const tool = pi.tools.find((tool) => tool.name.startsWith("mcp_"));
-    await expect(tool?.execute?.("test-call", {}, new AbortController().signal)).rejects.toThrow(
-      "exceeds its 5242880-byte limit",
-    );
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining("MCP tool call response exceeded"), "warning");
-    expect(stderr).not.toHaveBeenCalled();
-  });
-
-  it("buffers MCP warnings before the TUI context is available", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
-      String(input).endsWith("/mcp-rest/tools/list")
-        ? jsonResponse(403, {})
-        : jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] }),
-    );
-    const agentDir = await makeAgentDir();
-    const pi = createPi();
-    await (await loadExtension(agentDir))(pi);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const isTTY = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
-    Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: true });
-    try {
-      await refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-      });
-      await vi.waitFor(async () =>
-        expect((await readdir(join(agentDir, "litellm-mcp-pauses"))).some((name) => name.startsWith("paused-"))).toBe(
-          true,
-        ),
-      );
-      expect(stderr).not.toHaveBeenCalled();
-      const notify = vi.fn();
-      for (const handler of pi.handlers.get("session_start") ?? [])
-        await handler({ type: "session_start" }, { hasUI: true, ui: { notify } });
-      expect(notify).toHaveBeenCalledWith(expect.stringContaining("discovery paused until /login litellm"), "warning");
-      expect(stderr).not.toHaveBeenCalled();
-    } finally {
-      if (isTTY) Object.defineProperty(process.stderr, "isTTY", isTTY);
-      else Reflect.deleteProperty(process.stderr, "isTTY");
-    }
-  });
-
-  it("retries a partial-failure catalog and registers tools from the clean refresh", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        const tools = [
-          { name: "search", server_name: "server", inputSchema: { type: "object", properties: {} } },
-          { name: "browse", server_name: "server", inputSchema: { type: "object", properties: {} } },
-        ];
-        return jsonResponse(
-          200,
-          listCalls === 1
-            ? { tools: tools.slice(0, 1), error: "partial_failure", message: "private proxy details" }
-            : { tools },
-        );
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    const refresh = () =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: {
-          type: "api_key",
-          key: "sk-test",
-          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-        },
-      });
-
-    await refresh();
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_search")));
-    await refresh();
-    await vi.waitFor(() => {
-      expect(listCalls).toBe(2);
-      expect(pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mcp_"))).toEqual([
-        named("mcp_server_search"),
-        named("mcp_server_browse"),
-      ]);
-    });
-    const diagnostics = stderr.mock.calls
-      .map(([message]) => String(message))
-      .filter((message) => message.includes("partial server failure"));
-    expect(diagnostics).toEqual(["LiteLLM MCP: proxy reported a partial server failure; 1 tool registered.\n"]);
-    expect(stderr.mock.calls.map(([message]) => String(message)).join("")).not.toContain("private proxy details");
-  });
-
-  it("does not settle the identity when a catalog yields no registrable tool", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        return jsonResponse(200, { tools: [] });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await extension(pi);
-
-    const refresh = () =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-        signal: new AbortController().signal,
-      });
-
-    await refresh();
-    await refresh();
-
-    // Not settled: discovery is retried, and the silence is explained rather than silent.
-    expect(listCalls).toBe(2);
-    expect(stderr.mock.calls.map(([message]) => String(message)).join("")).toContain(
-      "no MCP tools were registered from 0 raw entries",
-    );
-  });
-
-  it("coalesces concurrent MCP refreshes when registration becomes fatal", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const proxyText = "proxy-description-must-not-leak";
-    const refusal = `extension stale ${"x".repeat(500)}`;
-    let listCalls = 0;
-    let mcpStarted!: () => void;
-    let releaseMcp!: (response: Response) => void;
-    const started = new Promise<void>((resolve) => {
-      mcpStarted = resolve;
-    });
-    const pendingMcp = new Promise<Response>((resolve) => {
-      releaseMcp = resolve;
-    });
-    const catalogResponse = () =>
-      jsonResponse(200, {
-        tools: ["first", "second", "third"].map((name) => ({
-          name,
-          server_name: "server",
-          description: proxyText,
-          inputSchema: { type: "object", properties: {} },
-        })),
-      });
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        if (listCalls === 1) {
-          mcpStarted();
-          return pendingMcp;
-        }
-        return catalogResponse();
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await extension(pi);
-    const registeredNames: string[] = [];
-    pi.registerTool = (tool) => {
-      if (registeredNames.length === 1) throw new Error(refusal);
-      registeredNames.push(tool.name);
-      pi.tools.push(tool);
-    };
-
-    const refresh = () =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: {
-          type: "api_key",
-          key: "sk-test",
-          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-        },
-        signal: new AbortController().signal,
-      });
-
-    const fatalLines = () =>
-      stderr.mock.calls
-        .map(([message]) => String(message))
-        .filter((message) => message.includes("registration stopped"));
-
-    const firstRefresh = refresh();
-    await started;
-    const secondRefresh = refresh();
-    await Promise.all([firstRefresh, secondRefresh]);
-    releaseMcp(catalogResponse());
-    await vi.waitFor(() => expect(registeredNames).toEqual([named("mcp_server_first")]));
-    await vi.waitFor(() => expect(fatalLines()).toHaveLength(1));
-
-    // A later refresh must also observe the instance-fatal state rather than retry discovery.
-    await refresh();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(listCalls).toBe(1);
-    expect(pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mcp_"))).toEqual([
-      named("mcp_server_first"),
-    ]);
-    expect(fatalLines()).toHaveLength(1);
-    expect(fatalLines()[0]).toContain("registration stopped after 1 of 3 MCP tools");
-    expect(fatalLines()[0]).toContain("no further attempts will be made by this extension instance");
-    expect(fatalLines()[0]).toContain("…");
-    expect(Buffer.byteLength(fatalLines()[0] ?? "", "utf8")).toBeLessThan(400);
-    expect(fatalLines()[0]).not.toContain(proxyText);
-    expect(fatalLines()[0]).not.toContain(refusal);
-  });
-
-  it.each([
-    ["registered tools", [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }]],
-    ["an empty catalog", []],
-  ])("clears a prior instance's fatal diagnostic after a successful pass with %s", async (_label, tools) => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) return jsonResponse(200, { tools });
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const extension = await loadExtension(await makeAgentDir());
-    const fatalReporter = await import("../src/mcp-tools.js");
-    const diagnosticLines = () => stderr.mock.calls.map(([message]) => String(message));
-    const fatalLines = () => diagnosticLines().filter((message) => message.includes("registration stopped"));
-    const emptyCatalogLines = () =>
-      diagnosticLines().filter((message) => message.includes("no MCP tools were registered from 0 raw entries"));
-
-    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
-    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
-    expect(fatalLines()).toHaveLength(1);
-
-    const pi = createPi();
-    await extension(pi);
-    const refresh = () =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-        signal: new AbortController().signal,
-      });
-    await refresh();
-    if (tools.length > 0) {
-      await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
-    } else {
-      await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(1));
-      await refresh();
-      expect(emptyCatalogLines()).toHaveLength(1);
-    }
-
-    fatalReporter.reportMcpRegistrationFatal(0, 1, new Error("extension stale"));
-    expect(fatalLines()).toHaveLength(2);
-  });
-
-  it("registers an alias provider's MCP tools when Pi refreshes that alias", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const agentDir = await makeAgentDir();
-    await writeFile(
-      join(agentDir, "settings.json"),
-      JSON.stringify({ litellm: { providers: { team: { baseUrl: "https://team.example.com", apiKey: "team-key" } } } }),
-    );
-    const listed: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listed.push(url);
-        return jsonResponse(200, {
-          tools: [{ name: "good", inputSchema: { type: "object", properties: {} }, server_name: "server" }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const pi = createPi();
-    await (await loadExtension(agentDir))(pi);
-    const alias = pi.providers.find((provider) => provider.id === "team");
-
-    await refreshProvider(alias!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "team-key" },
-      signal: new AbortController().signal,
+      allowNetwork: false,
+      credential: { type: "api_key", key: "sk-test" },
+      store: createModelsStore(),
     });
 
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_team_server_good")));
-    expect(listed).toEqual(["https://team.example.com/mcp-rest/tools/list"]);
-  });
-
-  it("keeps an in-flight alias MCP registration when the default provider logs in", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const agentDir = await makeAgentDir();
-    await writeFile(
-      join(agentDir, "settings.json"),
-      JSON.stringify({ litellm: { providers: { team: { baseUrl: "https://team.example.com", apiKey: "team-key" } } } }),
-    );
-    let releaseList!: () => void;
-    const listReleased = new Promise<void>((resolve) => {
-      releaseList = resolve;
-    });
-    let listRequested = false;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url === "https://team.example.com/mcp-rest/tools/list") {
-        listRequested = true;
-        await listReleased;
-        return jsonResponse(200, {
-          tools: [{ name: "good", inputSchema: { type: "object", properties: {} }, server_name: "server" }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const pi = createPi();
-    await (await loadExtension(agentDir))(pi);
-    const alias = pi.providers.find((provider) => provider.id === "team");
-
-    await refreshProvider(alias!, {
-      allowNetwork: true,
-      credential: { type: "api_key", key: "team-key" },
-      signal: new AbortController().signal,
-    });
-    await vi.waitFor(() => expect(listRequested).toBe(true));
-    await loginOAuth(pi.providers[0]!, {
-      onPrompt: async (options) => (options.placeholder ? "https://proxy.example.com" : "sk-login"),
-      signal: new AbortController().signal,
-    });
-    releaseList();
-
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_team_server_good")));
-  });
-
-  it("skips re-registration for an unchanged identity after a fully successful pass", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    let listCalls = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listCalls += 1;
-        return jsonResponse(200, {
-          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    const refresh = () =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: {
-          type: "api_key",
-          key: "sk-test",
-          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-        },
-        signal: new AbortController().signal,
-      });
-
-    await refresh();
-    await refresh();
-
-    expect(listCalls).toBe(1);
-    expect(pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mcp_"))).toEqual([
-      named("mcp_server_good"),
-    ]);
-  });
-
-  it("re-registers when the credential identity changes", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const listedHosts: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listedHosts.push(new URL(url).host);
-        return jsonResponse(200, {
-          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    const refreshWith = (host: string) =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: {
-          type: "api_key",
-          key: "sk-test",
-          env: { LITELLM_BASE_URL: `https://${host}` },
-        },
-        signal: new AbortController().signal,
-      });
-
-    await refreshWith("first.example.com");
-    await refreshWith("second.example.com");
-
-    expect(listedHosts).toEqual(["first.example.com", "second.example.com"]);
-  });
-
-  it("reports an empty catalog again after a refresh that registered tools", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    let listCalls = 0;
-    const catalogs: unknown[][] = [
-      [],
-      [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-      [],
-    ];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        const tools = catalogs[Math.min(listCalls, catalogs.length - 1)] ?? [];
-        listCalls += 1;
-        return jsonResponse(200, { tools });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await extension(pi);
-
-    const refresh = (host: string) =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: `https://${host}` } },
-        signal: new AbortController().signal,
-      });
-    const emptyCatalogLines = () =>
-      stderr.mock.calls
-        .map(([message]) => String(message))
-        .filter((message) => message.includes("no MCP tools were registered"));
-
-    await refresh("a.example.com");
-    await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(1));
-    await refresh("b.example.com");
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_server_good")));
-    await refresh("c.example.com");
-    await vi.waitFor(() => expect(emptyCatalogLines()).toHaveLength(2));
-  });
-
-  it("does not block model refresh on MCP discovery", async () => {
-    let mcpStarted!: () => void;
-    let releaseMcp!: (response: Response) => void;
-    const started = new Promise<void>((resolve) => {
-      mcpStarted = resolve;
-    });
-    const pendingMcp = new Promise<Response>((resolve) => {
-      releaseMcp = resolve;
-    });
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        mcpStarted();
-        return pendingMcp;
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    let refreshed = false;
-    const refresh = refreshProvider(pi.providers[0]!, {
-      allowNetwork: true,
-      credential: {
-        type: "api_key",
-        key: "sk-test",
-        env: { LITELLM_BASE_URL: "https://proxy.example.com" },
-      },
-    }).then(() => {
-      refreshed = true;
-    });
-    await started;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(refreshed).toBe(true);
-    releaseMcp(
-      jsonResponse(200, {
-        tools: [
-          {
-            name: "search",
-            description: "Search",
-            inputSchema: { type: "object", properties: {} },
-            mcp_info: { server_name: "brave" },
-          },
-        ],
-      }),
-    );
-    await refresh;
-    await vi.waitFor(() => expect(pi.tools.map((tool) => tool.name)).toContainEqual(named("mcp_brave_search")));
+    expect(await readFile(cachePath, "utf8")).toBe(legacyCache);
+    expect(pi.providers[0]?.getModels()).toEqual([]);
   });
 
   it("retains Pi-managed models when discovery fails", async () => {
@@ -1611,7 +681,6 @@ describe("extension startup", () => {
     expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "secret" }));
     expect(seenRequests).toEqual([]);
     expect(credential).toEqual({
-      litellmMcpSession: expect.stringMatching(/^[a-f0-9]{32}$/),
       type: "api_key",
       key: "sk-login",
       env: { LITELLM_BASE_URL: "http://127.0.0.1:4000" },
@@ -2112,7 +1181,6 @@ describe("extension startup", () => {
   describe("PKCE refresh", () => {
     const pkceCredential = () => ({
       type: "oauth" as const,
-      litellmMcpSession: "existing-mcp-session",
       access: "access-old",
       refresh: "refresh-old",
       expires: Date.now() + 60_000,
@@ -3723,7 +2791,6 @@ describe("direct OIDC login", () => {
       clientId,
       tokenEndpoint,
       subject: "user-123",
-      litellmMcpSession: expect.any(String),
     });
     await expect(pi.providers[0]!.auth.oauth!.toAuth(credential!)).resolves.toMatchObject({ apiKey: issued[0] });
   }, 15_000);
@@ -3893,7 +2960,6 @@ describe("direct OIDC login", () => {
     const freshIdToken = (sub = "user-123") => idToken({ iss: issuer, aud: clientId, sub, exp });
     const oidcCredential = (overrides: Record<string, unknown> = {}) => ({
       type: "oauth" as const,
-      litellmMcpSession: "existing-mcp-session",
       access: idToken({ iss: issuer, aud: clientId, sub: "user-123", exp: now / 1000 + 60 }),
       refresh: "refresh-old",
       expires: now + 60_000,
@@ -4290,41 +3356,6 @@ describe("multi-provider hardening", () => {
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("x-null"));
   });
 
-  it("re-registers when the API key rotates on the same host", async () => {
-    process.env.LITELLM_MODELS_DEV = "0";
-    const listedKeys: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith("/model/info")) {
-        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
-      }
-      if (url.endsWith("/mcp-rest/tools/list")) {
-        listedKeys.push(String(new Headers(init?.headers).get("authorization")));
-        return jsonResponse(200, {
-          tools: [{ name: "good", server_name: "server", inputSchema: { type: "object", properties: {} } }],
-        });
-      }
-      throw new Error(`unexpected URL: ${url}`);
-    });
-    const extension = await loadExtension(await makeAgentDir());
-    const pi = createPi();
-    await extension(pi);
-
-    const refreshWithKey = (key: string) =>
-      refreshProvider(pi.providers[0]!, {
-        allowNetwork: true,
-        credential: { type: "api_key", key, env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
-        signal: new AbortController().signal,
-      });
-
-    await refreshWithKey("sk-first");
-    await refreshWithKey("sk-first");
-    await refreshWithKey("sk-second");
-
-    // Fingerprinting the credential must not cost the change detection it exists to provide:
-    // the unchanged key is skipped, the rotated one triggers a fresh catalog pass.
-    expect(listedKeys).toEqual(["Bearer sk-first", "Bearer sk-second"]);
-  });
   it("streams OAuth Messages requests to the credential host over a conflicting environment host", async () => {
     process.env.LITELLM_BASE_URL = "https://environment.example.com";
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
