@@ -19,7 +19,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
+import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import {
   createMcpToolDefinitions,
@@ -1717,10 +1717,10 @@ export function prepareLiteLLMRequestPayload(
   // GPT-5.5 and later reject reasoning alongside function tools on Chat Completions.
   // Drop it until the gateway serves /v1/responses for the route. Discovery decides
   // from deployment evidence; only a model with no backend evidence uses its route name.
+  const routeOnlyId = model?.litellmBackendFamily === undefined ? modelId : undefined;
   if (
     openAIApi === "openai-completions" &&
-    (modelPolicy?.dropToolReasoning === true ||
-      (model?.litellmBackendFamily === undefined && modelId !== undefined && isGpt55OrNewerModel(modelId))) &&
+    (modelPolicy?.dropToolReasoning === true || (routeOnlyId !== undefined && isGpt55OrNewerModel(routeOnlyId))) &&
     Array.isArray(payload.tools) &&
     payload.tools.length > 0
   ) {
@@ -1729,10 +1729,14 @@ export function prepareLiteLLMRequestPayload(
       next ??= { ...payload };
       delete next[key];
     }
-    // Omitting the field leaves GPT-6 on its default effort, which is still rejected
-    // alongside tools; send the model's own off value when it declares one.
-    const off = model?.thinkingLevelMap?.off;
-    if (typeof off === "string" && (next ?? payload).reasoning_effort !== off) {
+    // Send the model's own off effort when it declares one. GPT-6 also rejects an
+    // omitted effort (it falls back to its default), and its error names `none` as
+    // the fix, so it gets `none` even without carrier evidence for an off level.
+    const declaredOff = model?.thinkingLevelMap?.off;
+    const explicitOff =
+      modelPolicy?.explicitToolReasoningOff === true || (routeOnlyId !== undefined && isGpt6OrNewerModel(routeOnlyId));
+    const off = typeof declaredOff === "string" ? declaredOff : explicitOff ? "none" : undefined;
+    if (off !== undefined && (next ?? payload).reasoning_effort !== off) {
       next ??= { ...payload };
       next.reasoning_effort = off;
     }

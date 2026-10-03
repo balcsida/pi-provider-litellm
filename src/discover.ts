@@ -102,13 +102,22 @@ export function isMoonshotModel(modelId: string): boolean {
   return MOONSHOT_MODEL_PATTERN.test(modelId);
 }
 
+function gptGeneration(modelId: string): [major: number, minor: number] | undefined {
+  const match = GPT_GENERATION_PATTERN.exec(modelId);
+  return match ? [Number(match[1]), Number(match[2] ?? 0)] : undefined;
+}
+
 // GPT-5.5 and later reject `reasoning_effort` alongside function tools on
 // /v1/chat/completions ("use /v1/responses").
 export function isGpt55OrNewerModel(modelId: string): boolean {
-  const match = GPT_GENERATION_PATTERN.exec(modelId);
-  if (!match) return false;
-  const major = Number(match[1]);
-  return major > 5 || (major === 5 && Number(match[2] ?? 0) >= 5);
+  const generation = gptGeneration(modelId);
+  return generation !== undefined && (generation[0] > 5 || (generation[0] === 5 && generation[1] >= 5));
+}
+
+// GPT-6 also rejects an omitted effort there: it falls back to its default effort.
+export function isGpt6OrNewerModel(modelId: string): boolean {
+  const generation = gptGeneration(modelId);
+  return generation !== undefined && generation[0] >= 6;
 }
 
 function shouldSuppressReasoningContent(modelId: string): boolean {
@@ -750,19 +759,18 @@ function mapFromModelInfoGroup(
   );
   // One GPT-5.5+ deployment is enough: a tool request routed to it fails with
   // reasoning attached, while dropping reasoning elsewhere only loses effort.
-  const dropToolReasoning =
-    api === "openai-completions" &&
-    entries.some((entry) => {
-      const identity = resolveBackendIdentity({ ...entry, model_name: undefined });
-      return identity !== undefined && isGpt55OrNewerModel(identity.modelId);
-    });
-  const modelPolicy: LiteLLMModelPolicy | undefined = dropToolReasoning
+  const chatBackendIds =
+    api === "openai-completions"
+      ? entries.flatMap((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.modelId ?? [])
+      : [];
+  const modelPolicy: LiteLLMModelPolicy | undefined = chatBackendIds.some(isGpt55OrNewerModel)
     ? {
         normalizeStrictToolMessages: false,
         normalizeThinkTags: false,
         suppressReasoningVisibility: false,
         ...familyPolicy,
         dropToolReasoning: true,
+        ...(chatBackendIds.some(isGpt6OrNewerModel) ? { explicitToolReasoningOff: true } : {}),
       }
     : familyPolicy;
   return {
@@ -1031,6 +1039,9 @@ function applyWildcardEvidence(
             ? { normalizeGeminiReasoningEffort: true as const }
             : {}),
           ...(policies.some((policy) => policy.dropToolReasoning) ? { dropToolReasoning: true as const } : {}),
+          ...(policies.some((policy) => policy.explicitToolReasoningOff)
+            ? { explicitToolReasoningOff: true as const }
+            : {}),
         }
       : undefined;
   const {
@@ -1087,6 +1098,9 @@ function mapFromWildcardExpansion(
           : {}),
         ...(api === "openai-completions" && modelPolicies.some((policy) => policy?.dropToolReasoning === true)
           ? { dropToolReasoning: true as const }
+          : {}),
+        ...(api === "openai-completions" && modelPolicies.some((policy) => policy?.explicitToolReasoningOff === true)
+          ? { explicitToolReasoningOff: true as const }
           : {}),
       }
     : !hasFamilyEvidence && isMoonshotModel(id)
@@ -1370,6 +1384,7 @@ export function restoreCachedModelPolicy(model: Model<Api>): Model<Api> {
         normalizeThinkTags: false,
         suppressReasoningVisibility: false,
         dropToolReasoning: true,
+        ...(isGpt6OrNewerModel(restored.id) ? { explicitToolReasoningOff: true } : {}),
       },
     } as LiteLLMModel;
   }

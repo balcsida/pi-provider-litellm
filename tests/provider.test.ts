@@ -224,7 +224,10 @@ describe("createLiteLLMProvider", () => {
 
     await value.refreshModels?.(context([stale as Model<Api>], false));
 
-    expect((value.getModels()[0] as LiteLLMModel | undefined)?.litellmPolicy?.dropToolReasoning).toBe(true);
+    expect((value.getModels()[0] as LiteLLMModel | undefined)?.litellmPolicy).toMatchObject({
+      dropToolReasoning: true,
+      explicitToolReasoningOff: true,
+    });
   });
 
   it("still requires a network refresh for legacy entries startup discovery did not replace", async () => {

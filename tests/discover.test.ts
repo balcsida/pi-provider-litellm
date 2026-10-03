@@ -3149,6 +3149,11 @@ describe("discoverModels via /model/info", () => {
       expect(model, id).toMatchObject({ api: "openai-completions" });
       expect(model?.litellmPolicy?.dropToolReasoning, id).toBe(true);
     }
+    // Only GPT-6 needs an explicit off effort; GPT-5.6 accepts an omitted one.
+    expect(result.models.find((model) => model.id === "team-sol")?.litellmPolicy?.explicitToolReasoningOff).toBe(true);
+    expect(
+      result.models.find((model) => model.id === "team-terra")?.litellmPolicy?.explicitToolReasoningOff,
+    ).toBeUndefined();
   });
 
   it("keeps reasoning with tools for older GPT backends and GPT-6 Responses routes", async () => {
@@ -3202,6 +3207,7 @@ describe("discoverModels via /model/info", () => {
     const sol = result.models.find((model) => model.id === "azure_ai/gpt-6-sol");
     expect(sol).toMatchObject({ api: "openai-completions" });
     expect(sol?.litellmPolicy?.dropToolReasoning).toBe(true);
+    expect(sol?.litellmPolicy?.explicitToolReasoningOff).toBe(true);
     expect(
       result.models.find((model) => model.id === "azure_ai/gpt-5.1")?.litellmPolicy?.dropToolReasoning,
     ).toBeUndefined();

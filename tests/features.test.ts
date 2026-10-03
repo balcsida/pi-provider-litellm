@@ -1564,7 +1564,7 @@ describe("feature parity", () => {
     }
   });
 
-  it("drops reasoning fields for tool requests to discovered GPT-5.5+ Chat backends", async () => {
+  it("turns reasoning off for tool requests to discovered GPT-5.5+ Chat backends", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
@@ -1597,11 +1597,17 @@ describe("feature parity", () => {
 
     const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
     const tools = [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }];
-    for (const id of ["team-sol", "team-terra"]) {
+    // Neither deployment declares an off effort. GPT-5.6 accepts an omitted effort;
+    // GPT-6 falls back to its default effort, so it needs an explicit "none".
+    for (const [id, expected] of [
+      ["team-sol", { messages: [], tools, reasoning_effort: "none" }],
+      ["team-terra", { messages: [], tools }],
+    ] as const) {
       const model = pi.providers[0]?.getModels().find((candidate) => candidate.id === id);
       expect(model, id).toMatchObject({ api: "openai-completions" });
+      expect(typeof model?.thinkingLevelMap?.off, id).not.toBe("string");
       const updated = beforeRequest?.({ payload: { messages: [], tools, reasoning_effort: "high" } }, { model });
-      expect(updated, id).toEqual({ messages: [], tools });
+      expect(updated, id).toEqual(expected);
     }
   });
 
@@ -1688,7 +1694,10 @@ describe("feature parity", () => {
         { payload: { messages: [], tools, reasoning_effort: "high" } },
         { model: { provider: "litellm", id } },
       );
-    for (const id of ["gpt-6-astra", "gpt-5.6-luna-eu-west", "llm-gateway/gpt-6-sol", "gpt-5.10"]) {
+    for (const id of ["gpt-6-luna", "llm-gateway/gpt-6-sol"]) {
+      expect(request(id), id).toEqual({ messages: [], tools, reasoning_effort: "none" });
+    }
+    for (const id of ["gpt-5.6-luna-eu-west", "gpt-5.10"]) {
       expect(request(id), id).toEqual({ messages: [], tools });
     }
     for (const id of ["gpt-5", "gpt-5.1-codex", "gpt-4.1", "gpt-4o", "gpt-oss-120b", "my-gpt-6-sol"]) {
