@@ -138,6 +138,31 @@ describe("modelProtocol", () => {
     });
   });
 
+  it("keeps OpenAI-compatible adapter routes of non-OpenAI models on Chat unless endpoints say otherwise", () => {
+    const row = (model: string, extra: Record<string, unknown> = {}) => ({
+      litellm_params: { model },
+      model_info: {
+        mode: "chat",
+        supported_endpoints: null,
+        litellm_provider: "openai",
+        supports_reasoning: true,
+        supports_function_calling: true,
+        supported_openai_params: ["tools", "tool_choice", "reasoning_effort"],
+        ...extra,
+      },
+    });
+    for (const model of ["openai/qwen3.8-27B-a", "openai/LongCat-2.0", "openai_like/qwen3", "custom_openai/llama-4"]) {
+      expect(modelProtocol("route", row(model))).toMatchObject({ api: "openai-completions" });
+    }
+    expect(modelProtocol("route", row("openai/gpt-5.5"))).toMatchObject({ api: "openai-responses" });
+    expect(
+      modelProtocol("route", row("openai/qwen3.8-27B-a", { supported_endpoints: ["/v1/responses"] })),
+    ).toMatchObject({ api: "openai-responses" });
+    expect(modelProtocol("route", row("openai/qwen3.8-27B-a", { mode: "responses" }))).toMatchObject({
+      api: "openai-responses",
+    });
+  });
+
   it("pairs each upstream-selected mode with protocol-specific compatibility", () => {
     expect(modelProtocol("openai/gpt-4o")).toEqual({
       api: "openai-responses",
@@ -1186,7 +1211,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 4,
+      litellmDiscoveryVersion: 5,
     });
   });
 
@@ -4410,7 +4435,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
   it("restores Chat reasoning carriers and cache markers after wildcard protocol selection", async () => {
     const row = {
       model_name: "team/*",
-      litellm_params: { model: "openai/*" },
+      litellm_params: { model: "openai/gpt-*" },
       model_info: {
         supports_reasoning: true,
         supported_openai_params: ["reasoning_effort"],
@@ -4606,8 +4631,8 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
     expect(result.models[0]).toMatchObject({
       id: "team/production",
       api: "openai-completions",
-      litellmBackendFamily: "openai",
     });
+    expect(result.models[0]).not.toHaveProperty("litellmBackendFamily");
   });
 
   it("does not let a rejected embedding wildcard authorize a child", async () => {
@@ -5120,7 +5145,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 4,
+          litellmDiscoveryVersion: 5,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
