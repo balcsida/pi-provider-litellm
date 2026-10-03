@@ -7,9 +7,10 @@
 - Build output is `dist/`; do not edit generated output by hand or publish it.
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
-- Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.83.0`. Use newer Pi APIs only in ways older Pi
-  ignores (extra `ToolDefinition` fields) or feature-detects (`pi.registerMcpServer`, added in Pi 0.99), and do
-  not import runtime symbols that older `pi-ai`/`pi-coding-agent` lack, such as `isModelType`.
+- Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.99.2`. Pi installs packages without resolving
+  peers, so the `VERSION` check at the top of the extension factory enforces that floor (read through a namespace
+  import, so a Pi without `VERSION` still reaches it); raise both together. Use newer Pi APIs only in ways Pi 0.99.2
+  ignores or feature-detects, and do not import runtime symbols its `pi-ai` or `pi-coding-agent` lacks.
 - Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
   before reading chat-only fields.
 
@@ -86,8 +87,7 @@
   would be frozen at registration. Custom headers are already resolved, so `piLiteral()` escapes `$` and a leading `!`
   before Pi's own `${VAR}`/`!cmd` resolution sees them.
 - Because the token is read per request, a connection must never outlive its proxy root: `/login` drops the server when
-  it starts, before the new credential is stored, and every replacement unregisters the old server first. Pi before
-  0.99.2 has no `auth.provider`; gate on `VERSION`, read through a namespace import.
+  it starts, before the new credential is stored, and every replacement unregisters the old server first.
 - Pass `exposure` and `toolExposure` through unparsed. Pi validates them, and the error `registerMcpServer` throws is
   the report; do not add defaults or a second validator.
 - The remembered registration identity is an HMAC of the config, because custom headers can carry credentials. Register

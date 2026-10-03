@@ -187,6 +187,7 @@ describe("runSsoLoginSmoke", () => {
     const requests: Array<{ url: string; body?: unknown; auth?: string }> = [];
 
     vi.doMock("@earendil-works/pi-coding-agent", () => ({
+      VERSION: "1.0.0",
       defineTool: (tool: unknown) => tool,
       getAgentDir: () => agentDir,
       readStoredCredential: () => undefined,

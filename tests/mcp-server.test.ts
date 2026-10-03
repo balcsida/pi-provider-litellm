@@ -270,31 +270,4 @@ describe("LiteLLM MCP server registration", () => {
 
     expect(pi.mcpServers.has("litellm")).toBe(false);
   });
-
-  it("says once that Pi 0.99.1 gets no MCP tools, since it lacks auth.provider", async () => {
-    mockProxy();
-    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
-    process.env.LITELLM_API_KEY = "sk-default";
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    const pi = await load(await makeAgentDir(), createPi(), "0.99.1");
-    await startTurn(pi);
-
-    expect(pi.mcpServers.size).toBe(0);
-    expect(stderrText(stderr).match(/MCP tools need Pi 0\.99\.2 or newer/g)).toHaveLength(1);
-  });
-
-  it("says once that Pi before 0.99 gets no MCP tools", async () => {
-    mockProxy();
-    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
-    process.env.LITELLM_API_KEY = "sk-default";
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const pi = createPi() as Omit<TestPi, "registerMcpServer"> & Partial<Pick<TestPi, "registerMcpServer">>;
-    delete pi.registerMcpServer;
-
-    await load(await makeAgentDir(), pi as TestPi);
-    await startTurn(pi as TestPi);
-
-    expect(stderrText(stderr).match(/MCP tools need Pi 0\.99\.2 or newer/g)).toHaveLength(1);
-  });
 });
