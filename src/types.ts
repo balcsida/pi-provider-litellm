@@ -28,6 +28,14 @@ export interface LiteLLMModelPolicy {
   // Gemini-backed deployments require lowercase effort values. Discovery carries
   // this evidence so the request hook does not infer a backend from the route name.
   normalizeGeminiReasoningEffort?: boolean;
+  // GPT-5.5 and later reject `reasoning_effort` alongside function tools on
+  // /v1/chat/completions. Discovery sets this for Chat routes from deployment
+  // evidence so tool requests drop reasoning instead of failing over.
+  dropToolReasoning?: boolean;
+  // GPT-6 falls back to its default effort when `reasoning_effort` is omitted, and
+  // that is rejected alongside tools too, so these tool requests send `none` unless
+  // the model declares its own off effort.
+  explicitToolReasoningOff?: boolean;
 }
 
 export type DiscoveredModelFor<TApi extends LiteLLMApi> = Omit<Model<TApi>, "provider" | "baseUrl"> & {
