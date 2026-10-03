@@ -133,7 +133,34 @@ describe("resolveBackendIdentity", () => {
     for (const id of ["azure/kimi-k3", "deepseek-v4", "glm-5"]) {
       expect(isOpenAIBackend(id)).toBe(false);
     }
-    expect(LITELLM_DISCOVERY_VERSION).toBe(4);
+    expect(LITELLM_DISCOVERY_VERSION).toBe(5);
+  });
+
+  it("takes the family from the model id, never from an adapter prefix", () => {
+    const family = (model: string) =>
+      resolveBackendIdentity({ model_name: "route", litellm_params: { model } })?.family;
+    for (const model of [
+      "openai/qwen3.8-27B-a",
+      "openai/LongCat-2.0",
+      "openai_like/qwen3",
+      "custom_openai/llama-4",
+      "openai/production",
+    ]) {
+      expect(family(model)).toBeUndefined();
+    }
+    for (const model of [
+      "openai/gpt-5.5",
+      "openai/o3",
+      "openai/gpt-oss-120b",
+      "openai/ft:gpt-4o-mini-2024-07-18:org::abc123",
+      "openai/ft:o4-mini-2025-04-16:org::abc123",
+      "chatgpt/gpt-5.6-sol",
+      "azure/gpt-5",
+    ]) {
+      expect(family(model)).toBe("openai");
+    }
+    expect(family("openai/custom:o1-clone")).toBeUndefined();
+    expect(family("openai/kimi-k2.5")).toBe("kimi");
   });
 
   it("classifies codex-mini-latest as an OpenAI backend", () => {

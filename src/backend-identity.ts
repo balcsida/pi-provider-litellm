@@ -1,4 +1,4 @@
-export const LITELLM_DISCOVERY_VERSION = 4 as const;
+export const LITELLM_DISCOVERY_VERSION = 5 as const;
 
 export type BackendFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 
@@ -28,15 +28,17 @@ const PROVIDER_FAMILIES: Readonly<Record<string, BackendFamily>> = {
 };
 // Prefixes whose keyword match is trustworthy across the whole "prefix/modelId" string because
 // the prefix itself names a vendor, not just some unrelated string that happens to contain one.
-const KNOWN_VENDOR_PREFIXES = new Set([...Object.keys(PROVIDER_FAMILIES), "openai"]);
+// `openai` is absent for the same reason as in PROVIDER_FAMILIES: it is an adapter, not a model.
+const KNOWN_VENDOR_PREFIXES = new Set(Object.keys(PROVIDER_FAMILIES));
 // First segments that are known to be model path, never a provider: Fireworks' account-scoped
 // ids ("accounts/fireworks/models/x"). An allowlist fails closed: any other differing prefix,
 // recognized provider or not, stays a conflict.
 const MODEL_PATH_SEGMENTS = new Set(["accounts"]);
 // `o\d` (OpenAI's o1/o3/o4-mini reasoning models) is only trustworthy at the start of the id or
 // right after a provider path segment — an interior "-o1-" is as likely to be an unrelated
-// product's own version marker (e.g. "custom-o1-clone").
-const OPENAI_FAMILY_PATTERN = /(?:^|[./_-])(?:openai|gpt|codex)(?:$|[./_:-])|(?:^|\/)o\d(?:$|[./_:-])/i;
+// product's own version marker (e.g. "custom-o1-clone"). An OpenAI fine-tune id starts with
+// "ft:" before its base model ("ft:gpt-4o-mini:org::id").
+const OPENAI_FAMILY_PATTERN = /(?:^(?:ft:)?|[./_-])(?:openai|gpt|codex)(?:$|[./_:-])|(?:^(?:ft:)?|\/)o\d(?:$|[./_:-])/i;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,10 +85,11 @@ export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity
   const provider = prefixProvider ?? customProvider;
   const modelId = slash > 0 ? raw.slice(slash + 1) : raw;
   // Scan the full "prefix/modelId" string only when the prefix is itself a whole known vendor
-  // name (e.g. "openai/production"); otherwise scan modelId alone, so an unrelated custom
-  // prefix that merely contains a vendor substring (e.g. "deepseek-proxy/gpt-4-turbo") can't
-  // contaminate the keyword match with its own name.
-  const scanTarget = !provider || KNOWN_VENDOR_PREFIXES.has(provider) ? raw : modelId;
+  // name (e.g. "moonshot/production"); otherwise scan modelId alone, so an adapter prefix
+  // ("openai/", "openai_like/", "custom_openai/") or an unrelated custom prefix that merely
+  // contains a vendor substring (e.g. "deepseek-proxy/gpt-4-turbo") can't contaminate the
+  // keyword match with its own name: "openai/qwen3" has no family, "openai/gpt-5.5" does.
+  const scanTarget = provider && KNOWN_VENDOR_PREFIXES.has(provider) ? raw : modelId;
   const family = semanticFamily(scanTarget) ?? (provider ? PROVIDER_FAMILIES[provider] : undefined);
   return {
     ...(provider ? { provider } : {}),
