@@ -1564,6 +1564,138 @@ describe("feature parity", () => {
     }
   });
 
+  it("drops reasoning fields for tool requests to discovered GPT-5.5+ Chat backends", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "team-sol",
+              litellm_params: { model: "azure_ai/gpt-6-sol" },
+              model_info: { mode: "chat", base_model: "azure/gpt-6-sol" },
+            },
+            {
+              model_name: "team-terra",
+              litellm_params: { model: "azure_ai/gpt-5.6-terra" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const tools = [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }];
+    for (const id of ["team-sol", "team-terra"]) {
+      const model = pi.providers[0]?.getModels().find((candidate) => candidate.id === id);
+      expect(model, id).toMatchObject({ api: "openai-completions" });
+      const updated = beforeRequest?.({ payload: { messages: [], tools, reasoning_effort: "high" } }, { model });
+      expect(updated, id).toEqual({ messages: [], tools });
+    }
+  });
+
+  it("keeps reasoning fields when deployment evidence names an older backend behind a GPT-6 route name", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "gpt-6-sol",
+              litellm_params: { model: "azure_ai/gpt-5.1" },
+              model_info: { mode: "chat" },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    await refreshProvider(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const model = pi.providers[0]?.getModels().find((candidate) => candidate.id === "gpt-6-sol");
+    expect(model).toMatchObject({ api: "openai-completions", litellmBackendFamily: "openai" });
+    const tools = [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }];
+    expect(beforeRequest?.({ payload: { messages: [], tools, reasoning_effort: "high" } }, { model })).toBeUndefined();
+  });
+
+  it("turns reasoning off explicitly for tool requests when the model declares an off effort", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    // GPT-6 applies its default effort when reasoning_effort is omitted, which Azure
+    // still rejects alongside tools; only an explicit "none" is accepted.
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const tools = [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }];
+    const model = {
+      provider: "litellm",
+      id: "team-luna",
+      api: "openai-completions",
+      litellmBackendFamily: "openai",
+      thinkingLevelMap: { off: "none", minimal: null },
+      litellmPolicy: {
+        normalizeStrictToolMessages: false,
+        normalizeThinkTags: false,
+        suppressReasoningVisibility: false,
+        dropToolReasoning: true,
+      },
+    };
+    const updated = beforeRequest?.({ payload: { messages: [], tools, reasoning_effort: "high" } }, { model });
+    expect(updated).toEqual({ messages: [], tools, reasoning_effort: "none" });
+  });
+
+  it("drops reasoning fields for evidence-free GPT-5.5+ route names only", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const beforeRequest = pi.handlers.get("before_provider_request")?.[0];
+    const tools = [{ type: "function", function: { name: "noop", parameters: { type: "object" } } }];
+    const request = (id: string) =>
+      beforeRequest?.(
+        { payload: { messages: [], tools, reasoning_effort: "high" } },
+        { model: { provider: "litellm", id } },
+      );
+    for (const id of ["gpt-6-astra", "gpt-5.6-luna-eu-west", "llm-gateway/gpt-6-sol", "gpt-5.10"]) {
+      expect(request(id), id).toEqual({ messages: [], tools });
+    }
+    for (const id of ["gpt-5", "gpt-5.1-codex", "gpt-4.1", "gpt-4o", "gpt-oss-120b", "my-gpt-6-sol"]) {
+      expect(request(id), id).toBeUndefined();
+    }
+  });
+
   it("normalizes capitalized reasoning effort values for Gemini models only", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

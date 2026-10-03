@@ -19,7 +19,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt55Model, normalizeBaseUrl } from "./discover.js";
+import { discoverModels, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import {
   createMcpToolDefinitions,
@@ -1714,12 +1714,13 @@ export function prepareLiteLLMRequestPayload(
     for (const [key, value] of Object.entries(REASONING_VISIBILITY_DEFAULTS)) update(key, value);
   }
 
-  // LiteLLM still routes gpt-5.5 tool+reasoning requests through chat completions.
-  // Drop reasoning until the gateway honors /v1/responses for this route.
+  // GPT-5.5 and later reject reasoning alongside function tools on Chat Completions.
+  // Drop it until the gateway serves /v1/responses for the route. Discovery decides
+  // from deployment evidence; only a model with no backend evidence uses its route name.
   if (
     openAIApi === "openai-completions" &&
-    modelId &&
-    isGpt55Model(modelId) &&
+    (modelPolicy?.dropToolReasoning === true ||
+      (model?.litellmBackendFamily === undefined && modelId !== undefined && isGpt55OrNewerModel(modelId))) &&
     Array.isArray(payload.tools) &&
     payload.tools.length > 0
   ) {
@@ -1727,6 +1728,13 @@ export function prepareLiteLLMRequestPayload(
       if (payload[key] === undefined) continue;
       next ??= { ...payload };
       delete next[key];
+    }
+    // Omitting the field leaves GPT-6 on its default effort, which is still rejected
+    // alongside tools; send the model's own off value when it declares one.
+    const off = model?.thinkingLevelMap?.off;
+    if (typeof off === "string" && (next ?? payload).reasoning_effort !== off) {
+      next ??= { ...payload };
+      next.reasoning_effort = off;
     }
     const include = (next ?? payload).include;
     if (Array.isArray(include) && include.includes("reasoning.encrypted_content")) {

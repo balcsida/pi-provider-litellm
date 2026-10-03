@@ -56,6 +56,7 @@
   but keeps the `LITELLM_OFFLINE=1` and zero-timeout gates, and models.dev stays off under `PI_OFFLINE`; do not widen it
   past the configured proxies.
 - Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
+- Bump `LITELLM_DISCOVERY_VERSION` (and its pin in `tests/backend-identity.test.ts`) whenever discovery adds or changes persisted model metadata such as a `litellmPolicy` field. Pi keeps a same-version stored entry over what startup discovery just proved, so older caches would otherwise mask the change.
 - Pi stores discovered models in `models-store.json`; models.dev enrichment is opt-in with `LITELLM_MODELS_DEV=1` and
   uses `litellm-models-dev.json` with a 28-day cache window under the Pi agent dir. When it is off, discovery must not
   read that cache either.
@@ -110,6 +111,7 @@
 - Catalog level maps are tristate, not complete lists: an omitted standard level keeps Pi's default.
 - Null/absent flags have no opinion; explicit denials win and extended effort levels need explicit support. A router flag is the more specific evidence, so an explicit `true` grants a level over a catalog map that denies it.
 - Close thinking levels against the protocol and accepted carrier actually used after wildcard expansion. Responses compatibility contains only Responses fields.
+- GPT-5.5 and later reject `reasoning_effort` with function tools on Chat Completions. Discovery sets `litellmPolicy.dropToolReasoning` for Chat routes when any deployment's backend id (never the route name) is GPT-5.5+, and wildcard combinators take any parent's flag: dropping reasoning only degrades a request, keeping it fails one. The request hook uses the route name only for a model without `litellmBackendFamily` evidence. It sends the model's declared `thinkingLevelMap.off` effort rather than omitting the field, because an omitted effort leaves GPT-6 on its default and Azure still rejects it.
 
 ## Compatibility Rules
 

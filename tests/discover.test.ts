@@ -1186,7 +1186,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 3,
+      litellmDiscoveryVersion: 4,
     });
   });
 
@@ -3123,6 +3123,90 @@ describe("discoverModels via /model/info", () => {
     expect(result.models[0]?.litellmPolicy?.normalizeGeminiReasoningEffort).toBe(true);
   });
 
+  it("marks Chat routes over GPT-5.5+ deployments to drop reasoning with tools", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "team-sol",
+              litellm_params: { model: "azure_ai/gpt-6-sol" },
+              model_info: { id: "a", mode: "chat", base_model: "azure/gpt-6-sol" },
+            },
+            {
+              model_name: "team-terra",
+              litellm_params: { model: "azure_ai/gpt-5.6-terra" },
+              model_info: { id: "b", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    for (const id of ["team-sol", "team-terra"]) {
+      const model = result.models.find((candidate) => candidate.id === id);
+      expect(model, id).toMatchObject({ api: "openai-completions" });
+      expect(model?.litellmPolicy?.dropToolReasoning, id).toBe(true);
+    }
+  });
+
+  it("keeps reasoning with tools for older GPT backends and GPT-6 Responses routes", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "gpt-6-sol",
+              litellm_params: { model: "azure_ai/gpt-5.1" },
+              model_info: { id: "a", mode: "chat" },
+            },
+            {
+              model_name: "responses-sol",
+              litellm_params: { model: "azure_ai/gpt-6-sol" },
+              model_info: { id: "b", mode: "responses" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models.find((model) => model.id === "responses-sol")).toMatchObject({ api: "openai-responses" });
+    for (const id of ["gpt-6-sol", "responses-sol"]) {
+      expect(result.models.find((model) => model.id === id)?.litellmPolicy?.dropToolReasoning, id).toBeUndefined();
+    }
+  });
+
+  it("carries the tool-reasoning drop to wildcard children over GPT-5.5+ deployments", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof URL ? input.toString() : String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [{ model_name: "azure_ai/*", litellm_params: { model: "azure_ai/*" }, model_info: { mode: "chat" } }],
+        });
+      }
+      if (url.endsWith("/v1/models")) {
+        return jsonResponse(200, {
+          data: [
+            { id: "azure_ai/gpt-6-sol", object: "model", owned_by: "openai" },
+            { id: "azure_ai/gpt-5.1", object: "model", owned_by: "openai" },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    const sol = result.models.find((model) => model.id === "azure_ai/gpt-6-sol");
+    expect(sol).toMatchObject({ api: "openai-completions" });
+    expect(sol?.litellmPolicy?.dropToolReasoning).toBe(true);
+    expect(
+      result.models.find((model) => model.id === "azure_ai/gpt-5.1")?.litellmPolicy?.dropToolReasoning,
+    ).toBeUndefined();
+  });
+
   it("withholds Gemini normalization when deployment family evidence is mixed", async () => {
     mockEndpoints({
       "/model/info": () =>
@@ -5030,7 +5114,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 3,
+          litellmDiscoveryVersion: 4,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,

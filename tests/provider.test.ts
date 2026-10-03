@@ -11,6 +11,7 @@ import {
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { LITELLM_DISCOVERY_VERSION } from "../src/backend-identity.js";
 import { discoverModels } from "../src/discover.js";
 import { createLiteLLMProvider, toNativeModels } from "../src/provider.js";
 import type { DiscoveryResult, LiteLLMApi, LiteLLMModel } from "../src/types.js";
@@ -129,7 +130,7 @@ describe("createLiteLLMProvider", () => {
   it("restores current-version stored models offline without discovery", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const value = controller({ discover });
-    const stored = { ...native("stored"), litellmDiscoveryVersion: 3 as const };
+    const stored = { ...native("stored"), litellmDiscoveryVersion: 4 as const };
 
     await value.refreshModels?.(context([stored], false));
 
@@ -152,7 +153,7 @@ describe("createLiteLLMProvider", () => {
           ...discovered("claude-fable-5-1").models[0],
           api: "anthropic-messages",
           compat: { forceAdaptiveThinking: true },
-          litellmDiscoveryVersion: 3,
+          litellmDiscoveryVersion: 4,
         },
       ],
     };
@@ -166,7 +167,7 @@ describe("createLiteLLMProvider", () => {
     await value.refreshModels?.(context([stale], true));
     expect(discover).toHaveBeenCalledOnce();
     expect(value.getModels()[0]).toMatchObject({
-      litellmDiscoveryVersion: 3,
+      litellmDiscoveryVersion: 4,
       compat: { forceAdaptiveThinking: true },
     });
   });
@@ -177,7 +178,7 @@ describe("createLiteLLMProvider", () => {
         ...discovered("claude-sonnet-5").models[0],
         api: "anthropic-messages",
         compat: { supportsStrictTools: true },
-        litellmDiscoveryVersion: 3,
+        litellmDiscoveryVersion: 4,
       },
     ]);
     const stale = {
@@ -194,9 +195,41 @@ describe("createLiteLLMProvider", () => {
     expect(discover).not.toHaveBeenCalled();
   });
 
+  it("replaces a v3 cache entry from before the GPT-5.5+ tool-reasoning policy with startup discovery", async () => {
+    const [seed] = toNativeModels("litellm", "https://proxy.example/v1", [
+      {
+        ...discovered("gpt-6-sol").models[0],
+        litellmBackendFamily: "openai",
+        litellmPolicy: {
+          normalizeStrictToolMessages: false,
+          normalizeThinkTags: false,
+          suppressReasoningVisibility: false,
+          dropToolReasoning: true,
+        },
+        litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
+      },
+    ]);
+    const { litellmPolicy: _policy, ...unflagged } = seed as LiteLLMModel;
+    const stale = { ...unflagged, litellmDiscoveryVersion: 3 };
+    const value = controller({ discover: vi.fn(async () => discovered("fresh")), models: [seed] });
+
+    await value.refreshModels?.(context([stale as Model<Api>], false));
+
+    expect(value.getModels()).toEqual([seed]);
+  });
+
+  it("restores the tool-reasoning drop for a v3 GPT-5.5+ Chat cache entry offline", async () => {
+    const stale = { ...native("gpt-6-sol"), litellmBackendFamily: "openai", litellmDiscoveryVersion: 3 };
+    const value = controller({ discover: vi.fn(async () => discovered("fresh")) });
+
+    await value.refreshModels?.(context([stale as Model<Api>], false));
+
+    expect((value.getModels()[0] as LiteLLMModel | undefined)?.litellmPolicy?.dropToolReasoning).toBe(true);
+  });
+
   it("still requires a network refresh for legacy entries startup discovery did not replace", async () => {
     const [seed] = toNativeModels("litellm", "https://proxy.example/v1", [
-      { ...discovered("claude-sonnet-5").models[0], litellmDiscoveryVersion: 3 },
+      { ...discovered("claude-sonnet-5").models[0], litellmDiscoveryVersion: 4 },
     ]);
     const seededLegacy = { ...seed, litellmDiscoveryVersion: 2 as const };
     const unseededLegacy = native("stored");
@@ -211,7 +244,7 @@ describe("createLiteLLMProvider", () => {
 
     await expect(value.refreshModels?.(context([seededLegacy, unseededLegacy], true))).rejects.toThrow("offline");
     expect(stderr).toHaveBeenCalledOnce();
-    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/version does not match 3.*network refresh failed/));
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/version does not match 4.*network refresh failed/));
   });
 
   it("restores mixed legacy and current-version entries per entry", async () => {
@@ -222,7 +255,7 @@ describe("createLiteLLMProvider", () => {
       name: "opus-5 (no metadata)",
       reasoning: false,
       maxTokens: 16_384,
-      litellmDiscoveryVersion: 3 as const,
+      litellmDiscoveryVersion: 4 as const,
     };
     const value = controller({ discover });
 
@@ -237,7 +270,7 @@ describe("createLiteLLMProvider", () => {
 
   it("ignores non-chat entries in Pi's model store", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
-    const current = (id: string) => ({ ...native(id), litellmDiscoveryVersion: 3 as const });
+    const current = (id: string) => ({ ...native(id), litellmDiscoveryVersion: 4 as const });
     const untyped = current("untyped-chat");
     const typed = { ...current("typed-chat"), type: "chat" as const };
     const image = { ...current("image"), type: "image" as const };
@@ -282,7 +315,7 @@ describe("createLiteLLMProvider", () => {
     expect(value.getModels()).toEqual([stored, otherStored]);
     expect(discover).toHaveBeenCalledTimes(2);
     expect(stderr).toHaveBeenCalledTimes(1);
-    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/version does not match 3.*network refresh failed/));
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/version does not match 4.*network refresh failed/));
   });
 
   it("re-enriches stale cached catalog aliases offline without discovery", async () => {
@@ -297,7 +330,7 @@ describe("createLiteLLMProvider", () => {
             name: "opus-5 (no metadata)",
             reasoning: false,
             maxTokens: 16_384,
-            litellmDiscoveryVersion: 3,
+            litellmDiscoveryVersion: 4,
           } as LiteLLMModel,
         ],
         false,
@@ -331,7 +364,7 @@ describe("createLiteLLMProvider", () => {
             name: "openai/gpt-5.5 (no metadata)",
             reasoning: false,
             maxTokens: 16_384,
-            litellmDiscoveryVersion: 3,
+            litellmDiscoveryVersion: 4,
             compat: undefined,
           } as LiteLLMModel,
         ],
@@ -362,7 +395,7 @@ describe("createLiteLLMProvider", () => {
             name: "openai/gpt-5.5 (no metadata)",
             reasoning: false,
             maxTokens: 16_384,
-            litellmDiscoveryVersion: 3,
+            litellmDiscoveryVersion: 4,
           } as LiteLLMModel,
         ],
         false,
@@ -389,7 +422,7 @@ describe("createLiteLLMProvider", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,
       maxTokens: 16_384,
-      litellmDiscoveryVersion: 3,
+      litellmDiscoveryVersion: 4,
     };
     const partialCached: Model<Api>[] = [
       { ...legacyFallback, reasoning: true },
