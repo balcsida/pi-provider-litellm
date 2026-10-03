@@ -22,6 +22,7 @@ import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost, toNativeModels } from "./provider.js";
+import { parseProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type {
   DiscoveryOptions,
@@ -446,17 +447,6 @@ function isOffline(): boolean {
 /** Pi disables all model network access when PI_OFFLINE is set; activation must honour it too. */
 function isHostOffline(): boolean {
   return process.env.PI_OFFLINE !== undefined;
-}
-
-function isPiVersionAtLeast(version: unknown, minimum: readonly number[]): boolean {
-  if (typeof version !== "string") return false;
-  const parts = version.split(/[.-]/).map(Number);
-  for (const [index, required] of minimum.entries()) {
-    const part = parts[index] ?? 0;
-    if (!Number.isInteger(part)) return false;
-    if (part !== required) return part > required;
-  }
-  return true;
 }
 
 // Pi resolves `$NAME`, `${NAME}`, and a leading `!command` in MCP header values. Header values here
@@ -1880,7 +1870,8 @@ function normalizeThinkTags(
 export default async function (pi: ExtensionAPI): Promise<void> {
   // Pi installs packages without resolving peerDependencies, so only this check keeps an older Pi from
   // loading the extension. It runs before anything registers; Pi reports the error and starts without it.
-  if (!isPiVersionAtLeast(piCodingAgent.VERSION, [0, 99, 2])) {
+  // Pi's version parses like the proxy's: a pre-release orders before the release it names.
+  if (!proxyVersionAtLeast(parseProxyVersion(piCodingAgent.VERSION), [0, 99, 2])) {
     throw new Error(
       `pi-provider-litellm needs Pi 0.99.2 or newer; this is Pi ${piCodingAgent.VERSION}. ` +
         "Update Pi, or install the last release for older Pi: pi install npm:pi-provider-litellm@3.4.0",
