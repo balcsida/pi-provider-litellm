@@ -1360,7 +1360,8 @@ async function refreshWithBackoff(
     return credentials;
   }
   pkceTransientRefreshBackoff.delete(credentials.refresh);
-  if (!result.ok) throw new Error(`${result.message}; run /login litellm again`);
+  // A transient failure leaves the stored credential intact, and a new login would need the same endpoint.
+  if (!result.ok) throw new Error(result.transient ? result.message : `${result.message}; run /login litellm again`);
   return { ...credentials, ...result.token };
 }
 

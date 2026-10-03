@@ -2253,7 +2253,7 @@ describe("extension startup", () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
-    it("rejects a transient PKCE refresh failure after expiry", async () => {
+    it("rejects a transient PKCE refresh failure after expiry without asking for a new login", async () => {
       const now = 1_800_000_000_000;
       process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
       const extension = await loadExtension(await makeAgentDir());
@@ -2264,7 +2264,7 @@ describe("extension startup", () => {
       const credential = { ...pkceCredential(), expires: now };
 
       await expect(pi.providers[0]?.auth.oauth?.refresh(credential, TEST_SIGNAL)).rejects.toThrow(
-        "LiteLLM token exchange failed (HTTP 503); run /login litellm again",
+        /^LiteLLM token exchange failed \(HTTP 503\)$/,
       );
     });
 
@@ -4010,10 +4010,17 @@ describe("direct OIDC login", () => {
       expect(refreshed).toEqual(credential);
     });
 
-    it("requires a new login after a 503 once the id_token has expired", async () => {
-      const { error } = await refreshOidc(oidcCredential({ expires: now }), () => jsonResponse(503, {}));
+    it.each([
+      [429, "HTTP 429"],
+      [503, "HTTP 503"],
+      ["network", "network error"],
+    ])("fails without asking for a new login after %s once the id_token has expired", async (failure, reason) => {
+      const { error } = await refreshOidc(oidcCredential({ expires: now }), () => {
+        if (failure === "network") throw new TypeError("network unavailable");
+        return jsonResponse(failure as number, {});
+      });
 
-      expect(error?.message).toBe("OIDC token exchange failed (HTTP 503); run /login litellm again");
+      expect(error?.message).toBe(`OIDC token exchange failed (${reason})`);
     });
 
     it.each<Record<string, unknown>>([
