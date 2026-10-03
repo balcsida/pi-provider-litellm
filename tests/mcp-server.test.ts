@@ -180,6 +180,33 @@ describe("LiteLLM MCP server registration", () => {
     expect(stderrText(stderr).match(/LiteLLM MCP \("litellm"\): server "litellm": exposure must be/g)).toHaveLength(1);
   });
 
+  it("holds MCP notices until the session UI can show them", async () => {
+    mockProxy();
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const isTTY = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+    Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: true });
+    try {
+      const pi = createPi();
+      vi.spyOn(pi, "registerMcpServer").mockImplementation(() => {
+        throw new Error("refused");
+      });
+      await load(await makeAgentDir(), pi);
+      expect(stderr).not.toHaveBeenCalled();
+
+      const notify = vi.fn();
+      for (const handler of pi.handlers.get("session_start") ?? [])
+        await handler({ type: "session_start" }, { hasUI: true, ui: { notify } });
+
+      expect(notify).toHaveBeenCalledWith('LiteLLM MCP ("litellm"): refused', "warning");
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      if (isTTY) Object.defineProperty(process.stderr, "isTTY", isTTY);
+      else Reflect.deleteProperty(process.stderr, "isTTY");
+    }
+  });
+
   it("keeps resolved header values literal through Pi's header resolver", async () => {
     mockProxy();
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

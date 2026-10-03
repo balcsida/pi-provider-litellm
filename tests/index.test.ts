@@ -393,6 +393,45 @@ describe("extension startup", () => {
     expect(pi.providers[0]?.getModels()).toEqual([stored]);
   });
 
+  it("does not cache the credential of a model refresh that predates login", async () => {
+    process.env.LITELLM_MODELS_DEV = "0";
+    let release!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    let modelCalls = 0;
+    const skillKeys: Array<string | null> = [];
+    const models = () => jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return ++modelCalls === 1 ? pending : models();
+      if (url.endsWith("/claude-code/marketplace.json")) {
+        skillKeys.push(new Headers(init?.headers).get("Authorization"));
+        return jsonResponse(200, { plugins: [] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const pi = createPi();
+    await (await loadExtension(await makeAgentDir()))(pi);
+    // Without a context, the Skills tools use the credential the last model refresh cached.
+    const listSkills = pi.tools.find((tool) => tool.name === "litellm_skill_list")!;
+    const oldRefresh = refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      credential: { type: "api_key", key: "sk-old", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
+    });
+    await vi.waitFor(() => expect(modelCalls).toBe(1));
+    const credential = await pi.providers[0]?.auth.apiKey?.login?.(
+      interaction(vi.fn().mockResolvedValueOnce("https://proxy.example.com").mockResolvedValueOnce("sk-new")),
+    );
+    release(models());
+    await oldRefresh;
+    await expect(listSkills.execute?.("test-call", {}, TEST_SIGNAL)).rejects.toThrow("no credentials for litellm");
+
+    await refreshProvider(pi.providers[0]!, { allowNetwork: true, credential });
+    await listSkills.execute?.("test-call", {}, TEST_SIGNAL);
+    expect(skillKeys).toEqual(["Bearer sk-new"]);
+  });
+
   it("ignores legacy cache files without deleting them", async () => {
     process.env.LITELLM_OFFLINE = "1";
     const agentDir = await makeAgentDir();
