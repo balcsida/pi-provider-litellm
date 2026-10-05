@@ -200,7 +200,7 @@ Provider fields:
 | `headers` | `$LITELLM_HEADERS` for `litellm`; unset for aliases | JSON string env reference or inline object of request headers |
 | `displayName` | `LITELLM_DISPLAY_NAME` / `"LiteLLM"` for `litellm`; alias name for aliases | Label shown in Pi UI |
 | `enabled` | `true` | Set `false` to skip or disable an alias |
-| `oidc` | unset | Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
+| `oidc` | unset | `litellm` only, in global settings. Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
 | `allowInsecureHttp` | `false` | Set `true` to permit plaintext HTTP for this provider, for example `http://host.docker.internal`. Credentials and request data will not be encrypted. Loopback HTTP works without this setting. |
 | `useGcloudTokenAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable Google Application Default Credentials (ADC) token authentication for this provider. |
 | `enableOAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable LiteLLM SSO/OAuth browser login for this provider. |
