@@ -1,11 +1,44 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Provider } from "@earendil-works/pi-ai";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetGcloudTokenCache } from "../src/gcloud-token.js";
 import {
   getProviderDefinitions,
   isValidProviderName,
   parseCanonicalProviderList,
   parseProviderEnvVars,
   parseProvidersJson,
+  resolveCredentials,
 } from "../src/index.js";
+import { createPi, loadExtension } from "./test-helpers.js";
+
+async function makeAgentDir(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "pi-multi-provider-env-"));
+}
+
+const TEST_SIGNAL = new AbortController().signal;
+
+function resolveApiKey(provider: Provider, envMap: Record<string, string | undefined> = process.env) {
+  return provider.auth.apiKey?.resolve({
+    ctx: {
+      env: async (name) => envMap[name],
+      fileExists: async () => false,
+    },
+    signal: TEST_SIGNAL,
+  });
+}
+
+function checkApiKey(provider: Provider, envMap: Record<string, string | undefined> = process.env) {
+  return provider.auth.apiKey?.check?.({
+    ctx: {
+      env: async (name) => envMap[name],
+      fileExists: async () => false,
+    },
+    signal: TEST_SIGNAL,
+  });
+}
 
 describe("isValidProviderName", () => {
   it("accepts valid lowercase alphanumeric and hyphen/underscore provider names", () => {
@@ -216,8 +249,6 @@ describe("getProviderDefinitions with environment variables", () => {
     expect(corp).toMatchObject({
       name: "corp",
       displayName: "corp",
-      baseUrl: "https://corp.example.com",
-      apiKeyConfig: "sk-corp",
       envPrefix: "LITELLM_PROVIDER_CORP",
       useDefaultEnv: false,
     });
@@ -231,7 +262,6 @@ describe("getProviderDefinitions with environment variables", () => {
     const teamA = defs.find((d) => d.name === "team-a");
     expect(teamA).toBeDefined();
     expect(teamA?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
-    expect(teamA?.baseUrl).toBe("https://team-a.example.com");
   });
 
   it("allows overriding provider ID via _NAME variable", () => {
@@ -243,7 +273,6 @@ describe("getProviderDefinitions with environment variables", () => {
     const customTeam = defs.find((d) => d.name === "custom_team");
     expect(customTeam).toBeDefined();
     expect(customTeam?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
-    expect(customTeam?.baseUrl).toBe("https://team-a.example.com");
   });
 
   it("preserves canonical list IDs specified in LITELLM_PROVIDERS", () => {
@@ -295,7 +324,6 @@ describe("getProviderDefinitions with environment variables", () => {
     expect(corp).toMatchObject({
       name: "corp",
       baseUrl: "https://disk.example.com",
-      apiKeyConfig: "sk-env",
       envPrefix: "LITELLM_PROVIDER_CORP",
     });
   });
@@ -355,5 +383,321 @@ describe("getProviderDefinitions with environment variables", () => {
 
     const defs = getProviderDefinitions(settings);
     expect(defs.map((d) => d.name)).toEqual(["litellm"]);
+  });
+});
+
+describe("Per-provider credential and endpoint resolution", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    resetGcloudTokenCache();
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("LITELLM_") || key.startsWith("GOOGLE_") || key === "PI_OFFLINE") {
+        delete process.env[key];
+      }
+    }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetGcloudTokenCache();
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  it("uses scoped _BASE_URL and _API_KEY for secondary providers", async () => {
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_API_KEY = "sk-corp";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    const checkResult = await checkApiKey(corp!);
+    expect(checkResult).toEqual({
+      type: "api_key",
+      source: "$LITELLM_PROVIDER_CORP_API_KEY",
+    });
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult).toEqual({
+      auth: {
+        apiKey: "sk-corp",
+        headers: undefined,
+        baseUrl: "https://corp.example.com",
+      },
+      env: {
+        LITELLM_BASE_URL: "https://corp.example.com",
+      },
+      source: "$LITELLM_PROVIDER_CORP_API_KEY",
+    });
+  });
+
+  it("does NOT leak or fallback to global LITELLM_BASE_URL and LITELLM_API_KEY for secondary providers", async () => {
+    process.env.LITELLM_BASE_URL = "https://primary.example.com";
+    process.env.LITELLM_API_KEY = "sk-primary";
+    process.env.LITELLM_PROVIDERS = "corp";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    // Corp has no scoped BASE_URL or API_KEY, so check and resolve must return undefined
+    const checkResult = await checkApiKey(corp!);
+    expect(checkResult).toBeUndefined();
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult).toBeUndefined();
+
+    // Primary provider still resolves its global credentials
+    const litellm = pi.providers.find((p) => p.id === "litellm");
+    expect(litellm).toBeDefined();
+    const litellmAuth = await resolveApiKey(litellm!);
+    expect(litellmAuth).toMatchObject({
+      auth: {
+        apiKey: "sk-primary",
+        baseUrl: "https://primary.example.com",
+      },
+      source: "LITELLM_API_KEY",
+    });
+  });
+
+  it("lazily executes scoped _API_KEY_HELPER command for secondary providers", async () => {
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_API_KEY_HELPER = "echo sk-corp-helper";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    const checkResult = await checkApiKey(corp!);
+    expect(checkResult).toEqual({
+      type: "api_key",
+      source: "$LITELLM_PROVIDER_CORP_API_KEY_HELPER",
+    });
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult).toEqual({
+      auth: {
+        apiKey: "sk-corp-helper",
+        headers: undefined,
+        baseUrl: "https://corp.example.com",
+      },
+      env: {
+        LITELLM_BASE_URL: "https://corp.example.com",
+      },
+      source: "$LITELLM_PROVIDER_CORP_API_KEY_HELPER",
+    });
+  });
+
+  it("resolves and passes scoped _HEADERS JSON for secondary providers", async () => {
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_API_KEY = "sk-corp";
+    process.env.LITELLM_PROVIDER_CORP_HEADERS = JSON.stringify({
+      "X-Custom-Tenant": "tenant-corp",
+      "X-Secret-Env": "$DYNAMIC_SECRET",
+    });
+    process.env.DYNAMIC_SECRET = "secret-123";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult?.auth.headers).toEqual({
+      "X-Custom-Tenant": "tenant-corp",
+      "X-Secret-Env": "secret-123",
+    });
+  });
+
+  it("enables Google ADC when _USE_GCLOUD_AUTH is set to 1 for secondary providers", async () => {
+    const agentDir = await makeAgentDir();
+    const adcPath = join(agentDir, "adc.json");
+    await writeFile(
+      adcPath,
+      JSON.stringify({
+        type: "authorized_user",
+        client_id: "client-id",
+        client_secret: "client-secret",
+        refresh_token: "refresh-token",
+      }),
+      "utf8",
+    );
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_USE_GCLOUD_AUTH = "1";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return new Response(JSON.stringify({ access_token: "ya29.corp-minted", expires_in: 3600 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    const checkResult = await checkApiKey(corp!);
+    expect(checkResult).toEqual({ type: "api_key", source: "gcloud ADC" });
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult).toEqual({
+      auth: {
+        apiKey: "ya29.corp-minted",
+        headers: undefined,
+        baseUrl: "https://corp.example.com",
+      },
+      env: {
+        LITELLM_BASE_URL: "https://corp.example.com",
+      },
+      source: "gcloud ADC",
+    });
+  });
+
+  it("does NOT use Google ADC for secondary providers when _USE_GCLOUD_AUTH is not set", async () => {
+    const agentDir = await makeAgentDir();
+    const adcPath = join(agentDir, "adc.json");
+    await writeFile(
+      adcPath,
+      JSON.stringify({
+        type: "authorized_user",
+        client_id: "client-id",
+        client_secret: "client-secret",
+        refresh_token: "refresh-token",
+      }),
+      "utf8",
+    );
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+
+    const checkResult = await checkApiKey(corp!);
+    expect(checkResult).toBeUndefined();
+
+    const authResult = await resolveApiKey(corp!);
+    expect(authResult).toBeUndefined();
+  });
+
+  it("enables OAuth descriptor on provider auth when _ENABLE_OAUTH is set to 1", async () => {
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_ENABLE_OAUTH = "1";
+    process.env.LITELLM_PROVIDER_DEV_BASE_URL = "https://dev.example.com";
+    process.env.LITELLM_PROVIDER_DEV_ENABLE_OAUTH = "0";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+    await extension(pi);
+
+    const corp = pi.providers.find((p) => p.id === "corp");
+    expect(corp).toBeDefined();
+    expect(corp?.auth.oauth).toBeDefined();
+    expect(corp?.auth.oauth?.name).toBe("LiteLLM SSO");
+
+    const dev = pi.providers.find((p) => p.id === "dev");
+    expect(dev).toBeDefined();
+    expect(dev?.auth.oauth).toBeUndefined();
+  });
+
+  describe("resolveCredentials directly", () => {
+    it("resolves scoped baseUrl and apiKey for secondary provider definition", async () => {
+      process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+      process.env.LITELLM_PROVIDER_CORP_API_KEY = "sk-corp";
+
+      const creds = await resolveCredentials({
+        name: "corp",
+        displayName: "corp",
+        envPrefix: "LITELLM_PROVIDER_CORP",
+        useDefaultEnv: false,
+        useGcloudTokenAuth: false,
+        enableOAuth: false,
+        allowInsecureHttp: false,
+      });
+
+      expect(creds).toEqual({
+        baseUrl: "https://corp.example.com",
+        apiKey: "sk-corp",
+        apiKeyConfig: "$LITELLM_PROVIDER_CORP_API_KEY",
+        apiKeyFromGcloudAdc: false,
+      });
+    });
+
+    it("does not fall back to global LITELLM_BASE_URL and LITELLM_API_KEY", async () => {
+      process.env.LITELLM_BASE_URL = "https://primary.example.com";
+      process.env.LITELLM_API_KEY = "sk-primary";
+
+      const creds = await resolveCredentials({
+        name: "corp",
+        displayName: "corp",
+        envPrefix: "LITELLM_PROVIDER_CORP",
+        useDefaultEnv: false,
+        useGcloudTokenAuth: false,
+        enableOAuth: false,
+        allowInsecureHttp: false,
+      });
+
+      expect(creds).toEqual({
+        baseUrl: undefined,
+        apiKey: undefined,
+        apiKeyConfig: undefined,
+        apiKeyFromGcloudAdc: false,
+      });
+    });
+
+    it("resolves scoped API key helper command", async () => {
+      process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+      process.env.LITELLM_PROVIDER_CORP_API_KEY_HELPER = "echo sk-helper-out";
+
+      const creds = await resolveCredentials({
+        name: "corp",
+        displayName: "corp",
+        envPrefix: "LITELLM_PROVIDER_CORP",
+        useDefaultEnv: false,
+        useGcloudTokenAuth: false,
+        enableOAuth: false,
+        allowInsecureHttp: false,
+      });
+
+      expect(creds).toEqual({
+        baseUrl: "https://corp.example.com",
+        apiKey: "sk-helper-out",
+        apiKeyConfig: "!echo sk-helper-out",
+        apiKeyFromGcloudAdc: false,
+      });
+    });
   });
 });
