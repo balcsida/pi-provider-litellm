@@ -221,15 +221,16 @@ describe("parseProviderEnvVars", () => {
     });
   });
 
-  it("parses OIDC env var as JSON or raw string", () => {
+  it("does not parse OIDC env vars for secondary providers", () => {
     const env: NodeJS.ProcessEnv = {
-      LITELLM_PROVIDER_OIDC_JSON_OIDC: '{"clientId": "abc", "issuer": "https://auth.example.com"}',
-      LITELLM_PROVIDER_OIDC_STR_OIDC: "https://auth.example.com",
+      LITELLM_PROVIDER_TEAM_A_BASE_URL: "https://team-a.example.com",
+      LITELLM_PROVIDER_TEAM_A_OIDC: '{"clientId": "abc", "issuer": "https://auth.example.com"}',
     };
 
     const parsed = parseProviderEnvVars(env);
-    expect(parsed.OIDC_JSON.oidc).toEqual({ clientId: "abc", issuer: "https://auth.example.com" });
-    expect(parsed.OIDC_STR.oidc).toBe("https://auth.example.com");
+    expect(parsed.TEAM_A).toBeDefined();
+    expect(parsed.TEAM_A.baseUrl).toBe("https://team-a.example.com");
+    expect((parsed.TEAM_A as Record<string, unknown>).oidc).toBeUndefined();
   });
 });
 
@@ -496,6 +497,72 @@ describe("getProviderDefinitions with environment variables", () => {
     const teamUnderscoreCreds = await resolveCredentials(teamUnderscore!);
     expect(teamUnderscoreCreds.baseUrl).toBeUndefined();
     expect(teamUnderscoreCreds.apiKey).toBeUndefined();
+  });
+
+  it("retains undefined envPrefix for team_a when settings.json defines team_a and LITELLM_PROVIDERS has team-a,team_a", async () => {
+    process.env.LITELLM_PROVIDERS = "team-a,team_a";
+    process.env.LITELLM_PROVIDER_TEAM_A_BASE_URL = "https://teama.example.com";
+    process.env.LITELLM_PROVIDER_TEAM_A_API_KEY = "sk-team-a";
+
+    const settings = {
+      providers: {
+        team_a: {
+          displayName: "Team A from Settings",
+        },
+      },
+    };
+
+    const defs = getProviderDefinitions(settings);
+    const teamHyphen = defs.find((d) => d.name === "team-a");
+    expect(teamHyphen).toBeDefined();
+    expect(teamHyphen?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
+
+    const teamUnderscore = defs.find((d) => d.name === "team_a");
+    expect(teamUnderscore).toBeDefined();
+    expect(teamUnderscore?.envPrefix).toBeUndefined();
+    expect(teamUnderscore?.displayName).toBe("Team A from Settings");
+
+    const teamUnderscoreCreds = await resolveCredentials(teamUnderscore!);
+    expect(teamUnderscoreCreds.baseUrl).toBeUndefined();
+    expect(teamUnderscoreCreds.apiKey).toBeUndefined();
+  });
+
+  it("ensures secondary providers always have oidc: undefined even if configured in settings or JSON", () => {
+    process.env.LITELLM_PROVIDERS_JSON = JSON.stringify({
+      "team-json": {
+        baseUrl: "https://team-json.example.com",
+        oidc: { clientId: "xyz", issuer: "https://auth.example.com" },
+      },
+    });
+    process.env.LITELLM_PROVIDER_TEAM_ENV_BASE_URL = "https://team-env.example.com";
+
+    const settings = {
+      providers: {
+        litellm: {
+          oidc: { clientId: "primary", issuer: "https://auth-primary.example.com" },
+        },
+        "team-disk": {
+          baseUrl: "https://team-disk.example.com",
+          oidc: { clientId: "disk", issuer: "https://auth.example.com" },
+        },
+      },
+    };
+
+    const defs = getProviderDefinitions(settings);
+    const primary = defs.find((d) => d.name === "litellm");
+    expect(primary?.oidc).toEqual({ clientId: "primary", issuer: "https://auth-primary.example.com" });
+
+    const teamJson = defs.find((d) => d.name === "team-json");
+    expect(teamJson).toBeDefined();
+    expect(teamJson?.oidc).toBeUndefined();
+
+    const teamEnv = defs.find((d) => d.name === "team-env");
+    expect(teamEnv).toBeDefined();
+    expect(teamEnv?.oidc).toBeUndefined();
+
+    const teamDisk = defs.find((d) => d.name === "team-disk");
+    expect(teamDisk).toBeDefined();
+    expect(teamDisk?.oidc).toBeUndefined();
   });
 
   it("does not spawn an alias provider from LITELLM_PROVIDER_LITELLM_* variables", () => {

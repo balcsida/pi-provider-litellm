@@ -39,7 +39,7 @@ Currently, `getProviderDefinitions` only loads secondary providers declared stat
    ```
 2. Implement parsing and scanning helpers in `src/index.ts`:
    - `parseProviderEnvVars(env: NodeJS.ProcessEnv)`:
-     - Scans `Object.keys(env)` for `^LITELLM_PROVIDER_([A-Z0-9_]+)_(BASE_URL|API_KEY|API_KEY_HELPER|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|OIDC)$`.
+     - Scans `Object.keys(env)` for `^LITELLM_PROVIDER_([A-Z0-9_]+)_(BASE_URL|API_KEY|API_KEY_HELPER|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH)$`.
      - Extracts the uppercase token (e.g. `CORP_EAST`) and maps to property keys.
    - `parseCanonicalProviderList(raw: string | undefined)`:
      - Splits comma/whitespace-separated string into provider ID strings (e.g. `["corp-east", "dev"]`).
