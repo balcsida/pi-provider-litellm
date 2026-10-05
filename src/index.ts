@@ -256,6 +256,7 @@ function resolveCredentialRoot(
     credentialBaseUrl ??
     cleanConfig(requestBaseUrl) ??
     cleanConfig(definition.baseUrl) ??
+    (definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined) ??
     (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
   return baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
 }
@@ -506,28 +507,38 @@ function parseCustomHeaders(raw: string | undefined): Record<string, string> | u
 }
 
 function resolveHeaders(definition: ProviderDefinition): Record<string, string> | undefined {
-  if (typeof definition.headers === "string") return parseCustomHeaders(resolveTemplateConfigValue(definition.headers));
-  return parseHeaderRecord(definition.headers);
+  const rawHeaders =
+    definition.headers ??
+    (definition.envPrefix ? process.env[`${definition.envPrefix}_HEADERS`] : undefined) ??
+    (definition.useDefaultEnv ? process.env[ENV_HEADERS] : undefined);
+  if (typeof rawHeaders === "string") return parseCustomHeaders(resolveTemplateConfigValue(rawHeaders));
+  return parseHeaderRecord(rawHeaders);
 }
 
 async function resolveHeadersFromContext(
   definition: ProviderDefinition,
   env: (name: string) => Promise<string | undefined>,
 ): Promise<Record<string, string> | undefined> {
-  if (typeof definition.headers === "string")
-    return parseCustomHeaders(await resolveTemplateConfigValueFromContext(definition.headers, env));
-  return parseHeaderRecord(definition.headers);
+  const rawHeaders =
+    definition.headers ??
+    (definition.envPrefix ? await env(`${definition.envPrefix}_HEADERS`) : undefined) ??
+    (definition.useDefaultEnv ? await env(ENV_HEADERS) : undefined);
+  if (typeof rawHeaders === "string")
+    return parseCustomHeaders(await resolveTemplateConfigValueFromContext(rawHeaders, env));
+  return parseHeaderRecord(rawHeaders);
 }
 
-async function resolveCredentials(
+export async function resolveCredentials(
   definition: ProviderDefinition,
   { executeHelpers = true } = {},
 ): Promise<ResolvedCredentials> {
   const configuredBase =
-    cleanConfig(definition.baseUrl) ?? (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
-  const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
-  const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
-  const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
+    cleanConfig(definition.baseUrl) ??
+    (definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined) ??
+    (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  const useGcloudToken = definition.useDefaultEnv
+    ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+    : definition.useGcloudTokenAuth;
   const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
   // higher-precedence credential (saved auth, gcloud token) already won.
@@ -538,10 +549,34 @@ async function resolveCredentials(
       warnUnresolvedApiKeyConfig(definition.name, definition.apiKeyConfig);
     }
   }
-  const helperKey =
-    !gcloudKey && !configuredKey && executeHelpers && envHelperCommand
-      ? executeApiKeyCommand(envHelperCommand)
-      : undefined;
+
+  let helperKey: string | undefined;
+  let helperCommand: string | undefined;
+  let envKey: string | undefined;
+  let envKeySource: string | undefined;
+
+  if (!gcloudKey && !configuredKey && definition.envPrefix) {
+    helperCommand = normalizeCommand(process.env[`${definition.envPrefix}_API_KEY_HELPER`]);
+    if (helperCommand && executeHelpers) {
+      helperKey = executeApiKeyCommand(helperCommand);
+    }
+    if (!helperCommand) {
+      envKey = cleanConfig(process.env[`${definition.envPrefix}_API_KEY`]);
+      if (envKey) envKeySource = `$${definition.envPrefix}_API_KEY`;
+    }
+  }
+
+  if (!gcloudKey && !configuredKey && !helperKey && !helperCommand && !envKey && definition.useDefaultEnv) {
+    helperCommand = getApiKeyHelperCommand();
+    if (helperCommand && executeHelpers) {
+      helperKey = executeApiKeyCommand(helperCommand);
+    }
+    if (!helperCommand) {
+      envKey = cleanConfig(process.env[ENV_API_KEY]);
+      if (envKey) envKeySource = `$${ENV_API_KEY}`;
+    }
+  }
+
   const apiKey = gcloudKey || configuredKey || helperKey || envKey;
 
   let apiKeyConfig: string | undefined;
@@ -549,12 +584,12 @@ async function resolveCredentials(
     apiKeyConfig = definition.apiKeyConfig;
   } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
     apiKeyConfig = definition.apiKeyConfig;
-  } else if (helperKey && envHelperCommand) {
-    apiKeyConfig = envHelperCommand;
-  } else if (!executeHelpers && envHelperCommand) {
-    apiKeyConfig = envHelperCommand;
+  } else if (helperKey && helperCommand) {
+    apiKeyConfig = helperCommand;
+  } else if (!executeHelpers && helperCommand) {
+    apiKeyConfig = helperCommand;
   } else if (envKey) {
-    apiKeyConfig = `$${ENV_API_KEY}`;
+    apiKeyConfig = envKeySource;
   }
   return {
     baseUrl: configuredBase ? normalizeBaseUrl(configuredBase, definition.allowInsecureHttp) : undefined,
@@ -691,17 +726,12 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     if (envData) claimedTokens.add(token);
 
     const existing = secondaryProviders.get(canonicalId);
-    const apiKeyConfig =
-      envData?.apiKey ??
-      (envData?.apiKeyHelper ? normalizeCommand(envData.apiKeyHelper) : undefined) ??
-      existing?.apiKeyConfig;
-
     secondaryProviders.set(canonicalId, {
       name: canonicalId,
       displayName: envData?.displayName ?? existing?.displayName,
-      baseUrl: envData?.baseUrl ?? existing?.baseUrl,
-      apiKeyConfig,
-      headers: envData?.headers ?? existing?.headers,
+      baseUrl: existing?.baseUrl,
+      apiKeyConfig: existing?.apiKeyConfig,
+      headers: existing?.headers,
       allowInsecureHttp: envData?.allowInsecureHttp ?? existing?.allowInsecureHttp,
       useGcloudTokenAuth: envData?.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
       enableOAuth: envData?.enableOAuth ?? existing?.enableOAuth,
@@ -717,17 +747,12 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     if (!isValidProviderName(providerId)) continue;
 
     const existing = secondaryProviders.get(providerId);
-    const apiKeyConfig =
-      envData.apiKey ??
-      (envData.apiKeyHelper ? normalizeCommand(envData.apiKeyHelper) : undefined) ??
-      existing?.apiKeyConfig;
-
     secondaryProviders.set(providerId, {
       name: providerId,
       displayName: envData.displayName ?? existing?.displayName,
-      baseUrl: envData.baseUrl ?? existing?.baseUrl,
-      apiKeyConfig,
-      headers: envData.headers ?? existing?.headers,
+      baseUrl: existing?.baseUrl,
+      apiKeyConfig: existing?.apiKeyConfig,
+      headers: existing?.headers,
       allowInsecureHttp: envData.allowInsecureHttp ?? existing?.allowInsecureHttp,
       useGcloudTokenAuth: envData.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
       enableOAuth: envData.enableOAuth ?? existing?.enableOAuth,
@@ -804,6 +829,10 @@ function knownBaseUrl(definition: ProviderDefinition): { url: string; source: st
   const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
   const candidates: [string | undefined, string][] = [
     [cleanConfig(definition.baseUrl), "configured"],
+    [
+      definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined,
+      `$${definition.envPrefix}_BASE_URL`,
+    ],
     [definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined, `$${ENV_BASE_URL}`],
     [
       stored?.type === "oauth"
@@ -1707,11 +1736,9 @@ async function configuredBaseUrl(
   ctx: { env(name: string): Promise<string | undefined> },
   credential?: ApiKeyCredential,
 ): Promise<string | undefined> {
-  return (
-    cleanConfig(credential?.env?.[ENV_BASE_URL]) ??
-    cleanConfig(definition.baseUrl) ??
-    (definition.useDefaultEnv ? cleanConfig(await ctx.env(ENV_BASE_URL)) : undefined)
-  );
+  const scopedEnv = definition.envPrefix ? cleanConfig(await ctx.env(`${definition.envPrefix}_BASE_URL`)) : undefined;
+  const defaultEnv = definition.useDefaultEnv ? cleanConfig(await ctx.env(ENV_BASE_URL)) : undefined;
+  return cleanConfig(credential?.env?.[ENV_BASE_URL]) ?? cleanConfig(definition.baseUrl) ?? scopedEnv ?? defaultEnv;
 }
 
 async function resolveApiKeyAuth(
@@ -1733,39 +1760,73 @@ async function resolveApiKeyAuth(
       apiKey: stored,
     };
   } else {
-    creds = await resolveCredentials(
-      { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
-      { executeHelpers },
-    );
-    if (!creds.apiKey && definition.apiKeyConfig) {
+    // 1) Google ADC
+    const useGcloudToken = definition.useDefaultEnv
+      ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+      : definition.useGcloudTokenAuth;
+    const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
+    let apiKey = gcloudKey;
+    let apiKeyConfig: string | undefined;
+    if (gcloudKey) {
+      source = GCLOUD_ADC_SOURCE;
+    }
+
+    // 2) definition.apiKeyConfig
+    if (!apiKey && definition.apiKeyConfig) {
       const configured = definition.apiKeyConfig.startsWith("!")
         ? executeHelpers
           ? executeApiKeyCommand(definition.apiKeyConfig)
           : undefined
         : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
       if (configured) {
-        creds.apiKey = configured;
-        creds.apiKeyConfig = definition.apiKeyConfig;
+        apiKey = configured;
+        apiKeyConfig = definition.apiKeyConfig;
+        source = definition.apiKeyConfig;
       } else if (!definition.apiKeyConfig.startsWith("!")) {
         warnUnresolvedApiKeyConfig(definition.name, definition.apiKeyConfig);
       }
     }
-    if (!creds.apiKey && definition.useDefaultEnv) {
+
+    // 3) Scoped envPrefix: _API_KEY_HELPER then _API_KEY
+    if (!apiKey && definition.envPrefix) {
+      const helper = normalizeCommand(await ctx.env(`${definition.envPrefix}_API_KEY_HELPER`));
+      if (helper) {
+        apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
+        apiKeyConfig = helper;
+        source = `$${definition.envPrefix}_API_KEY_HELPER`;
+      } else {
+        const envKey = cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY`));
+        if (envKey) {
+          apiKey = envKey;
+          apiKeyConfig = `$${definition.envPrefix}_API_KEY`;
+          source = `$${definition.envPrefix}_API_KEY`;
+        }
+      }
+    }
+
+    // 4) Default env: LITELLM_API_KEY_HELPER then LITELLM_API_KEY
+    if (!apiKey && definition.useDefaultEnv) {
       const helper = normalizeCommand(await ctx.env(ENV_API_KEY_HELPER));
       if (helper) {
-        creds.apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
-        creds.apiKeyConfig = helper;
+        apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
+        apiKeyConfig = helper;
         source = ENV_API_KEY_HELPER;
       } else {
         const envKey = cleanConfig(await ctx.env(ENV_API_KEY));
         if (envKey) {
-          creds.apiKey = envKey;
-          creds.apiKeyConfig = ENV_API_KEY;
+          apiKey = envKey;
+          apiKeyConfig = ENV_API_KEY;
           source = ENV_API_KEY;
         }
       }
     }
-    if (!creds.baseUrl && baseUrl) creds.baseUrl = normalizeBaseUrl(baseUrl, definition.allowInsecureHttp);
+
+    creds = {
+      baseUrl: baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined,
+      apiKey: apiKey || undefined,
+      apiKeyConfig,
+      apiKeyFromGcloudAdc: Boolean(gcloudKey),
+    };
   }
   if (!creds.apiKey) return undefined;
   const normalizedRoot = baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
@@ -1816,6 +1877,7 @@ function createProviderAuth(
         const baseUrl =
           credential?.env?.[ENV_BASE_URL] ??
           definition.baseUrl ??
+          (definition.envPrefix ? await ctx.env(`${definition.envPrefix}_BASE_URL`) : undefined) ??
           (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
@@ -1828,6 +1890,14 @@ function createProviderAuth(
               : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
             if (configuredKey) return definition.apiKeyConfig;
           }
+          if (definition.envPrefix) {
+            if (cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY_HELPER`))) {
+              return `$${definition.envPrefix}_API_KEY_HELPER`;
+            }
+            if (cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY`))) {
+              return `$${definition.envPrefix}_API_KEY`;
+            }
+          }
           if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER))) return ENV_API_KEY_HELPER;
           if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))) return ENV_API_KEY;
           return undefined;
@@ -1837,8 +1907,10 @@ function createProviderAuth(
         // key, the helper and the environment key. Whether the refresh token still mints
         // is only knowable at request time, and this must not make a network call; if it
         // fails, `resolve` falls back and reports the credential it actually used.
-        if (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled() && (await hasGcloudAdcCredentials()))
-          return { type: "api_key", source: GCLOUD_ADC_SOURCE };
+        const useGcloudToken = definition.useDefaultEnv
+          ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+          : definition.useGcloudTokenAuth;
+        if (useGcloudToken && (await hasGcloudAdcCredentials())) return { type: "api_key", source: GCLOUD_ADC_SOURCE };
         const fallback = await fallbackSource();
         return fallback ? { type: "api_key", source: fallback } : undefined;
       },
