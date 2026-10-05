@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Provider } from "@earendil-works/pi-ai";
+import type { AuthInteraction, Provider } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetGcloudTokenCache } from "../src/gcloud-token.js";
 import {
@@ -19,6 +19,14 @@ async function makeAgentDir(): Promise<string> {
 }
 
 const TEST_SIGNAL = new AbortController().signal;
+
+function interaction(
+  prompt: AuthInteraction["prompt"],
+  notify: AuthInteraction["notify"] = vi.fn(),
+  signal: AbortSignal = TEST_SIGNAL,
+): AuthInteraction & { signal: AbortSignal } {
+  return { prompt, notify, signal };
+}
 
 function resolveApiKey(provider: Provider, envMap: Record<string, string | undefined> = process.env) {
   return provider.auth.apiKey?.resolve({
@@ -698,6 +706,134 @@ describe("Per-provider credential and endpoint resolution", () => {
         apiKeyConfig: "!echo sk-helper-out",
         apiKeyFromGcloudAdc: false,
       });
+    });
+  });
+
+  describe("interactive login for secondary providers", () => {
+    it("provides apiKey.login on secondary providers", async () => {
+      process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+      process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+      const extension = await loadExtension(await makeAgentDir());
+      const pi = createPi();
+      await extension(pi);
+
+      const corp = pi.providers.find((p) => p.id === "corp");
+      expect(corp).toBeDefined();
+      expect(corp?.auth.apiKey?.login).toBeDefined();
+    });
+
+    it("offers the provider-scoped base URL in knownBaseUrl for /login <alias>", async () => {
+      process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+      process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+      const extension = await loadExtension(await makeAgentDir());
+      const pi = createPi();
+      await extension(pi);
+
+      const corp = pi.providers.find((p) => p.id === "corp");
+      expect(corp).toBeDefined();
+
+      let offeredOptions: readonly { id: string; label: string }[] | undefined;
+      const prompt = vi.fn(async (options: Parameters<AuthInteraction["prompt"]>[0]) => {
+        if ("options" in options && options.options) {
+          offeredOptions = options.options;
+          return options.options[0]!.id;
+        }
+        return "sk-corp-key";
+      });
+
+      const credential = await corp?.auth.apiKey?.login?.(interaction(prompt));
+
+      expect(offeredOptions).toEqual([
+        { id: "https://corp.example.com", label: "https://corp.example.com ($LITELLM_PROVIDER_CORP_BASE_URL)" },
+        { id: "enter-a-different-url", label: "Enter a different URL…" },
+      ]);
+      expect(credential).toEqual({
+        type: "api_key",
+        key: "sk-corp-key",
+        env: { LITELLM_BASE_URL: "https://corp.example.com" },
+      });
+    });
+
+    it("completes login for a secondary provider with custom URL and API key", async () => {
+      process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+      process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+      const extension = await loadExtension(await makeAgentDir());
+      const pi = createPi();
+      await extension(pi);
+
+      const corp = pi.providers.find((p) => p.id === "corp");
+      const prompt = vi.fn(async (options: Parameters<AuthInteraction["prompt"]>[0]) => {
+        if ("options" in options && options.options) {
+          return "enter-a-different-url";
+        }
+        if ("placeholder" in options) {
+          return "https://custom-corp.example.com";
+        }
+        return "sk-custom-corp";
+      });
+
+      const credential = await corp?.auth.apiKey?.login?.(interaction(prompt));
+      expect(credential).toEqual({
+        type: "api_key",
+        key: "sk-custom-corp",
+        env: { LITELLM_BASE_URL: "https://custom-corp.example.com" },
+      });
+    });
+
+    it("drops existing MCP registration for <alias> on login start", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/model/info")) return Response.json({ data: [] });
+        throw new Error(`unexpected URL: ${url}`);
+      });
+      const agentDir = await makeAgentDir();
+      await writeFile(
+        join(agentDir, "auth.json"),
+        JSON.stringify({
+          corp: {
+            type: "api_key",
+            key: "sk-stored",
+            env: { LITELLM_BASE_URL: "https://corp.example.com" },
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(agentDir, "settings.json"),
+        JSON.stringify({
+          litellm: {
+            providers: {
+              corp: {
+                baseUrl: "https://corp.example.com",
+              },
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const extension = await loadExtension(agentDir);
+      const pi = createPi();
+      await extension(pi);
+
+      expect(pi.mcpServers.has("corp")).toBe(true);
+
+      const registeredWhenPrompted: boolean[] = [];
+      const prompt = vi.fn(async (options: Parameters<AuthInteraction["prompt"]>[0]) => {
+        registeredWhenPrompted.push(pi.mcpServers.has("corp"));
+        if ("options" in options && options.options) {
+          return options.options[0]!.id;
+        }
+        return "sk-new-key";
+      });
+
+      const corp = pi.providers.find((p) => p.id === "corp");
+      await corp?.auth.apiKey?.login?.(interaction(prompt));
+
+      expect(registeredWhenPrompted).toEqual([false, false]);
     });
   });
 });
