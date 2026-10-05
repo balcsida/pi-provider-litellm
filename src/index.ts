@@ -76,6 +76,8 @@ type RawProviderSettings = {
   useGcloudTokenAuth?: unknown;
   enableOAuth?: unknown;
   oidc?: unknown;
+  enableMcp?: unknown;
+  mcp?: unknown;
 };
 
 export type ProviderDefinition = {
@@ -91,12 +93,13 @@ export type ProviderDefinition = {
   /** Raw `oidc` setting, validated at login so a bad value never breaks startup. */
   oidc?: unknown;
   envPrefix?: string;
+  enableMcp?: boolean;
 };
 
 const RESERVED_PROVIDER_NAMES = new Set(["mcp", "skills", "codemode", "tool_search", "litellm"]);
 const PROVIDER_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const PROVIDER_ENV_VAR_REGEX =
-  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|OIDC)$/;
+  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|OIDC|ENABLE_MCP|MCP_ENABLED)$/;
 
 export function isValidProviderName(name: string): boolean {
   if (typeof name !== "string") return false;
@@ -156,6 +159,7 @@ export type ParsedProviderEnv = {
   useGcloudTokenAuth?: boolean;
   enableOAuth?: boolean;
   oidc?: unknown;
+  enableMcp?: boolean;
 };
 
 export function parseProviderEnvVars(env: NodeJS.ProcessEnv): Record<string, ParsedProviderEnv> {
@@ -202,6 +206,10 @@ export function parseProviderEnvVars(env: NodeJS.ProcessEnv): Record<string, Par
         break;
       case "ENABLE_OAUTH":
         entry.enableOAuth = parseBooleanSetting(val);
+        break;
+      case "ENABLE_MCP":
+      case "MCP_ENABLED":
+        entry.enableMcp = parseBooleanSetting(val);
         break;
       case "OIDC": {
         const trimmed = cleanConfig(val);
@@ -651,7 +659,20 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const record = raw as RawProviderSettings;
   if (record.enabled === false) return undefined;
-  return record;
+  const enableMcp =
+    record.enableMcp !== undefined
+      ? parseBooleanSetting(record.enableMcp)
+      : isPlainObject(record.mcp)
+        ? record.mcp.enabled !== undefined
+          ? parseBooleanSetting(record.mcp.enabled)
+          : undefined
+        : record.mcp !== undefined
+          ? parseBooleanSetting(record.mcp)
+          : undefined;
+  return {
+    ...record,
+    ...(enableMcp !== undefined ? { enableMcp } : {}),
+  };
 }
 
 function isFeatureEnabled(settings: Record<string, unknown> | undefined, feature: "skills" | "mcp"): boolean {
@@ -670,6 +691,7 @@ type IntermediateProvider = {
   enableOAuth?: boolean;
   oidc?: unknown;
   envPrefix?: string;
+  enableMcp?: boolean;
 };
 
 export function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
@@ -677,6 +699,8 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   const providerSettings = rawProviders as Record<string, unknown> | undefined;
   const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
   const defaultDisplayName = cleanConfig(process.env[ENV_DISPLAY_NAME]) ?? "LiteLLM";
+  const parsedEnv = parseProviderEnvVars(process.env);
+  const primaryEnv = parsedEnv[PROVIDER_NAME.toUpperCase()];
 
   const primaryDefinition: ProviderDefinition = {
     name: PROVIDER_NAME,
@@ -689,6 +713,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     enableOAuth: true,
     allowInsecureHttp: defaultSettings?.allowInsecureHttp === true,
     oidc: defaultSettings?.oidc,
+    enableMcp: typeof defaultSettings?.enableMcp === "boolean" ? defaultSettings.enableMcp : primaryEnv?.enableMcp,
   };
 
   const secondaryProviders = new Map<string, IntermediateProvider>();
@@ -698,23 +723,24 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   if (jsonProviders) {
     for (const [name, raw] of Object.entries(jsonProviders)) {
       if (!isValidProviderName(name)) continue;
-      if (raw.enabled === false) continue;
+      const normalized = normalizeProviderSettings(raw);
+      if (!normalized) continue;
       secondaryProviders.set(name, {
         name,
-        displayName: stringSetting(raw.displayName),
-        baseUrl: stringSetting(raw.baseUrl),
-        apiKeyConfig: stringSetting(raw.apiKey),
-        headers: raw.headers,
-        allowInsecureHttp: parseBooleanSetting(raw.allowInsecureHttp),
-        useGcloudTokenAuth: parseBooleanSetting(raw.useGcloudTokenAuth),
-        enableOAuth: parseBooleanSetting(raw.enableOAuth),
-        oidc: raw.oidc,
+        displayName: stringSetting(normalized.displayName),
+        baseUrl: stringSetting(normalized.baseUrl),
+        apiKeyConfig: stringSetting(normalized.apiKey),
+        headers: normalized.headers,
+        allowInsecureHttp: parseBooleanSetting(normalized.allowInsecureHttp),
+        useGcloudTokenAuth: parseBooleanSetting(normalized.useGcloudTokenAuth),
+        enableOAuth: parseBooleanSetting(normalized.enableOAuth),
+        oidc: normalized.oidc,
+        enableMcp: typeof normalized.enableMcp === "boolean" ? normalized.enableMcp : undefined,
       });
     }
   }
 
   // 2. Scan env vars
-  const parsedEnv = parseProviderEnvVars(process.env);
   const claimedTokens = new Set<string>();
 
   // 3. Incorporate canonical list LITELLM_PROVIDERS
@@ -737,6 +763,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       enableOAuth: envData?.enableOAuth ?? existing?.enableOAuth,
       oidc: envData?.oidc ?? existing?.oidc,
       envPrefix: envData?.envPrefix ?? existing?.envPrefix,
+      enableMcp: envData?.enableMcp ?? existing?.enableMcp,
     });
   }
 
@@ -758,6 +785,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       enableOAuth: envData.enableOAuth ?? existing?.enableOAuth,
       oidc: envData.oidc ?? existing?.oidc,
       envPrefix: envData.envPrefix ?? existing?.envPrefix,
+      enableMcp: envData.enableMcp ?? existing?.enableMcp,
     });
   }
 
@@ -766,10 +794,9 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     if (name === PROVIDER_NAME) continue;
     if (!isValidProviderName(name)) continue;
 
-    const rawRecord =
-      typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as RawProviderSettings) : undefined;
+    const rawRecord = normalizeProviderSettings(raw);
 
-    if (!rawRecord || rawRecord.enabled === false) {
+    if (!rawRecord) {
       secondaryProviders.delete(name);
       continue;
     }
@@ -796,6 +823,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
         typeof rawRecord.enableOAuth === "boolean" ? rawRecord.enableOAuth : (existing?.enableOAuth ?? false),
       oidc: rawRecord.oidc ?? existing?.oidc,
       envPrefix: matchingEnvPrefix,
+      enableMcp: typeof rawRecord.enableMcp === "boolean" ? rawRecord.enableMcp : existing?.enableMcp,
     });
   }
 
@@ -813,6 +841,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       allowInsecureHttp: entry.allowInsecureHttp ?? false,
       oidc: entry.oidc,
       envPrefix: entry.envPrefix,
+      enableMcp: entry.enableMcp,
     });
   }
   return definitions;
@@ -2262,6 +2291,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const mcpIdentitySalt = randomBytes(32);
 
   function mcpServerConfig(definition: ProviderDefinition): McpServerConfig | undefined {
+    if (definition.enableMcp === false) return undefined;
     if (discoveryDisabledReason() || isHostOffline()) return undefined;
     let root: string;
     try {

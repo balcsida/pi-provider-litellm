@@ -137,6 +137,7 @@ Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identif
 | `LITELLM_PROVIDER_<NAME>_ALLOW_INSECURE_HTTP` | Set `"1"` or `"true"` to permit plaintext HTTP for non-loopback hosts |
 | `LITELLM_PROVIDER_<NAME>_USE_GCLOUD_AUTH` | Set `"1"` or `"true"` to enable Google ADC token authentication for this provider |
 | `LITELLM_PROVIDER_<NAME>_ENABLE_OAUTH` | Set `"1"` or `"true"` / `"0"` or `"false"` to enable or disable LiteLLM SSO/OAuth browser login |
+| `LITELLM_PROVIDER_<NAME>_ENABLE_MCP` / `_MCP_ENABLED` | Set `"0"` or `"false"` to disable MCP tool integration for this specific provider (or `"1"` / `"true"` to enable) |
 | `LITELLM_PROVIDER_<NAME>_OIDC` | JSON string or OpenID Connect issuer URL for direct IdP OIDC login |
 
 ##### Bulk provider configuration
@@ -244,7 +245,13 @@ LiteLLM Skills and MCP integration are enabled by default. Disable either featur
 }
 ```
 
-Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Restart Pi after changing these settings.
+Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server globally.
+
+MCP can also be enabled or disabled per provider:
+- In `~/.pi/agent/settings.json`: set `providers.<name>.mcp.enabled` (or `providers.<name>.enableMcp`) to `false` (or `true`).
+- In environment variables: set `LITELLM_PROVIDER_<NAME>_ENABLE_MCP` or `LITELLM_PROVIDER_<NAME>_MCP_ENABLED` to `"0"` or `"false"` to disable MCP for a specific provider.
+
+Restart Pi after changing these settings.
 
 `mcp.exposure` and `mcp.toolExposure` are passed to Pi unchanged and mean what they mean in a Pi `mcp.json` server entry: `codemode` (Pi's default when `exposure` is unset; callable from Pi's `codemode` scripts), `deferred` (declared to the model once Pi's `tool_search` loads it), `direct` (declared on every request), or `hidden`. `toolExposure` keys are tool names as LiteLLM's `/mcp` endpoint offers them, which LiteLLM prefixes with the server name, for example `github-search_code`; `*` matches any characters. Pi validates both settings, and an unusable value is reported once.
 
@@ -277,7 +284,7 @@ Native Messages authenticates with `x-api-key`; every transport carries the `x-l
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
 | `LITELLM_PROVIDERS` | unset | Canonical comma- or whitespace-separated list of provider IDs to register. |
 | `LITELLM_PROVIDERS_JSON` | unset | JSON string of provider configuration objects matching the `litellm.providers` settings schema. |
-| `LITELLM_PROVIDER_<NAME>_*` | unset | Per-provider environment variables for base URL, API key, headers, display name, OAuth, OIDC, and Google auth. See [Multi-provider environment variables](#multi-provider-environment-variables). |
+| `LITELLM_PROVIDER_<NAME>_*` | unset | Per-provider environment variables for base URL, API key, headers, display name, OAuth, OIDC, Google auth, and MCP enable/disable toggle (`_ENABLE_MCP` / `_MCP_ENABLED`). See [Multi-provider environment variables](#multi-provider-environment-variables). |
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only when their stored canonical proxy root exactly matches the active credential root, including any path prefix. URL-standard host casing and default ports are canonicalized, but paths remain case-sensitive. |
