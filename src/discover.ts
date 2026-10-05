@@ -26,7 +26,12 @@ import {
   wireString,
 } from "./model-groups.js";
 import { type ProxyVersion, type ProxyVersionFloor, probeProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
-import { loadPublicCatalog, type PublicCatalog, type PublicCatalogRecord } from "./public-catalog.js";
+import {
+  loadPublicCatalog,
+  PI_AZURE_PROVIDER,
+  type PublicCatalog,
+  type PublicCatalogRecord,
+} from "./public-catalog.js";
 import { intersectThinkingLevelMaps } from "./thinking-levels.js";
 import type {
   DiscoveredModel,
@@ -443,11 +448,11 @@ function nativeMessagesCatalog(
     : {};
 }
 
-const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider>> = {
+const ADAPTER_CATALOG_PROVIDERS: Readonly<Record<string, BuiltinProvider | undefined>> = {
   anthropic: "anthropic",
   claude: "anthropic",
-  azure: "azure-openai-responses",
-  azure_ai: "azure-openai-responses",
+  azure: toKnownProvider(PI_AZURE_PROVIDER),
+  azure_ai: toKnownProvider(PI_AZURE_PROVIDER),
   bedrock: "amazon-bedrock",
   bedrock_converse: "amazon-bedrock",
   chatgpt: "openai-codex",

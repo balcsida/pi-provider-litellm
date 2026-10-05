@@ -1,4 +1,4 @@
-export const LITELLM_DISCOVERY_VERSION = 5 as const;
+export const LITELLM_DISCOVERY_VERSION = 6 as const;
 
 export type BackendFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 

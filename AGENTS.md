@@ -7,7 +7,7 @@
 - Build output is `dist/`; do not edit generated output by hand or publish it.
 - Git and npm installs load `./src/index.ts` through `package.json` `pi.extensions`.
 - Node support starts at `>=22.19.0`; GitHub workflows currently run Node `26.5.0`.
-- Dev dependencies track Pi `1.0.0` while `peerDependencies` stay `>=0.99.2`. Pi installs packages without resolving
+- Dev dependencies track Pi `1.0.3` while `peerDependencies` stay `>=0.99.2`. Pi installs packages without resolving
   peers, so the `VERSION` check at the top of the extension factory enforces that floor (read through a namespace
   import, so a Pi without `VERSION` still reaches it); raise both together. Use newer Pi APIs only in ways Pi 0.99.2
   ignores or feature-detects, and do not import runtime symbols its `pi-ai` or `pi-coding-agent` lacks.

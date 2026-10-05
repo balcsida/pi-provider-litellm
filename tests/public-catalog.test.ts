@@ -1,7 +1,7 @@
 import { mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModels } from "@earendil-works/pi-ai/compat";
+import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPublicCatalog } from "../src/public-catalog.js";
 
@@ -75,11 +75,35 @@ describe("loadPublicCatalog", () => {
 
       expect(catalog.lookup(provider, "gpt-5.6-sol")).toMatchObject({
         source: "pi-adapter",
-        provider: "azure-openai-responses",
+        provider: "azure",
         limits: { context: 1_050_000, output: 128_000 },
       });
     },
   );
+
+  it("reads the Azure catalog under its name before Pi 1.0.3", async () => {
+    const actual = await vi.importActual<typeof import("@earendil-works/pi-ai/compat")>("@earendil-works/pi-ai/compat");
+    vi.mocked(getProviders).mockReturnValueOnce([
+      ...actual.getProviders().filter((provider) => provider !== "azure"),
+      "azure-openai-responses",
+    ] as never);
+    vi.mocked(getModels).mockImplementation(((provider: string) =>
+      actual.getModels((provider === "azure-openai-responses" ? "azure" : provider) as never)) as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response({})),
+    );
+    vi.resetModules();
+    const { loadPublicCatalog: loadLegacyCatalog } = await import("../src/public-catalog.js");
+    const dir = await mkdtemp(join(tmpdir(), "public-catalog-test-"));
+    const catalog = await loadLegacyCatalog({ cachePath: join(dir, "models-dev.json") });
+
+    expect(catalog.lookup("azure", "gpt-5.6-sol")).toMatchObject({
+      source: "pi-adapter",
+      provider: "azure-openai-responses",
+      limits: { context: 1_050_000, output: 128_000 },
+    });
+  });
 
   it.each(["azure", "azure_ai"])(
     "keeps %s as the Pi fallback for a sparse OpenAI models.dev record",
@@ -97,7 +121,7 @@ describe("loadPublicCatalog", () => {
       expect(catalog.lookup(provider, "gpt-5.6-sol")).toMatchObject({
         source: "models.dev",
         provider: "openai",
-        piProvider: "azure-openai-responses",
+        piProvider: "azure",
         effortLevels: ["low", "high"],
       });
     },
