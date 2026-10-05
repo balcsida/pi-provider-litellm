@@ -15,6 +15,8 @@ export const MANAGED_ENV_VARS = [
   "LITELLM_DISCOVERY_TIMEOUT_MS",
   "LITELLM_VERBOSE_DISCOVERY",
   "LITELLM_GCLOUD_TOKEN_AUTH",
+  "LITELLM_PROVIDERS",
+  "LITELLM_PROVIDERS_JSON",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "PI_OFFLINE",
   "APPDATA",
@@ -25,6 +27,9 @@ export const MANAGED_ENV_VARS = [
 export function hermeticChildEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const name of MANAGED_ENV_VARS) delete env[name];
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("LITELLM_PROVIDER_")) delete env[name];
+  }
   return { ...env, ...overrides };
 }
 
@@ -40,8 +45,10 @@ export function useHermeticEnv(extra: readonly string[] = []): void {
   let saved: Array<[string, string | undefined]> = [];
 
   beforeEach(() => {
-    saved = managed.map((name) => [name, process.env[name]]);
-    for (const name of managed) delete process.env[name];
+    const providerVars = Object.keys(process.env).filter((name) => name.startsWith("LITELLM_PROVIDER_"));
+    const allManaged = Array.from(new Set([...managed, ...providerVars]));
+    saved = allManaged.map((name) => [name, process.env[name]]);
+    for (const name of allManaged) delete process.env[name];
   });
 
   afterEach(() => {

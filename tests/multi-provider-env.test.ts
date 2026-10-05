@@ -179,6 +179,25 @@ describe("parseProviderEnvVars", () => {
     expect(parsed.TEST.enableOAuth).toBe(false);
   });
 
+  it("parses ENABLE_MCP and MCP_ENABLED boolean variations", () => {
+    const env: NodeJS.ProcessEnv = {
+      LITELLM_PROVIDER_P1_ENABLE_MCP: "0",
+      LITELLM_PROVIDER_P2_ENABLE_MCP: "false",
+      LITELLM_PROVIDER_P3_MCP_ENABLED: "0",
+      LITELLM_PROVIDER_P4_MCP_ENABLED: "false",
+      LITELLM_PROVIDER_P5_ENABLE_MCP: "1",
+      LITELLM_PROVIDER_P6_MCP_ENABLED: "true",
+    };
+
+    const parsed = parseProviderEnvVars(env);
+    expect(parsed.P1.enableMcp).toBe(false);
+    expect(parsed.P2.enableMcp).toBe(false);
+    expect(parsed.P3.enableMcp).toBe(false);
+    expect(parsed.P4.enableMcp).toBe(false);
+    expect(parsed.P5.enableMcp).toBe(true);
+    expect(parsed.P6.enableMcp).toBe(true);
+  });
+
   it("handles tokens containing reserved substrings like NAME or API", () => {
     const env: NodeJS.ProcessEnv = {
       LITELLM_PROVIDER_MY_NAME_NAME: "custom-name-override",
@@ -391,6 +410,62 @@ describe("getProviderDefinitions with environment variables", () => {
 
     const defs = getProviderDefinitions(settings);
     expect(defs.map((d) => d.name)).toEqual(["litellm"]);
+  });
+
+  it("sets enableMcp on ProviderDefinition from environment variables", () => {
+    process.env.LITELLM_PROVIDER_DISABLED_MCP_BASE_URL = "https://disabled-mcp.example.com";
+    process.env.LITELLM_PROVIDER_DISABLED_MCP_ENABLE_MCP = "false";
+    process.env.LITELLM_PROVIDER_ENABLED_MCP_BASE_URL = "https://enabled-mcp.example.com";
+    process.env.LITELLM_PROVIDER_ENABLED_MCP_MCP_ENABLED = "1";
+    process.env.LITELLM_PROVIDER_DEFAULT_MCP_BASE_URL = "https://default-mcp.example.com";
+    process.env.LITELLM_PROVIDER_LITELLM_ENABLE_MCP = "0";
+
+    const defs = getProviderDefinitions(undefined);
+    const litellm = defs.find((d) => d.name === "litellm");
+    const disabledMcp = defs.find((d) => d.name === "disabled-mcp");
+    const enabledMcp = defs.find((d) => d.name === "enabled-mcp");
+    const defaultMcp = defs.find((d) => d.name === "default-mcp");
+
+    expect(litellm?.enableMcp).toBe(false);
+    expect(disabledMcp?.enableMcp).toBe(false);
+    expect(enabledMcp?.enableMcp).toBe(true);
+    expect(defaultMcp?.enableMcp).toBeUndefined();
+  });
+
+  it("configures or overrides enableMcp via settings.json mcp.enabled or enableMcp", () => {
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_ENABLE_MCP = "1";
+    process.env.LITELLM_PROVIDER_TEAM_A_BASE_URL = "https://team-a.example.com";
+    process.env.LITELLM_PROVIDER_TEAM_A_ENABLE_MCP = "0";
+
+    const settings = {
+      providers: {
+        litellm: {
+          enableMcp: false,
+        },
+        corp: {
+          mcp: { enabled: false },
+        },
+        "team-a": {
+          enableMcp: true,
+        },
+        "team-b": {
+          baseUrl: "https://team-b.example.com",
+          mcp: false,
+        },
+      },
+    };
+
+    const defs = getProviderDefinitions(settings);
+    const litellm = defs.find((d) => d.name === "litellm");
+    const corp = defs.find((d) => d.name === "corp");
+    const teamA = defs.find((d) => d.name === "team-a");
+    const teamB = defs.find((d) => d.name === "team-b");
+
+    expect(litellm?.enableMcp).toBe(false);
+    expect(corp?.enableMcp).toBe(false);
+    expect(teamA?.enableMcp).toBe(true);
+    expect(teamB?.enableMcp).toBe(false);
   });
 });
 
@@ -835,5 +910,170 @@ describe("Per-provider credential and endpoint resolution", () => {
 
       expect(registeredWhenPrompted).toEqual([false, false]);
     });
+  });
+});
+
+describe("Per-provider MCP registration toggle", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("LITELLM_") || key === "PI_OFFLINE") {
+        delete process.env[key];
+      }
+    }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  it("does not register MCP server for a provider when enableMcp is false", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Response.json({ data: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: {
+          type: "api_key",
+          key: "sk-litellm",
+          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+        },
+        "team-enabled": {
+          type: "api_key",
+          key: "sk-enabled",
+          env: { LITELLM_BASE_URL: "https://enabled.example.com" },
+        },
+        "team-disabled-env": {
+          type: "api_key",
+          key: "sk-disabled-env",
+          env: { LITELLM_BASE_URL: "https://disabled-env.example.com" },
+        },
+        "team-disabled-settings": {
+          type: "api_key",
+          key: "sk-disabled-settings",
+          env: { LITELLM_BASE_URL: "https://disabled-settings.example.com" },
+        },
+      }),
+      "utf8",
+    );
+
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "team-enabled": {
+              baseUrl: "https://enabled.example.com",
+            },
+            "team-disabled-env": {
+              baseUrl: "https://disabled-env.example.com",
+            },
+            "team-disabled-settings": {
+              baseUrl: "https://disabled-settings.example.com",
+              mcp: { enabled: false },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-litellm";
+    process.env.LITELLM_PROVIDER_TEAM_DISABLED_ENV_ENABLE_MCP = "false";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.mcpServers.has("litellm")).toBe(true);
+    expect(pi.mcpServers.has("team-enabled")).toBe(true);
+    expect(pi.mcpServers.has("team-disabled-env")).toBe(false);
+    expect(pi.mcpServers.has("team-disabled-settings")).toBe(false);
+  });
+
+  it("does not register MCP server for primary litellm provider when disabled via env or settings", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Response.json({ data: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: {
+          type: "api_key",
+          key: "sk-litellm",
+          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+        },
+      }),
+      "utf8",
+    );
+
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            litellm: {
+              enableMcp: false,
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-litellm";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.mcpServers.has("litellm")).toBe(false);
+  });
+
+  it("does not register MCP server for primary litellm provider when disabled via env var", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Response.json({ data: [] });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: {
+          type: "api_key",
+          key: "sk-litellm",
+          env: { LITELLM_BASE_URL: "https://proxy.example.com" },
+        },
+      }),
+      "utf8",
+    );
+
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-litellm";
+    process.env.LITELLM_PROVIDER_LITELLM_ENABLE_MCP = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.mcpServers.has("litellm")).toBe(false);
   });
 });
