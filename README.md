@@ -42,11 +42,17 @@ Inside pi:
 /login litellm
 ```
 
-To configure an API key, run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key`. With `/login litellm`, choose `Sign in with an API key` directly.
+Or for a configured alias provider (e.g. `team-a`):
+
+```
+/login team-a
+```
+
+To configure an API key, run `/login`, choose `Sign in with an API key`, then choose `LiteLLM API key` (or `<Provider Name> API key`). With `/login litellm`, choose `Sign in with an API key` directly; similarly, run `/login <alias>` to sign in to any configured alias directly.
 
 You'll be prompted for the base URL and API key. Credentials are persisted to `~/.pi/agent/auth.json`.
 
-If a proxy URL is already known — from `providers.<name>.baseUrl`, `LITELLM_BASE_URL`, or a previous login — pi offers it as the first option instead of asking you to retype it. Pick `Enter a different URL…` to point at another proxy.
+If a proxy URL is already known — from `providers.<name>.baseUrl`, `LITELLM_PROVIDER_<NAME>_BASE_URL`, `LITELLM_BASE_URL`, or a previous login — pi offers it as the first option instead of asking you to retype it. Pick `Enter a different URL…` to point at another proxy.
 
 #### Enterprise SSO login
 
@@ -103,12 +109,48 @@ Pi never derives the IdP from the proxy: LiteLLM's own `/.well-known/openid-conf
 
 ### Option B — environment variables
 
+#### Single provider
+
 ```bash
 export LITELLM_BASE_URL="https://litellm.your-domain.com"
 export LITELLM_API_KEY="sk-..."
 ```
 
 Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`; native Messages uses the proxy root directly.
+
+#### Multi-provider environment variables
+
+You can configure additional LiteLLM provider aliases directly through environment variables without editing `settings.json`.
+
+##### Per-provider environment variables (`LITELLM_PROVIDER_<NAME>_*`)
+
+Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identifier (e.g., `TEAM_A`, `CORP_EAST`):
+
+| Variable | Effect |
+|---|---|
+| `LITELLM_PROVIDER_<NAME>_BASE_URL` | LiteLLM proxy base URL for this provider (e.g. `https://team-a.example.com`) |
+| `LITELLM_PROVIDER_<NAME>_API_KEY` | API key / bearer token for this provider |
+| `LITELLM_PROVIDER_<NAME>_API_KEY_HELPER` | Shell command that prints a fresh token for this provider |
+| `LITELLM_PROVIDER_<NAME>_HEADERS` | JSON string of extra request headers for this provider |
+| `LITELLM_PROVIDER_<NAME>_DISPLAY_NAME` | Custom display name shown in Pi UI |
+| `LITELLM_PROVIDER_<NAME>_NAME` | Explicit provider ID override (e.g. `custom-name`) |
+| `LITELLM_PROVIDER_<NAME>_ALLOW_INSECURE_HTTP` | Set `"1"` or `"true"` to permit plaintext HTTP for non-loopback hosts |
+| `LITELLM_PROVIDER_<NAME>_USE_GCLOUD_AUTH` | Set `"1"` or `"true"` to enable Google ADC token authentication for this provider |
+| `LITELLM_PROVIDER_<NAME>_ENABLE_OAUTH` | Set `"1"` or `"true"` / `"0"` or `"false"` to enable or disable LiteLLM SSO/OAuth browser login |
+| `LITELLM_PROVIDER_<NAME>_OIDC` | JSON string or OpenID Connect issuer URL for direct IdP OIDC login |
+
+##### Bulk provider configuration
+
+- **`LITELLM_PROVIDERS`**: Canonical comma- or whitespace-separated list of provider IDs to register (e.g., `export LITELLM_PROVIDERS="team-a, team-b, corp-east"`).
+- **`LITELLM_PROVIDERS_JSON`**: Structured JSON string matching the `litellm.providers` schema in `settings.json` (e.g., `export LITELLM_PROVIDERS_JSON='{"team-a": {"baseUrl": "https://team-a.example.com", "apiKey": "sk-team-a"}}'`).
+
+##### Provider ID naming rules
+
+- **Default naming:** The uppercase token `<NAME>` in `LITELLM_PROVIDER_<NAME>_*` is automatically converted to lowercase kebab-case (e.g., `TEAM_A` becomes `team-a`, `CORP_EAST` becomes `corp-east`, and `DEV` becomes `dev`).
+- **Explicit override:** Set `LITELLM_PROVIDER_<NAME>_NAME` to specify an explicit provider ID (e.g., `LITELLM_PROVIDER_TEAM_A_NAME="custom-team"`).
+- **Canonical IDs:** Provider IDs specified in `LITELLM_PROVIDERS` or keys in `LITELLM_PROVIDERS_JSON` preserve their declared IDs.
+- **Validation:** Provider IDs must match `/^[a-z0-9][a-z0-9_-]{0,63}$/` (1–64 characters, lowercase alphanumeric with `-` or `_`, starting with an alphanumeric character).
+- **Reserved names:** Tool and command names (`mcp`, `skills`, `codemode`, `tool_search`, and `litellm` as an alias) cannot be used as secondary provider IDs.
 
 ### Multiple LiteLLM provider aliases
 
@@ -157,11 +199,28 @@ Provider fields:
 | `apiKey` | `LITELLM_API_KEY_HELPER`/`LITELLM_API_KEY` for `litellm`; required for aliases | Pi config value for this provider's key. Use `$ENV_VAR`, `${ENV_VAR}`, `!command`, or a literal key. Escape a literal `$` as `$$`. |
 | `headers` | `$LITELLM_HEADERS` for `litellm`; unset for aliases | JSON string env reference or inline object of request headers |
 | `displayName` | `LITELLM_DISPLAY_NAME` / `"LiteLLM"` for `litellm`; alias name for aliases | Label shown in Pi UI |
-| `enabled` | `true` | Set `false` to skip an alias |
-| `oidc` | unset | `litellm` only. Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
+| `enabled` | `true` | Set `false` to skip or disable an alias |
+| `oidc` | unset | Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
 | `allowInsecureHttp` | `false` | Set `true` to permit plaintext HTTP for this provider, for example `http://host.docker.internal`. Credentials and request data will not be encrypted. Loopback HTTP works without this setting. |
+| `useGcloudTokenAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable Google Application Default Credentials (ADC) token authentication for this provider. |
+| `enableOAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable LiteLLM SSO/OAuth browser login for this provider. |
 
-`/login litellm` and Google ADC token auth remain scoped to the default `litellm` provider. Aliases use their configured `apiKey` or manually stored auth entries matching the alias name.
+#### Configuration & credential precedence
+
+- **Provider definition merging precedence:**
+  When discovering and configuring provider aliases from multiple sources, definitions are merged in the following order:
+  1. Base provider definitions from `LITELLM_PROVIDERS_JSON`
+  2. Discovered environment variables (`LITELLM_PROVIDER_<NAME>_*` and canonical list in `LITELLM_PROVIDERS`)
+  3. Disk settings from `~/.pi/agent/settings.json` under `litellm.providers`. Disk settings override environment definitions, and setting `"enabled": false` removes or skips the provider.
+
+- **Credential resolution precedence:**
+  When authenticating requests for any provider:
+  1. Saved interactive credentials in `~/.pi/agent/auth.json` (from `/login <provider>` or OAuth SSO)
+  2. Google Application Default Credentials (when `useGcloudTokenAuth` / `_USE_GCLOUD_AUTH` / `LITELLM_GCLOUD_TOKEN_AUTH` is active)
+  3. Configured `apiKey` from settings (`settings.json` or `LITELLM_PROVIDERS_JSON`, including `$ENV_VAR` and `!command`)
+  4. Provider-scoped API key helper (`LITELLM_PROVIDER_<NAME>_API_KEY_HELPER`)
+  5. Provider-scoped API key (`LITELLM_PROVIDER_<NAME>_API_KEY`)
+  6. For the default `litellm` provider only: fallback to global `LITELLM_API_KEY_HELPER` then `LITELLM_API_KEY`.
 
 ### Optional LiteLLM features
 
@@ -216,6 +275,9 @@ Native Messages authenticates with `x-api-key`; every transport carries the `x-l
 | `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. The extension runs it while resolving request auth, and Pi's per-request auth path is uncached, so rotating/short-lived tokens stay fresh. |
 | `LITELLM_DISPLAY_NAME` | `LiteLLM` | Custom display name for the default `litellm` provider in the Pi UI. |
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
+| `LITELLM_PROVIDERS` | unset | Canonical comma- or whitespace-separated list of provider IDs to register. |
+| `LITELLM_PROVIDERS_JSON` | unset | JSON string of provider configuration objects matching the `litellm.providers` settings schema. |
+| `LITELLM_PROVIDER_<NAME>_*` | unset | Per-provider environment variables for base URL, API key, headers, display name, OAuth, OIDC, and Google auth. See [Multi-provider environment variables](#multi-provider-environment-variables). |
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only when their stored canonical proxy root exactly matches the active credential root, including any path prefix. URL-standard host casing and default ports are canonicalized, but paths remain case-sensitive. |
