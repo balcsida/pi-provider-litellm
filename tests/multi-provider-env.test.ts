@@ -404,12 +404,111 @@ describe("getProviderDefinitions with environment variables", () => {
     const settings = {
       providers: {
         tool_search: { baseUrl: "https://tool.example.com" },
-        "BAD-NAME": { baseUrl: "https://bad.example.com" },
+        skills: { baseUrl: "https://skills.example.com" },
+        mcp: { baseUrl: "https://mcp.example.com" },
+        "": { baseUrl: "https://empty.example.com" },
       },
     };
 
     const defs = getProviderDefinitions(settings);
     expect(defs.map((d) => d.name)).toEqual(["litellm"]);
+  });
+
+  it("preserves settings.json aliases like TeamA and team.corp for backwards compatibility", () => {
+    const settings = {
+      providers: {
+        TeamA: {
+          baseUrl: "https://teama.example.com",
+          apiKey: "sk-teama",
+        },
+        "team.corp": {
+          baseUrl: "https://teamcorp.example.com",
+          displayName: "Team Corp",
+        },
+      },
+    };
+
+    const defs = getProviderDefinitions(settings);
+    expect(defs.map((d) => d.name)).toEqual(["litellm", "TeamA", "team.corp"]);
+
+    const teamA = defs.find((d) => d.name === "TeamA");
+    expect(teamA).toMatchObject({
+      name: "TeamA",
+      displayName: "TeamA",
+      baseUrl: "https://teama.example.com",
+      apiKeyConfig: "sk-teama",
+    });
+
+    const teamCorp = defs.find((d) => d.name === "team.corp");
+    expect(teamCorp).toMatchObject({
+      name: "team.corp",
+      displayName: "Team Corp",
+      baseUrl: "https://teamcorp.example.com",
+    });
+  });
+
+  it("ensures disabled providers in LITELLM_PROVIDERS_JSON are not re-added by subsequent env steps", () => {
+    process.env.LITELLM_PROVIDERS_JSON = JSON.stringify({
+      "team-a": {
+        baseUrl: "https://json-teama.example.com",
+        enabled: false,
+      },
+      "team-b": {
+        baseUrl: "https://json-teamb.example.com",
+        enabled: false,
+      },
+    });
+
+    // Attempt to re-add via canonical list LITELLM_PROVIDERS
+    process.env.LITELLM_PROVIDERS = "team-a,team-c";
+    process.env.LITELLM_PROVIDER_TEAM_A_BASE_URL = "https://env-teama.example.com";
+
+    // Attempt to re-add via prefix-scanning
+    process.env.LITELLM_PROVIDER_TEAM_B_BASE_URL = "https://env-teamb.example.com";
+    process.env.LITELLM_PROVIDER_TEAM_C_BASE_URL = "https://env-teamc.example.com";
+
+    const defs = getProviderDefinitions(undefined);
+    expect(defs.map((d) => d.name)).toEqual(["litellm", "team-c"]);
+    expect(defs.find((d) => d.name === "team-a")).toBeUndefined();
+    expect(defs.find((d) => d.name === "team-b")).toBeUndefined();
+  });
+
+  it("prevents distinct canonical IDs colliding on token (e.g. team-a vs team_a) from sharing prefix", async () => {
+    process.env.LITELLM_PROVIDERS = "team-a,team_a";
+    process.env.LITELLM_PROVIDER_TEAM_A_BASE_URL = "https://teama.example.com";
+    process.env.LITELLM_PROVIDER_TEAM_A_API_KEY = "sk-team-a";
+
+    const defs = getProviderDefinitions(undefined);
+    expect(defs.map((d) => d.name)).toEqual(["litellm", "team-a", "team_a"]);
+
+    const teamHyphen = defs.find((d) => d.name === "team-a");
+    expect(teamHyphen).toBeDefined();
+    expect(teamHyphen?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
+
+    const teamUnderscore = defs.find((d) => d.name === "team_a");
+    expect(teamUnderscore).toBeDefined();
+    expect(teamUnderscore?.envPrefix).toBeUndefined();
+
+    const teamHyphenCreds = await resolveCredentials(teamHyphen!);
+    expect(teamHyphenCreds.baseUrl).toBe("https://teama.example.com");
+    expect(teamHyphenCreds.apiKey).toBe("sk-team-a");
+
+    const teamUnderscoreCreds = await resolveCredentials(teamUnderscore!);
+    expect(teamUnderscoreCreds.baseUrl).toBeUndefined();
+    expect(teamUnderscoreCreds.apiKey).toBeUndefined();
+  });
+
+  it("does not spawn an alias provider from LITELLM_PROVIDER_LITELLM_* variables", () => {
+    process.env.LITELLM_PROVIDER_LITELLM_NAME = "team";
+    process.env.LITELLM_PROVIDER_LITELLM_ENABLE_MCP = "0";
+
+    const defs = getProviderDefinitions(undefined);
+    expect(defs.map((d) => d.name)).toEqual(["litellm"]);
+
+    const litellm = defs.find((d) => d.name === "litellm");
+    expect(litellm?.enableMcp).toBe(false);
+
+    expect(defs.find((d) => d.name === "team")).toBeUndefined();
   });
 
   it("sets enableMcp on ProviderDefinition from environment variables", () => {
@@ -909,6 +1008,69 @@ describe("Per-provider credential and endpoint resolution", () => {
       await corp?.auth.apiKey?.login?.(interaction(prompt));
 
       expect(registeredWhenPrompted).toEqual([false, false]);
+      expect(pi.mcpServers.has("corp")).toBe(false);
+
+      for (const handler of pi.handlers.get("before_agent_start") ?? []) {
+        await handler({ systemPrompt: "" }, {});
+      }
+      expect(pi.mcpServers.has("corp")).toBe(true);
+    });
+
+    it("does not call syncMcpServer in complete() and does not re-enable disabled MCP", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/model/info")) return Response.json({ data: [] });
+        throw new Error(`unexpected URL: ${url}`);
+      });
+      const agentDir = await makeAgentDir();
+      await writeFile(
+        join(agentDir, "auth.json"),
+        JSON.stringify({
+          corp: {
+            type: "api_key",
+            key: "sk-stored",
+            env: { LITELLM_BASE_URL: "https://corp.example.com" },
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(agentDir, "settings.json"),
+        JSON.stringify({
+          litellm: {
+            providers: {
+              corp: {
+                baseUrl: "https://corp.example.com",
+                enableMcp: false,
+              },
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const extension = await loadExtension(agentDir);
+      const pi = createPi();
+      await extension(pi);
+
+      expect(pi.mcpServers.has("corp")).toBe(false);
+
+      const prompt = vi.fn(async (options: Parameters<AuthInteraction["prompt"]>[0]) => {
+        if ("options" in options && options.options) {
+          return options.options[0]!.id;
+        }
+        return "sk-new-key";
+      });
+
+      const corp = pi.providers.find((p) => p.id === "corp");
+      await corp?.auth.apiKey?.login?.(interaction(prompt));
+
+      expect(pi.mcpServers.has("corp")).toBe(false);
+
+      for (const handler of pi.handlers.get("before_agent_start") ?? []) {
+        await handler({ systemPrompt: "" }, {});
+      }
+      expect(pi.mcpServers.has("corp")).toBe(false);
     });
   });
 });

@@ -717,12 +717,17 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   };
 
   const secondaryProviders = new Map<string, IntermediateProvider>();
+  const disabledProviders = new Set<string>();
 
   // 1. Incorporate LITELLM_PROVIDERS_JSON
   const jsonProviders = parseProvidersJson(process.env[ENV_PROVIDERS_JSON]);
   if (jsonProviders) {
     for (const [name, raw] of Object.entries(jsonProviders)) {
       if (!isValidProviderName(name)) continue;
+      if (raw.enabled === false) {
+        disabledProviders.add(name);
+        continue;
+      }
       const normalized = normalizeProviderSettings(raw);
       if (!normalized) continue;
       secondaryProviders.set(name, {
@@ -741,14 +746,21 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   }
 
   // 2. Scan env vars
-  const claimedTokens = new Set<string>();
+  const claimedTokens = new Set<string>([PROVIDER_NAME.toUpperCase()]);
 
   // 3. Incorporate canonical list LITELLM_PROVIDERS
   const canonicalList = parseCanonicalProviderList(process.env[ENV_PROVIDERS]);
+  const tokenOwners = new Map<string, string>([[PROVIDER_NAME.toUpperCase(), PROVIDER_NAME]]);
   for (const canonicalId of canonicalList) {
     if (!isValidProviderName(canonicalId)) continue;
+    if (disabledProviders.has(canonicalId)) continue;
     const token = canonicalId.toUpperCase().replace(/-/g, "_");
-    const envData = parsedEnv[token];
+    const owner = tokenOwners.get(token);
+    const hasCollision = owner !== undefined && owner !== canonicalId;
+    if (!hasCollision && !tokenOwners.has(token)) {
+      tokenOwners.set(token, canonicalId);
+    }
+    const envData = !hasCollision ? parsedEnv[token] : undefined;
     if (envData) claimedTokens.add(token);
 
     const existing = secondaryProviders.get(canonicalId);
@@ -772,6 +784,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     if (claimedTokens.has(token)) continue;
     const providerId = envData.name ?? token.toLowerCase().replace(/_/g, "-");
     if (!isValidProviderName(providerId)) continue;
+    if (disabledProviders.has(providerId) || disabledProviders.has(token.toLowerCase())) continue;
 
     const existing = secondaryProviders.get(providerId);
     secondaryProviders.set(providerId, {
@@ -792,7 +805,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   // 5. Merge with settings.json (disk settings override env vars; enabled === false excludes)
   for (const [name, raw] of Object.entries(providerSettings ?? {})) {
     if (name === PROVIDER_NAME) continue;
-    if (!isValidProviderName(name)) continue;
+    if (typeof name !== "string" || name.length === 0 || RESERVED_PROVIDER_NAMES.has(name)) continue;
 
     const rawRecord = normalizeProviderSettings(raw);
 
@@ -2474,7 +2487,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       start: () => dropMcpServer(definition),
       complete: () => {
         loginGeneration++;
-        syncMcpServer(definition);
       },
     };
     const auth = createProviderAuth(
