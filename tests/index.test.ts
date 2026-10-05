@@ -230,6 +230,65 @@ describe("extension startup", () => {
     expect(pi.providers.map((provider) => provider.id)).toEqual(["litellm"]);
   });
 
+  it("sets the default provider display name from LITELLM_DISPLAY_NAME", async () => {
+    process.env.LITELLM_DISPLAY_NAME = "Acme Gateway";
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("Acme Gateway");
+  });
+
+  it("prefers settings.json displayName over LITELLM_DISPLAY_NAME", async () => {
+    process.env.LITELLM_DISPLAY_NAME = "Env Gateway";
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { providers: { litellm: { displayName: "Config Gateway" } } } }),
+    );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("Config Gateway");
+  });
+
+  it.each(["", "   ", "undefined"])("falls back to LiteLLM when LITELLM_DISPLAY_NAME is %j", async (value) => {
+    process.env.LITELLM_DISPLAY_NAME = value;
+    const extension = await loadExtension(await makeAgentDir());
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("LiteLLM");
+  });
+
+  it("does not apply LITELLM_DISPLAY_NAME to alias providers", async () => {
+    process.env.LITELLM_DISPLAY_NAME = "Custom Gateway";
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            "litellm-alias": {},
+            "custom-named": { displayName: "Custom Name" },
+          },
+        },
+      }),
+    );
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+
+    await extension(pi);
+
+    expect(pi.providers.find((p) => p.id === "litellm")?.name).toBe("Custom Gateway");
+    expect(pi.providers.find((p) => p.id === "litellm-alias")?.name).toBe("litellm-alias");
+    expect(pi.providers.find((p) => p.id === "custom-named")?.name).toBe("Custom Name");
+  });
+
   it("warns once per provider and route when a LiteLLM fallback serves the request", async () => {
     const agentDir = await makeAgentDir();
     await writeFile(

@@ -37,6 +37,7 @@ const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
+const ENV_DISPLAY_NAME = "LITELLM_DISPLAY_NAME";
 const GCLOUD_ADC_SOURCE = "gcloud ADC";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
@@ -496,6 +497,7 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
   const rawProviders = settings?.providers && typeof settings.providers === "object" ? settings.providers : undefined;
   const providerSettings = rawProviders as Record<string, unknown> | undefined;
   const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
+  const defaultDisplayName = cleanConfig(process.env[ENV_DISPLAY_NAME]) ?? "LiteLLM";
 
   const makeDefinition = (
     name: string,
@@ -503,7 +505,7 @@ function getProviderDefinitions(settings: Record<string, unknown> | undefined): 
     isDefault: boolean,
   ): ProviderDefinition => ({
     name,
-    displayName: stringSetting(raw?.displayName) ?? (isDefault ? "LiteLLM" : name),
+    displayName: stringSetting(raw?.displayName) ?? (isDefault ? defaultDisplayName : name),
     baseUrl: stringSetting(raw?.baseUrl),
     apiKeyConfig: stringSetting(raw?.apiKey),
     headers: raw?.headers ?? (isDefault ? `$${ENV_HEADERS}` : undefined),
