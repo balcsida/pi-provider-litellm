@@ -99,7 +99,7 @@ export type ProviderDefinition = {
 const RESERVED_PROVIDER_NAMES = new Set(["mcp", "skills", "codemode", "tool_search", "litellm"]);
 const PROVIDER_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const PROVIDER_ENV_VAR_REGEX =
-  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|OIDC|ENABLE_MCP|MCP_ENABLED)$/;
+  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|ENABLE_MCP|MCP_ENABLED)$/;
 
 export function isValidProviderName(name: string): boolean {
   if (typeof name !== "string") return false;
@@ -158,7 +158,6 @@ export type ParsedProviderEnv = {
   allowInsecureHttp?: boolean;
   useGcloudTokenAuth?: boolean;
   enableOAuth?: boolean;
-  oidc?: unknown;
   enableMcp?: boolean;
 };
 
@@ -211,17 +210,6 @@ export function parseProviderEnvVars(env: NodeJS.ProcessEnv): Record<string, Par
       case "MCP_ENABLED":
         entry.enableMcp = parseBooleanSetting(val);
         break;
-      case "OIDC": {
-        const trimmed = cleanConfig(val);
-        if (trimmed) {
-          try {
-            entry.oidc = JSON.parse(trimmed);
-          } catch {
-            entry.oidc = trimmed;
-          }
-        }
-        break;
-      }
     }
   }
   return result;
@@ -689,7 +677,6 @@ type IntermediateProvider = {
   allowInsecureHttp?: boolean;
   useGcloudTokenAuth?: boolean;
   enableOAuth?: boolean;
-  oidc?: unknown;
   envPrefix?: string;
   enableMcp?: boolean;
 };
@@ -739,7 +726,6 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
         allowInsecureHttp: parseBooleanSetting(normalized.allowInsecureHttp),
         useGcloudTokenAuth: parseBooleanSetting(normalized.useGcloudTokenAuth),
         enableOAuth: parseBooleanSetting(normalized.enableOAuth),
-        oidc: normalized.oidc,
         enableMcp: typeof normalized.enableMcp === "boolean" ? normalized.enableMcp : undefined,
       });
     }
@@ -773,7 +759,6 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       allowInsecureHttp: envData?.allowInsecureHttp ?? existing?.allowInsecureHttp,
       useGcloudTokenAuth: envData?.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
       enableOAuth: envData?.enableOAuth ?? existing?.enableOAuth,
-      oidc: envData?.oidc ?? existing?.oidc,
       envPrefix: envData?.envPrefix ?? existing?.envPrefix,
       enableMcp: envData?.enableMcp ?? existing?.enableMcp,
     });
@@ -786,6 +771,8 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
     if (!isValidProviderName(providerId)) continue;
     if (disabledProviders.has(providerId) || disabledProviders.has(token.toLowerCase())) continue;
 
+    tokenOwners.set(token, providerId);
+
     const existing = secondaryProviders.get(providerId);
     secondaryProviders.set(providerId, {
       name: providerId,
@@ -796,7 +783,6 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       allowInsecureHttp: envData.allowInsecureHttp ?? existing?.allowInsecureHttp,
       useGcloudTokenAuth: envData.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
       enableOAuth: envData.enableOAuth ?? existing?.enableOAuth,
-      oidc: envData.oidc ?? existing?.oidc,
       envPrefix: envData.envPrefix ?? existing?.envPrefix,
       enableMcp: envData.enableMcp ?? existing?.enableMcp,
     });
@@ -816,7 +802,15 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
 
     const existing = secondaryProviders.get(name);
     const token = name.toUpperCase().replace(/-/g, "_");
-    const matchingEnvPrefix = existing?.envPrefix ?? (parsedEnv[token] ? `LITELLM_PROVIDER_${token}` : undefined);
+    let matchingEnvPrefix = existing ? existing.envPrefix : undefined;
+    if (!existing) {
+      const owner = tokenOwners.get(token);
+      if ((owner === undefined || owner === name) && !claimedTokens.has(token) && parsedEnv[token]) {
+        matchingEnvPrefix = `LITELLM_PROVIDER_${token}`;
+        tokenOwners.set(token, name);
+        claimedTokens.add(token);
+      }
+    }
 
     secondaryProviders.set(name, {
       name,
@@ -834,7 +828,6 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
           : (existing?.useGcloudTokenAuth ?? false),
       enableOAuth:
         typeof rawRecord.enableOAuth === "boolean" ? rawRecord.enableOAuth : (existing?.enableOAuth ?? false),
-      oidc: rawRecord.oidc ?? existing?.oidc,
       envPrefix: matchingEnvPrefix,
       enableMcp: typeof rawRecord.enableMcp === "boolean" ? rawRecord.enableMcp : existing?.enableMcp,
     });
@@ -852,7 +845,7 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
       useGcloudTokenAuth: entry.useGcloudTokenAuth ?? false,
       enableOAuth: entry.enableOAuth ?? false,
       allowInsecureHttp: entry.allowInsecureHttp ?? false,
-      oidc: entry.oidc,
+      oidc: undefined,
       envPrefix: entry.envPrefix,
       enableMcp: entry.enableMcp,
     });
