@@ -14,7 +14,7 @@ Environment variable schemes were evaluated against POSIX shell constraints (IEE
    - The dedicated `PROVIDER_` namespace token completely isolates secondary provider variables from core top-level `LITELLM_*` configuration settings.
 2. **Kebab-Case Default & Canonical Name List (`LITELLM_PROVIDERS`)**:
    - By default, uppercase environment tokens (e.g. `CORP_EAST`) are converted to lowercase kebab-case (`corp-east`).
-   - An optional `LITELLM_PROVIDERS="corp-east,staging"` variable preserves exact mixed-case/custom provider IDs and deterministic ordering.
+   - An optional `LITELLM_PROVIDERS="corp-east,staging"` variable preserves lowercase kebab-case and custom underscore provider IDs and deterministic ordering.
 3. **Structured JSON Fallback (`LITELLM_PROVIDERS_JSON`)**:
    - A JSON string environment variable provides 1:1 feature parity with `settings.json` for complex nested objects.
 4. **Full Feature Parity for Secondary Providers**:
