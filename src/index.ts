@@ -38,6 +38,8 @@ const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_DISPLAY_NAME = "LITELLM_DISPLAY_NAME";
+const ENV_PROVIDERS = "LITELLM_PROVIDERS";
+const ENV_PROVIDERS_JSON = "LITELLM_PROVIDERS_JSON";
 const GCLOUD_ADC_SOURCE = "gcloud ADC";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
@@ -71,10 +73,12 @@ type RawProviderSettings = {
   headers?: unknown;
   enabled?: unknown;
   allowInsecureHttp?: unknown;
+  useGcloudTokenAuth?: unknown;
+  enableOAuth?: unknown;
   oidc?: unknown;
 };
 
-type ProviderDefinition = {
+export type ProviderDefinition = {
   name: string;
   displayName: string;
   baseUrl?: string;
@@ -86,7 +90,134 @@ type ProviderDefinition = {
   allowInsecureHttp: boolean;
   /** Raw `oidc` setting, validated at login so a bad value never breaks startup. */
   oidc?: unknown;
+  envPrefix?: string;
 };
+
+const RESERVED_PROVIDER_NAMES = new Set(["mcp", "skills", "codemode", "tool_search", "litellm"]);
+const PROVIDER_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const PROVIDER_ENV_VAR_REGEX =
+  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|OIDC)$/;
+
+export function isValidProviderName(name: string): boolean {
+  if (typeof name !== "string") return false;
+  if (!PROVIDER_NAME_REGEX.test(name)) return false;
+  if (RESERVED_PROVIDER_NAMES.has(name)) return false;
+  return true;
+}
+
+export function parseCanonicalProviderList(raw: string | undefined): string[] {
+  if (typeof raw !== "string") return [];
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  return trimmed
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function parseProvidersJson(raw: string | undefined): Record<string, RawProviderSettings> | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!isPlainObject(parsed)) return undefined;
+    const result: Record<string, RawProviderSettings> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (isPlainObject(value)) {
+        result[key] = value as RawProviderSettings;
+      }
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseBooleanSetting(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim().toLowerCase();
+    return trimmed === "1" || trimmed === "true";
+  }
+  return false;
+}
+
+export type ParsedProviderEnv = {
+  token: string;
+  envPrefix: string;
+  name?: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  apiKeyHelper?: string;
+  headers?: unknown;
+  allowInsecureHttp?: boolean;
+  useGcloudTokenAuth?: boolean;
+  enableOAuth?: boolean;
+  oidc?: unknown;
+};
+
+export function parseProviderEnvVars(env: NodeJS.ProcessEnv): Record<string, ParsedProviderEnv> {
+  const result: Record<string, ParsedProviderEnv> = {};
+  for (const key of Object.keys(env)) {
+    const match = key.match(PROVIDER_ENV_VAR_REGEX);
+    if (!match) continue;
+    const token = match[1]!;
+    const field = match[2]!;
+    const val = env[key];
+    if (val === undefined) continue;
+
+    if (!result[token]) {
+      result[token] = {
+        token,
+        envPrefix: `LITELLM_PROVIDER_${token}`,
+      };
+    }
+    const entry = result[token]!;
+    switch (field) {
+      case "BASE_URL":
+        entry.baseUrl = cleanConfig(val);
+        break;
+      case "API_KEY":
+        entry.apiKey = cleanConfig(val);
+        break;
+      case "API_KEY_HELPER":
+        entry.apiKeyHelper = cleanConfig(val);
+        break;
+      case "HEADERS":
+        entry.headers = cleanConfig(val);
+        break;
+      case "DISPLAY_NAME":
+        entry.displayName = cleanConfig(val);
+        break;
+      case "NAME":
+        entry.name = cleanConfig(val);
+        break;
+      case "ALLOW_INSECURE_HTTP":
+        entry.allowInsecureHttp = parseBooleanSetting(val);
+        break;
+      case "USE_GCLOUD_AUTH":
+        entry.useGcloudTokenAuth = parseBooleanSetting(val);
+        break;
+      case "ENABLE_OAUTH":
+        entry.enableOAuth = parseBooleanSetting(val);
+        break;
+      case "OIDC": {
+        const trimmed = cleanConfig(val);
+        if (trimmed) {
+          try {
+            entry.oidc = JSON.parse(trimmed);
+          } catch {
+            entry.oidc = trimmed;
+          }
+        }
+        break;
+      }
+    }
+  }
+  return result;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -493,35 +624,171 @@ function isFeatureEnabled(settings: Record<string, unknown> | undefined, feature
   return !isPlainObject(raw) || raw.enabled !== false;
 }
 
-function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
+type IntermediateProvider = {
+  name: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKeyConfig?: string;
+  headers?: unknown;
+  allowInsecureHttp?: boolean;
+  useGcloudTokenAuth?: boolean;
+  enableOAuth?: boolean;
+  oidc?: unknown;
+  envPrefix?: string;
+};
+
+export function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
   const rawProviders = settings?.providers && typeof settings.providers === "object" ? settings.providers : undefined;
   const providerSettings = rawProviders as Record<string, unknown> | undefined;
   const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
   const defaultDisplayName = cleanConfig(process.env[ENV_DISPLAY_NAME]) ?? "LiteLLM";
 
-  const makeDefinition = (
-    name: string,
-    raw: RawProviderSettings | undefined,
-    isDefault: boolean,
-  ): ProviderDefinition => ({
-    name,
-    displayName: stringSetting(raw?.displayName) ?? (isDefault ? defaultDisplayName : name),
-    baseUrl: stringSetting(raw?.baseUrl),
-    apiKeyConfig: stringSetting(raw?.apiKey),
-    headers: raw?.headers ?? (isDefault ? `$${ENV_HEADERS}` : undefined),
-    useDefaultEnv: isDefault,
-    useGcloudTokenAuth: isDefault,
-    enableOAuth: isDefault,
-    allowInsecureHttp: raw?.allowInsecureHttp === true,
-    oidc: isDefault ? raw?.oidc : undefined,
-  });
+  const primaryDefinition: ProviderDefinition = {
+    name: PROVIDER_NAME,
+    displayName: stringSetting(defaultSettings?.displayName) ?? defaultDisplayName,
+    baseUrl: stringSetting(defaultSettings?.baseUrl),
+    apiKeyConfig: stringSetting(defaultSettings?.apiKey),
+    headers: defaultSettings?.headers ?? `$${ENV_HEADERS}`,
+    useDefaultEnv: true,
+    useGcloudTokenAuth: true,
+    enableOAuth: true,
+    allowInsecureHttp: defaultSettings?.allowInsecureHttp === true,
+    oidc: defaultSettings?.oidc,
+  };
 
-  const definitions = [makeDefinition(PROVIDER_NAME, defaultSettings, true)];
+  const secondaryProviders = new Map<string, IntermediateProvider>();
+
+  // 1. Incorporate LITELLM_PROVIDERS_JSON
+  const jsonProviders = parseProvidersJson(process.env[ENV_PROVIDERS_JSON]);
+  if (jsonProviders) {
+    for (const [name, raw] of Object.entries(jsonProviders)) {
+      if (!isValidProviderName(name)) continue;
+      if (raw.enabled === false) continue;
+      secondaryProviders.set(name, {
+        name,
+        displayName: stringSetting(raw.displayName),
+        baseUrl: stringSetting(raw.baseUrl),
+        apiKeyConfig: stringSetting(raw.apiKey),
+        headers: raw.headers,
+        allowInsecureHttp: parseBooleanSetting(raw.allowInsecureHttp),
+        useGcloudTokenAuth: parseBooleanSetting(raw.useGcloudTokenAuth),
+        enableOAuth: parseBooleanSetting(raw.enableOAuth),
+        oidc: raw.oidc,
+      });
+    }
+  }
+
+  // 2. Scan env vars
+  const parsedEnv = parseProviderEnvVars(process.env);
+  const claimedTokens = new Set<string>();
+
+  // 3. Incorporate canonical list LITELLM_PROVIDERS
+  const canonicalList = parseCanonicalProviderList(process.env[ENV_PROVIDERS]);
+  for (const canonicalId of canonicalList) {
+    if (!isValidProviderName(canonicalId)) continue;
+    const token = canonicalId.toUpperCase().replace(/-/g, "_");
+    const envData = parsedEnv[token];
+    if (envData) claimedTokens.add(token);
+
+    const existing = secondaryProviders.get(canonicalId);
+    const apiKeyConfig =
+      envData?.apiKey ??
+      (envData?.apiKeyHelper ? normalizeCommand(envData.apiKeyHelper) : undefined) ??
+      existing?.apiKeyConfig;
+
+    secondaryProviders.set(canonicalId, {
+      name: canonicalId,
+      displayName: envData?.displayName ?? existing?.displayName,
+      baseUrl: envData?.baseUrl ?? existing?.baseUrl,
+      apiKeyConfig,
+      headers: envData?.headers ?? existing?.headers,
+      allowInsecureHttp: envData?.allowInsecureHttp ?? existing?.allowInsecureHttp,
+      useGcloudTokenAuth: envData?.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
+      enableOAuth: envData?.enableOAuth ?? existing?.enableOAuth,
+      oidc: envData?.oidc ?? existing?.oidc,
+      envPrefix: envData?.envPrefix ?? existing?.envPrefix,
+    });
+  }
+
+  // 4. Incorporate remaining unlisted prefix-scanned tokens
+  for (const [token, envData] of Object.entries(parsedEnv)) {
+    if (claimedTokens.has(token)) continue;
+    const providerId = envData.name ?? token.toLowerCase().replace(/_/g, "-");
+    if (!isValidProviderName(providerId)) continue;
+
+    const existing = secondaryProviders.get(providerId);
+    const apiKeyConfig =
+      envData.apiKey ??
+      (envData.apiKeyHelper ? normalizeCommand(envData.apiKeyHelper) : undefined) ??
+      existing?.apiKeyConfig;
+
+    secondaryProviders.set(providerId, {
+      name: providerId,
+      displayName: envData.displayName ?? existing?.displayName,
+      baseUrl: envData.baseUrl ?? existing?.baseUrl,
+      apiKeyConfig,
+      headers: envData.headers ?? existing?.headers,
+      allowInsecureHttp: envData.allowInsecureHttp ?? existing?.allowInsecureHttp,
+      useGcloudTokenAuth: envData.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
+      enableOAuth: envData.enableOAuth ?? existing?.enableOAuth,
+      oidc: envData.oidc ?? existing?.oidc,
+      envPrefix: envData.envPrefix ?? existing?.envPrefix,
+    });
+  }
+
+  // 5. Merge with settings.json (disk settings override env vars; enabled === false excludes)
   for (const [name, raw] of Object.entries(providerSettings ?? {})) {
     if (name === PROVIDER_NAME) continue;
-    const normalized = normalizeProviderSettings(raw);
-    if (!normalized) continue;
-    definitions.push(makeDefinition(name, normalized, false));
+    if (!isValidProviderName(name)) continue;
+
+    const rawRecord =
+      typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as RawProviderSettings) : undefined;
+
+    if (!rawRecord || rawRecord.enabled === false) {
+      secondaryProviders.delete(name);
+      continue;
+    }
+
+    const existing = secondaryProviders.get(name);
+    const token = name.toUpperCase().replace(/-/g, "_");
+    const matchingEnvPrefix = existing?.envPrefix ?? (parsedEnv[token] ? `LITELLM_PROVIDER_${token}` : undefined);
+
+    secondaryProviders.set(name, {
+      name,
+      displayName: stringSetting(rawRecord.displayName) ?? existing?.displayName,
+      baseUrl: stringSetting(rawRecord.baseUrl) ?? existing?.baseUrl,
+      apiKeyConfig: stringSetting(rawRecord.apiKey) ?? existing?.apiKeyConfig,
+      headers: rawRecord.headers ?? existing?.headers,
+      allowInsecureHttp:
+        typeof rawRecord.allowInsecureHttp === "boolean"
+          ? rawRecord.allowInsecureHttp
+          : (existing?.allowInsecureHttp ?? false),
+      useGcloudTokenAuth:
+        typeof rawRecord.useGcloudTokenAuth === "boolean"
+          ? rawRecord.useGcloudTokenAuth
+          : (existing?.useGcloudTokenAuth ?? false),
+      enableOAuth:
+        typeof rawRecord.enableOAuth === "boolean" ? rawRecord.enableOAuth : (existing?.enableOAuth ?? false),
+      oidc: rawRecord.oidc ?? existing?.oidc,
+      envPrefix: matchingEnvPrefix,
+    });
+  }
+
+  const definitions: ProviderDefinition[] = [primaryDefinition];
+  for (const [name, entry] of secondaryProviders) {
+    definitions.push({
+      name,
+      displayName: entry.displayName ?? name,
+      baseUrl: entry.baseUrl,
+      apiKeyConfig: entry.apiKeyConfig,
+      headers: entry.headers,
+      useDefaultEnv: false,
+      useGcloudTokenAuth: entry.useGcloudTokenAuth ?? false,
+      enableOAuth: entry.enableOAuth ?? false,
+      allowInsecureHttp: entry.allowInsecureHttp ?? false,
+      oidc: entry.oidc,
+      envPrefix: entry.envPrefix,
+    });
   }
   return definitions;
 }
