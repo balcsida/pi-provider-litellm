@@ -1865,14 +1865,11 @@ function createProviderAuth(
   return {
     apiKey: {
       name: `${definition.displayName} API key`,
-      login:
-        definition.name === PROVIDER_NAME
-          ? async (interaction) => {
-              loginHooks?.start();
-              const credential = await loginApiKey(interaction, definition);
-              return completeLogin(credential);
-            }
-          : undefined,
+      login: async (interaction) => {
+        loginHooks?.start();
+        const credential = await loginApiKey(interaction, definition);
+        return completeLogin(credential);
+      },
       check: async ({ ctx, credential }) => {
         const baseUrl =
           credential?.env?.[ENV_BASE_URL] ??
@@ -2440,20 +2437,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const networkRefreshAttempts = new Map<string, number>();
 
   for (const [index, definition] of definitions.entries()) {
+    const loginHooks = {
+      // Disconnect before the login can store a new credential: Pi's MCP client reads the
+      // provider's current token on every request, including the session teardown, so a
+      // connection still open to the old proxy root would send it the new credential.
+      start: () => dropMcpServer(definition),
+      complete: () => {
+        loginGeneration++;
+        syncMcpServer(definition);
+      },
+    };
     const auth = createProviderAuth(
       definition,
       () => oauthRuntimeRoots.delete(definition.name),
-      definition.name === PROVIDER_NAME
-        ? {
-            // Disconnect before the login can store a new credential: Pi's MCP client reads the
-            // provider's current token on every request, including the session teardown, so a
-            // connection still open to the old proxy root would send it the new credential.
-            start: () => dropMcpServer(definition),
-            complete: () => {
-              loginGeneration++;
-            },
-          }
-        : undefined,
+      loginHooks,
       () => oauthRuntimeRoots.get(definition.name),
     );
     if (auth.oauth) {
