@@ -8,6 +8,8 @@ export const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 28 * 24 * 60 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const KNOWN_PROVIDERS = new Set<string>(getProviders());
+// Pi 1.0.3 renamed its Azure catalog from `azure-openai-responses` to `azure`.
+export const PI_AZURE_PROVIDER = KNOWN_PROVIDERS.has("azure") ? "azure" : "azure-openai-responses";
 
 export interface PublicCatalogRecord {
   source: "models.dev" | "pi-vendor" | "pi-adapter";
@@ -72,8 +74,8 @@ const PROVIDER_ALIASES: Readonly<Record<string, readonly string[]>> = {
 
 const PI_PROVIDER_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "amazon-bedrock": ["amazon-bedrock"],
-  azure: ["azure-openai-responses"],
-  azure_ai: ["azure-openai-responses"],
+  azure: [PI_AZURE_PROVIDER],
+  azure_ai: [PI_AZURE_PROVIDER],
   chatgpt: ["openai-codex"],
   "fireworks-ai": ["fireworks"],
   openai: ["openai"],

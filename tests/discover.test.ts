@@ -1211,7 +1211,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 5,
+      litellmDiscoveryVersion: 6,
     });
   });
 
@@ -5145,7 +5145,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 5,
+          litellmDiscoveryVersion: 6,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
