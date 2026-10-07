@@ -190,6 +190,23 @@ describe("budget footer", () => {
     expect(keyPolls()).toBe(3);
   });
 
+  it("does not poll again when the timer fires a few milliseconds early", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const seen = mockProxy(PERSONAL);
+    setup();
+    const ctx = makeCtx();
+    const keyPolls = () => seen.filter((path) => path === "/key/info").length;
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(100_000);
+    await emit(pi, "turn_end", {}, ctx);
+    // Timers keep their own schedule: lag the wall clock so the timer fires before Date.now() reaches its target.
+    vi.setSystemTime(Date.now() - 5);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(keyPolls()).toBe(2);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(keyPolls()).toBe(2);
+  });
+
   it("shows a provider's last result on model_select and polls only when stale", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     providers = [

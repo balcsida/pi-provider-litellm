@@ -419,8 +419,9 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
       timer = undefined;
       if (latestCtx && activeProvider && !gated()) {
         poll(latestCtx, activeProvider).catch(() => {});
-        // A turn that ended within the settle delay may not have its spend written yet: poll once more.
-        if (lastTurnAt! + POLL_SETTLE_DELAY_MS > Date.now()) schedulePoll(activeProvider);
+        // A turn that ended within the settle delay may not have its spend written yet: poll once more. Compared
+        // with the planned time, not Date.now(), because a timer can fire a few milliseconds early.
+        if (lastTurnAt! + POLL_SETTLE_DELAY_MS > at) schedulePoll(activeProvider);
       }
     }, at - now);
     timer.unref();
