@@ -162,6 +162,34 @@ describe("budget footer", () => {
     expect(keyPolls()).toBe(3);
   });
 
+  it("polls again after the last turn of a run that ends within the settle delay of a poll", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const seen = mockProxy(PERSONAL);
+    setup();
+    const ctx = makeCtx();
+    const keyPolls = () => seen.filter((path) => path === "/key/info").length;
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(keyPolls()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(50_000);
+    await emit(pi, "turn_end", {}, ctx);
+    await vi.advanceTimersByTimeAsync(5000);
+    await emit(pi, "turn_end", {}, ctx);
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(keyPolls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(keyPolls()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(keyPolls()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(keyPolls()).toBe(3);
+
+    await vi.advanceTimersByTimeAsync(175_000);
+    expect(keyPolls()).toBe(3);
+  });
+
   it("shows a provider's last result on model_select and polls only when stale", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     providers = [
@@ -386,6 +414,41 @@ describe("/litellm-budget", () => {
     );
   });
 
+  it("forgets 4xx endpoints and polls again instead of joining an in-flight poll", async () => {
+    const seen = mockProxy({
+      "/key/info": TEAM_KEY,
+      "/v2/user/info": USER_INFO,
+      "/team/info?team_id=T": () => status(403),
+    });
+    setup();
+    const ctx = makeCtx();
+    await command("", ctx);
+    const inner = (globalThis.fetch as any).getMockImplementation();
+    let release!: () => void;
+    let reached = false;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (new URL(String(input)).pathname === "/key/info" && !reached) {
+        reached = true;
+        await held;
+      }
+      return inner(input, init);
+    });
+    const before = seen.length;
+    await emit(pi, "session_start", {}, ctx);
+    await vi.waitFor(() => expect(reached).toBe(true));
+    const pending = command("", ctx);
+    release();
+    await pending;
+    expect(seen.slice(before).filter((p) => p.startsWith("/key/info") || p.startsWith("/team/info"))).toEqual([
+      "/key/info",
+      "/key/info",
+      "/team/info?team_id=T",
+    ]);
+  });
+
   it("reports unknown providers, missing credentials, and failed polls", async () => {
     setup();
     const ctx = makeCtx();
@@ -400,6 +463,27 @@ describe("/litellm-budget", () => {
       ['LiteLLM ("litellm"): budget check skipped; no credentials for litellm.', "warning"],
       ['LiteLLM ("litellm"): budget check failed (HTTP 503).', "warning"],
     ]);
+  });
+
+  it("keeps a header-only key level through polls that cannot read /key/info", async () => {
+    mockProxy({ "/key/info": () => status(403), "/v2/user/info": USER_INFO });
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.waitFor(() => expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, "LiteLLM user $0.34/$100"));
+    await emit(
+      pi,
+      "after_provider_response",
+      { headers: { "x-litellm-key-spend": "0.5", "x-litellm-key-max-budget": "10" } },
+      ctx,
+    );
+    const both = "LiteLLM key $0.50/$10 · user $0.34/$100";
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, both);
+    await command("", ctx);
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, both);
+    const [message] = ctx.ui.notify.mock.calls[0];
+    expect(message).toContain("  key     $0.50 of $10 (5%)");
+    expect(message).toContain("  Not readable with this credential: key (403)");
   });
 
   it("treats a throwing credential lookup as missing credentials", async () => {

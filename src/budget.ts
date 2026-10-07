@@ -324,6 +324,7 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   let activeProvider: string | undefined;
   let latestCtx: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastTurnAt: number | undefined;
   let generation = 0;
   let warned = false;
 
@@ -411,6 +412,20 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
     else process.stderr.write(`${options.displayWarning}\n`);
   }
 
+  function schedulePoll(name: string): void {
+    const now = Date.now();
+    const at = Math.max(lastTurnAt! + POLL_SETTLE_DELAY_MS, (stateFor(name).lastPollAt ?? 0) + POLL_MIN_INTERVAL_MS);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (latestCtx && activeProvider && !gated()) {
+        poll(latestCtx, activeProvider).catch(() => {});
+        // A turn that ended within the settle delay may not have its spend written yet: poll once more.
+        if (lastTurnAt! + POLL_SETTLE_DELAY_MS > Date.now()) schedulePoll(activeProvider);
+      }
+    }, at - now);
+    timer.unref();
+  }
+
   pi.on("session_start", (_event, ctx) => {
     warnOnce(ctx);
     if (!ctx.hasUI) return;
@@ -438,14 +453,9 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   pi.on("turn_end", (_event, ctx) => {
     if (!ctx.hasUI) return;
     const name = track(ctx, ctx.model?.provider);
-    if (!name || gated() || timer) return;
-    const now = Date.now();
-    const at = Math.max(now + POLL_SETTLE_DELAY_MS, (stateFor(name).lastPollAt ?? 0) + POLL_MIN_INTERVAL_MS);
-    timer = setTimeout(() => {
-      timer = undefined;
-      if (latestCtx && activeProvider && !gated()) poll(latestCtx, activeProvider).catch(() => {});
-    }, at - now);
-    timer.unref();
+    if (!name || gated()) return;
+    lastTurnAt = Date.now();
+    if (!timer) schedulePoll(name);
   });
 
   pi.on("after_provider_response", (event, ctx) => {
@@ -462,6 +472,7 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   pi.on("session_shutdown", (_event, ctx) => {
     clearTimeout(timer);
     timer = undefined;
+    lastTurnAt = undefined;
     generation++;
     if (shownText !== undefined && ctx?.hasUI) ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
     shownText = undefined;
@@ -495,6 +506,7 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
       for (const { name } of selected) {
         const label = `LiteLLM (${JSON.stringify(name)})`;
         const state = stateFor(name);
+        await state.inFlight?.catch(() => undefined);
         state.denied.clear();
         const outcome = await poll(ctx, name);
         if (outcome === "no-auth") {
