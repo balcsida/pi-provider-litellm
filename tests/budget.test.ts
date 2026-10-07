@@ -153,6 +153,23 @@ describe("pollBudget", () => {
     expect(denied.get("key")).toBe(403);
   });
 
+  it("remembers a 500 like a 4xx and still reads the user level", async () => {
+    const seen = mockProxy({
+      "/key/info": () => status(500),
+      "/v2/user/info": () => ok(fixture("user-info-v2")),
+    });
+    const denied = new Map<BudgetEndpoint, number>();
+    expect(await poll(denied)).toEqual({
+      ok: true,
+      keyPolled: false,
+      levels: { user: { spend: 0.343, maxBudget: 100, resetAt: RESET } },
+    });
+    expect(denied.get("key")).toBe(500);
+    seen.length = 0;
+    await poll(denied);
+    expect(seen).toEqual(["/v2/user/info"]);
+  });
+
   it("ends the poll on a transient /key/info failure", async () => {
     const cases: Array<[() => Response | Error, string]> = [
       [() => status(503), "HTTP 503"],
@@ -384,6 +401,16 @@ describe("formatBudgetDetails", () => {
   });
   it("says when no budgets are set", () => {
     expect(formatBudgetDetails("litellm", {}, new Map(), NOW)).toBe('LiteLLM ("litellm") budget\n  no budgets set');
+  });
+
+  it("does not say no budgets are set when some levels could not be read", () => {
+    const denied = new Map<BudgetEndpoint, number>([
+      ["key", 500],
+      ["userV2", 500],
+    ]);
+    expect(formatBudgetDetails("litellm", {}, denied, NOW)).toBe(
+      'LiteLLM ("litellm") budget\n  Not readable with this credential: key (500), user (500)',
+    );
   });
 });
 

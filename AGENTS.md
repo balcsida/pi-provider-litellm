@@ -101,7 +101,8 @@
 - `src/budget.ts` hooks fire only for the configured LiteLLM providers and are registered after `setupLiteLLMCostTracking`, because `tests/features.test.ts` calls `after_provider_response` handler `[0]` and expects the cost hook.
 - Automatic polls run only with a UI and never under `LITELLM_OFFLINE=1`, a zero discovery timeout, or `PI_OFFLINE`; `/litellm-budget` ignores only `PI_OFFLINE`.
 - The footer and command show no proxy-supplied text (aliases, messages), and responses are never logged; the credential is kept only as a SHA-256 digest.
-- A 4xx (not 429) endpoint is not retried until the credential digest changes or the command runs.
+- A 4xx (not 429) or 500 endpoint is not retried until the credential digest changes or the command runs. LiteLLM's 500
+  here repeats on every call (no database, a credential it cannot look up), while 429 and 502-504 stay retryable.
 - Polls set the key level; headers only raise it, or set it alone while `/key/info` has not succeeded.
 
 ## Reasoning Policy

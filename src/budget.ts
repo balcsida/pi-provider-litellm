@@ -57,7 +57,9 @@ async function get(
     const url = `${normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp)}${path}`;
     const result = await fetchJson<unknown>(url, auth.apiKey, { timeoutMs, headers: auth.headers });
     if (result.ok) return { status: "ok", data: result.data };
-    if (result.status >= 400 && result.status < 500 && result.status !== 429) {
+    // LiteLLM answers 500 when handling the request raises (no database, a credential it cannot look up, a
+    // version bug), which repeats on every call, so it is remembered like a 4xx. 429 and 502-504 stay retryable.
+    if ((result.status >= 400 && result.status < 500 && result.status !== 429) || result.status === 500) {
       denied.set(endpoint, result.status);
       return { status: "denied" };
     }
@@ -273,7 +275,6 @@ export function formatBudgetDetails(
       `  ${name.padEnd(8)}${money(l.spend, 2)} of ${limit} (${percent(l)}%)${reset ? `, resets in ${reset}` : ""}`,
     );
   }
-  if (lines.length === 1) lines.push("  no budgets set");
   const userV2 = denied.get("userV2");
   const unreadable = [
     ["key", denied.get("key")],
@@ -281,6 +282,7 @@ export function formatBudgetDetails(
     ["team", denied.get("team")],
     ["org", denied.get("org")],
   ].flatMap(([name, code]) => (code === undefined ? [] : [`${name} (${code})`]));
+  if (lines.length === 1 && unreadable.length === 0) lines.push("  no budgets set");
   if (unreadable.length > 0) lines.push(`  Not readable with this credential: ${unreadable.join(", ")}`);
   return lines.join("\n");
 }

@@ -228,11 +228,11 @@ The extension reads `/key/info` first, then `/v2/user/info` (`/user/info` on old
 - A team key without a user shows no `user`, `member`, or `org` level.
 - Organization budgets need LiteLLM Enterprise.
 - A key whose `allowed_routes` exclude the info routes cannot be polled. It falls back to the `x-litellm-key-spend` and `x-litellm-key-max-budget` headers on every model response, which show only the `key` level, and only when the key has a limit.
-- An endpoint that answers 4xx (other than 429) is not asked again until the credential changes or you run `/litellm-budget`. Other errors keep the last values and are retried at the next refresh. Nothing is reported while polling.
+- An endpoint that answers 4xx (other than 429) or 500 is not asked again until the credential changes or you run `/litellm-budget`. LiteLLM answers 500 for errors that repeat on every call, such as a proxy without a database. Other errors keep the last values and are retried at the next refresh. Nothing is reported while polling.
 
 It refreshes when a session starts, when you select a LiteLLM model whose numbers are older than a minute, and after a turn: 15 seconds later, so LiteLLM can record the turn's spend, and never within 60 seconds of the previous poll. Idle sessions do not poll. Between polls the response headers can only raise the key's spend. LiteLLM writes spend to its database every 10 to 60 seconds, and spend resets are applied by a job that runs about every 10 minutes, so spend can lag by up to a minute and a reset by about ten minutes; a reset time already past is not shown.
 
-`/litellm-budget` forgets remembered 4xx answers, polls every configured LiteLLM provider now (or `/litellm-budget <provider>` for one), and prints a breakdown with two-decimal amounts, percentages, reset times, and the levels this credential cannot read, with their HTTP status:
+`/litellm-budget` forgets remembered 4xx and 500 answers, polls every configured LiteLLM provider now (or `/litellm-budget <provider>` for one), and prints a breakdown with two-decimal amounts, percentages, reset times, and the levels this credential cannot read, with their HTTP status:
 
 ```
 LiteLLM ("litellm") budget
