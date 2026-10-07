@@ -96,6 +96,14 @@
 - Never register `/mcp`, `codemode`, or `tool_search`: Pi unloads the built-in extension whose tool, command, or flag an
   extension re-registers.
 
+## Budget Status
+
+- `src/budget.ts` hooks fire only for the configured LiteLLM providers and are registered after `setupLiteLLMCostTracking`, because `tests/features.test.ts` calls `after_provider_response` handler `[0]` and expects the cost hook.
+- Automatic polls run only with a UI and never under `LITELLM_OFFLINE=1`, a zero discovery timeout, or `PI_OFFLINE`; `/litellm-budget` ignores only `PI_OFFLINE`.
+- The footer and command show no proxy-supplied text (aliases, messages), and responses are never logged; the credential is kept only as a SHA-256 digest.
+- A 4xx (not 429) endpoint is not retried until the credential digest changes or the command runs.
+- Polls set the key level; headers only raise it, or set it alone while `/key/info` has not succeeded.
+
 ## Reasoning Policy
 
 - Discovered `litellmPolicy` scopes request and response behavior to backend evidence; route text never authorizes generation controls or request-side visibility parameters.

@@ -165,7 +165,7 @@ Provider fields:
 
 ### Optional LiteLLM features
 
-LiteLLM Skills and MCP integration are enabled by default. Disable either feature, or choose how MCP tools reach the model, globally in `~/.pi/agent/settings.json`:
+LiteLLM Skills, MCP integration, and the budget footer are enabled by default. Disable any of them, choose how MCP tools reach the model, or choose how budgets are shown, globally in `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -180,12 +180,16 @@ LiteLLM Skills and MCP integration are enabled by default. Disable either featur
         "*delete*": "hidden",
         "github-search_code": "direct"
       }
+    },
+    "budget": {
+      "enabled": true,
+      "display": "all"
     }
   }
 }
 ```
 
-Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Restart Pi after changing these settings.
+Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Setting `budget.enabled` to `false` registers no budget footer, polls, or `/litellm-budget` command; `budget.display` is described under [Budget status](#budget-status). Restart Pi after changing these settings.
 
 `mcp.exposure` and `mcp.toolExposure` are passed to Pi unchanged and mean what they mean in a Pi `mcp.json` server entry: `codemode` (Pi's default when `exposure` is unset; callable from Pi's `codemode` scripts), `deferred` (declared to the model once Pi's `tool_search` loads it), `direct` (declared on every request), or `hidden`. `toolExposure` keys are tool names as LiteLLM's `/mcp` endpoint offers them, which LiteLLM prefixes with the server name, for example `github-search_code`; `*` matches any characters. Pi validates both settings, and an unusable value is reported once.
 
@@ -202,6 +206,42 @@ To refresh catalogs on demand, run `/litellm-refresh` for every configured LiteL
 Every request routed through a configured LiteLLM provider includes Pi's canonical session ID in the
 `x-litellm-session-id` header. This groups Chat Completions, Responses, and native Messages requests in LiteLLM without
 adding transport-specific fields to request bodies.
+
+## Budget status
+
+The footer shows the budgets LiteLLM enforces on your credential, for the active model's provider, next to Pi's own status line:
+
+```
+LiteLLM key $3.10/$10 · user $40/$100 · team $412/$1k · member $20/$50 · org $9.2k/$50k
+```
+
+Each segment is spend and limit for one level: `key`, `user`, `team`, `member` (your own budget inside the team), and `org`, in that order. A level whose limit is unset, `null`, or `0` is not shown, so with no budgets the footer is empty. A segment is dim, turns to the warning colour from 80 % used, and to the error colour from 100 %. Set `"display": "tightest"` to show only the level with the least money left, with its percentage and reset time:
+
+```
+LiteLLM team $412/$1k (41%) · resets 12d
+```
+
+The footer carries only the provider's display name, these labels, and numbers; team names, key aliases, and proxy messages never reach it.
+
+The extension reads `/key/info`, then `/v2/user/info` (`/user/info` on older proxies), `/team/info`, and `/organization/list` with the provider's own credential and custom headers, and only from that provider's proxy. LiteLLM's permissions decide what you can see:
+
+- A team key without a user shows no `user`, `member`, or `org` level.
+- Organization budgets need LiteLLM Enterprise.
+- A key whose `allowed_routes` exclude the info routes cannot be polled. It falls back to the `x-litellm-key-spend` and `x-litellm-key-max-budget` headers on every model response, which show only the `key` level, and only when the key has a limit.
+- An endpoint that answers 4xx (other than 429) is not asked again until the credential changes or you run `/litellm-budget`. Other errors keep the last values and are retried at the next refresh. Nothing is reported while polling.
+
+It refreshes when a session starts, when you select a LiteLLM model whose numbers are older than a minute, and after a turn: 15 seconds later, so LiteLLM can record the turn's spend, and never within 60 seconds of the previous poll. Idle sessions do not poll. Between polls the response headers can only raise the key's spend. LiteLLM writes spend to its database every 10 to 60 seconds, and spend resets are applied by a job that runs about every 10 minutes, so the footer can lag the proxy by that long, and a reset time already past is not shown.
+
+`/litellm-budget` forgets remembered 4xx answers, polls every configured LiteLLM provider now (or `/litellm-budget <provider>` for one), and prints a breakdown with two-decimal amounts, percentages, reset times, and the levels this credential cannot read, with their HTTP status:
+
+```
+LiteLLM ("litellm") budget
+  key     $3.10 of $10 (31%), resets in 12h
+  team    $412.30 of $1,000 (41%), resets in 24d
+  Not readable with this credential: org (401)
+```
+
+Automatic polls need Pi's interactive UI and do not run under `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, or `PI_OFFLINE`; header updates still apply. `/litellm-budget` is stopped by the first two only. The credential is kept in memory only as a digest, and responses are neither stored nor logged.
 
 ## Model transport
 
