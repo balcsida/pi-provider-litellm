@@ -46,7 +46,7 @@ describe("pollBudget", () => {
         user: { spend: 0.343, maxBudget: 100, resetAt: RESET },
       },
     });
-    expect(seen).not.toContain("/team/info");
+    expect(seen.sort()).toEqual(["/key/info", "/v2/user/info"]);
   });
 
   it("uses the team default member budget when the caller has no own entry", async () => {
@@ -216,5 +216,21 @@ describe("pollBudget", () => {
     const seen = mockProxy({ "/key/info": () => ok(keyWith("key-info-team-only", { team_id: "a b/c" })) });
     await poll();
     expect(seen).toContain("/team/info?team_id=a%20b%2Fc");
+  });
+
+  it("sends nothing to a non-loopback http root unless insecure http is allowed", async () => {
+    const seen = mockProxy({ "/key/info": () => ok(fixture("key-info-team-only")) });
+    const http = { ...AUTH, baseUrl: "http://proxy.example.com" };
+    expect(await pollBudget(http, new Map(), {}, 5000)).toEqual({ ok: false, reason: "request failed" });
+    expect(seen).toEqual([]);
+    expect(await pollBudget({ ...http, allowInsecureHttp: true }, new Map(), {}, 5000)).toMatchObject({ ok: true });
+    expect(seen).toContain("/key/info");
+  });
+
+  it("drops a /v1 suffix from the proxy root", async () => {
+    const seen = mockProxy({ "/key/info": () => ok(fixture("key-info-personal")) });
+    await pollBudget({ ...AUTH, baseUrl: "https://proxy.example.com/v1/" }, new Map(), {}, 5000);
+    expect(seen).toContain("/key/info");
+    expect(seen).not.toContain("/v1/key/info");
   });
 });

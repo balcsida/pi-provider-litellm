@@ -1,4 +1,4 @@
-import { fetchJson } from "./discover.js";
+import { fetchJson, normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMRuntimeAuth } from "./types.js";
 
 export type BudgetLevelName = "key" | "user" | "team" | "member" | "org";
@@ -52,7 +52,7 @@ async function get(
   timeoutMs: number,
 ): Promise<Fetched> {
   try {
-    const url = `${auth.baseUrl.replace(/\/+$/, "")}${path}`;
+    const url = `${normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp)}${path}`;
     const result = await fetchJson<unknown>(url, auth.apiKey, { timeoutMs, headers: auth.headers });
     if (result.ok) return { status: "ok", data: result.data };
     if (result.status >= 400 && result.status < 500 && result.status !== 429) {
