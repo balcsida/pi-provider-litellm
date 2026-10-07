@@ -209,13 +209,13 @@ adding transport-specific fields to request bodies.
 
 ## Budget status
 
-The footer shows the budgets LiteLLM enforces on your credential, for the active model's provider, next to Pi's own status line:
+Pi's footer shows the LiteLLM budgets set for your credential, its user, its team, and its organization, for the active model's provider:
 
 ```
 LiteLLM key $3.10/$10 · user $40/$100 · team $412/$1k · member $20/$50 · org $9.2k/$50k
 ```
 
-Each segment is spend and limit for one level: `key`, `user`, `team`, `member` (your own budget inside the team), and `org`, in that order. A level whose limit is unset, `null`, or `0` is not shown, so with no budgets the footer is empty. A segment is dim, turns to the warning colour from 80 % used, and to the error colour from 100 %. Set `"display": "tightest"` to show only the level with the least money left, with its percentage and reset time:
+Each segment is spend and limit for one level: `key`, `user`, `team`, `member` (your own budget inside the team), and `org`, in that order. These are the limits set on each level, and LiteLLM may not enforce every one of them on this key: since LiteLLM 1.95, a user's personal budget applies to a team key only when the operator sets `apply_user_budget_to_team_keys`. A level whose limit is unset, `null`, or `0` is not shown, so with no budgets the footer is empty. A segment is dim, turns to the warning colour from 80 % used, and to the error colour from 100 %. Set `"display": "tightest"` to show only the level with the least money left, with its percentage and reset time; any other `display` value falls back to `"all"` with a warning:
 
 ```
 LiteLLM team $412/$1k (41%) · resets 12d
@@ -223,14 +223,14 @@ LiteLLM team $412/$1k (41%) · resets 12d
 
 The footer carries only the provider's display name, these labels, and numbers; team names, key aliases, and proxy messages never reach it.
 
-The extension reads `/key/info`, then `/v2/user/info` (`/user/info` on older proxies), `/team/info`, and `/organization/list` with the provider's own credential and custom headers, and only from that provider's proxy. LiteLLM's permissions decide what you can see:
+The extension reads `/key/info` first, then `/v2/user/info` (`/user/info` on older proxies) and `/team/info`, then `/organization/list`, with the provider's own credential and custom headers, and only from that provider's proxy. LiteLLM's permissions decide what you can see:
 
 - A team key without a user shows no `user`, `member`, or `org` level.
 - Organization budgets need LiteLLM Enterprise.
 - A key whose `allowed_routes` exclude the info routes cannot be polled. It falls back to the `x-litellm-key-spend` and `x-litellm-key-max-budget` headers on every model response, which show only the `key` level, and only when the key has a limit.
 - An endpoint that answers 4xx (other than 429) is not asked again until the credential changes or you run `/litellm-budget`. Other errors keep the last values and are retried at the next refresh. Nothing is reported while polling.
 
-It refreshes when a session starts, when you select a LiteLLM model whose numbers are older than a minute, and after a turn: 15 seconds later, so LiteLLM can record the turn's spend, and never within 60 seconds of the previous poll. Idle sessions do not poll. Between polls the response headers can only raise the key's spend. LiteLLM writes spend to its database every 10 to 60 seconds, and spend resets are applied by a job that runs about every 10 minutes, so the footer can lag the proxy by that long, and a reset time already past is not shown.
+It refreshes when a session starts, when you select a LiteLLM model whose numbers are older than a minute, and after a turn: 15 seconds later, so LiteLLM can record the turn's spend, and never within 60 seconds of the previous poll. Idle sessions do not poll. Between polls the response headers can only raise the key's spend. LiteLLM writes spend to its database every 10 to 60 seconds, and spend resets are applied by a job that runs about every 10 minutes, so spend can lag by up to a minute and a reset by about ten minutes; a reset time already past is not shown.
 
 `/litellm-budget` forgets remembered 4xx answers, polls every configured LiteLLM provider now (or `/litellm-budget <provider>` for one), and prints a breakdown with two-decimal amounts, percentages, reset times, and the levels this credential cannot read, with their HTTP status:
 
@@ -241,7 +241,7 @@ LiteLLM ("litellm") budget
   Not readable with this credential: org (401)
 ```
 
-Automatic polls need Pi's interactive UI and do not run under `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, or `PI_OFFLINE`; header updates still apply. `/litellm-budget` is stopped by the first two only. The credential is kept in memory only as a digest, and responses are neither stored nor logged.
+Automatic polls need Pi's interactive UI and do not run under `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, or `PI_OFFLINE`; header updates still apply. `/litellm-budget` is stopped by the first two only. The credential is kept in memory only as a digest, and proxy responses are reduced to the numbers shown and never logged.
 
 ## Model transport
 
