@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fetchJson, normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMRuntimeAuth } from "./types.js";
 
@@ -287,4 +289,222 @@ export function budgetDisplaySetting(budgetSettings: unknown): { display: Budget
   const display = obj(budgetSettings)?.display;
   if (display === undefined || display === "all" || display === "tightest") return { display: display ?? "all" };
   return { display: "all", warning: `LiteLLM budget: unknown display ${JSON.stringify(display)}; using "all".` };
+}
+
+export const BUDGET_STATUS_KEY = "litellm-budget";
+const POLL_SETTLE_DELAY_MS = 15_000;
+const POLL_MIN_INTERVAL_MS = 60_000;
+
+export interface BudgetOptions {
+  providers: ReadonlyArray<{ name: string; displayName: string }>;
+  display: BudgetDisplay;
+  displayWarning?: string;
+  resolveAuth(ctx: ExtensionContext, providerName: string): Promise<LiteLLMRuntimeAuth | undefined>;
+  timeoutMs(): number;
+  disabledReason(): string | null;
+  hostOffline(): boolean;
+  missingCredentials(providerName: string): string;
+}
+
+type PollOutcome = "ok" | "no-auth" | { failed: string };
+
+interface ProviderState {
+  digest?: string;
+  levels: BudgetLevels;
+  denied: Map<BudgetEndpoint, number>;
+  keyPolled: boolean;
+  lastPollAt?: number;
+  inFlight?: Promise<PollOutcome>;
+}
+
+export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): void {
+  const displayNames = new Map(options.providers.map(({ name, displayName }) => [name, displayName]));
+  const states = new Map<string, ProviderState>();
+  let shownText: string | undefined;
+  let activeProvider: string | undefined;
+  let latestCtx: ExtensionContext | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  let warned = false;
+
+  const stateFor = (name: string): ProviderState => {
+    let state = states.get(name);
+    if (!state) {
+      state = { levels: {}, denied: new Map(), keyPolled: false };
+      states.set(name, state);
+    }
+    return state;
+  };
+  const forget = (state: ProviderState): void => {
+    state.levels = {};
+    state.denied.clear();
+    state.keyPolled = false;
+  };
+  const gated = (): boolean => options.disabledReason() !== null || options.hostOffline();
+
+  // Draws only the active provider's text, and only when it changed, so a context without
+  // setStatus is untouched while there is nothing to show.
+  function render(ctx: ExtensionContext, name: string): void {
+    if (!ctx.hasUI || activeProvider !== name) return;
+    const text = formatBudgetStatus(
+      stateFor(name).levels,
+      options.display,
+      displayNames.get(name)!,
+      ctx.ui.theme,
+      Date.now(),
+    );
+    if (text === shownText) return;
+    ctx.ui.setStatus(BUDGET_STATUS_KEY, text);
+    shownText = text;
+  }
+
+  async function run(ctx: ExtensionContext, name: string, state: ProviderState): Promise<PollOutcome> {
+    const started = generation;
+    state.lastPollAt = Date.now();
+    let auth: LiteLLMRuntimeAuth | undefined;
+    try {
+      auth = await options.resolveAuth(ctx, name);
+    } catch {
+      auth = undefined;
+    }
+    if (!auth) {
+      forget(state);
+      state.digest = undefined;
+      if (started === generation) render(ctx, name);
+      return "no-auth";
+    }
+    const digest = createHash("sha256").update(`${auth.baseUrl}\0${auth.apiKey}`).digest("hex");
+    if (state.digest !== undefined && state.digest !== digest) {
+      forget(state);
+      if (started === generation) render(ctx, name);
+    }
+    state.digest = digest;
+    const result = await pollBudget(auth, state.denied, state.levels, options.timeoutMs());
+    if (result.ok) {
+      const levels = { ...result.levels };
+      if (!result.keyPolled && state.levels.key) levels.key = state.levels.key;
+      state.levels = levels;
+      state.keyPolled = result.keyPolled;
+    }
+    if (started === generation) render(ctx, name);
+    return result.ok ? "ok" : { failed: result.reason };
+  }
+
+  function poll(ctx: ExtensionContext, name: string): Promise<PollOutcome> {
+    const state = stateFor(name);
+    state.inFlight ??= run(ctx, name, state).finally(() => {
+      state.inFlight = undefined;
+    });
+    return state.inFlight;
+  }
+
+  function track(ctx: ExtensionContext, provider: string | undefined): string | undefined {
+    latestCtx = ctx;
+    activeProvider = provider !== undefined && displayNames.has(provider) ? provider : undefined;
+    return activeProvider;
+  }
+
+  function warnOnce(ctx: ExtensionContext): void {
+    if (warned || !options.displayWarning) return;
+    warned = true;
+    if (ctx.hasUI) ctx.ui.notify(options.displayWarning, "warning");
+    else process.stderr.write(`${options.displayWarning}\n`);
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    warnOnce(ctx);
+    if (!ctx.hasUI) return;
+    const name = track(ctx, ctx.model?.provider);
+    if (name && !gated()) void poll(ctx, name);
+  });
+
+  pi.on("model_select", (event, ctx) => {
+    if (!ctx.hasUI) return;
+    const name = track(ctx, event.model.provider);
+    if (!name) {
+      if (shownText !== undefined) {
+        ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
+        shownText = undefined;
+      }
+      return;
+    }
+    render(ctx, name);
+    const { lastPollAt } = stateFor(name);
+    if (!gated() && (lastPollAt === undefined || Date.now() - lastPollAt >= POLL_MIN_INTERVAL_MS)) {
+      void poll(ctx, name);
+    }
+  });
+
+  pi.on("turn_end", (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    const name = track(ctx, ctx.model?.provider);
+    if (!name || gated() || timer) return;
+    const now = Date.now();
+    const at = Math.max(now + POLL_SETTLE_DELAY_MS, (stateFor(name).lastPollAt ?? 0) + POLL_MIN_INTERVAL_MS);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (latestCtx && activeProvider && !gated()) poll(latestCtx, activeProvider).catch(() => {});
+    }, at - now);
+    timer.unref();
+  });
+
+  pi.on("after_provider_response", (event, ctx) => {
+    if (!ctx.hasUI) return;
+    const name = ctx.model?.provider;
+    if (!name || !displayNames.has(name)) return;
+    const state = stateFor(name);
+    const key = mergeKeyHeaders(state.levels.key, state.keyPolled, event.headers ?? {});
+    if (key) state.levels.key = key;
+    else delete state.levels.key;
+    render(ctx, name);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    clearTimeout(timer);
+    timer = undefined;
+    generation++;
+    if (shownText !== undefined && ctx?.hasUI) ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
+    shownText = undefined;
+    activeProvider = undefined;
+    latestCtx = undefined;
+  });
+
+  pi.registerCommand("litellm-budget", {
+    description: "Show LiteLLM key, user, team, member, and organization budgets",
+    getArgumentCompletions: (prefix) => {
+      const matches = [...displayNames.keys()].filter((name) => name.startsWith(prefix));
+      return matches.length > 0 ? matches.map((name) => ({ value: name, label: name })) : null;
+    },
+    handler: async (args, ctx) => {
+      const notify = (message: string, level: "info" | "warning"): void => {
+        if (ctx.hasUI) ctx.ui.notify(message, level);
+        else process.stderr.write(`${message}\n`);
+      };
+      const disabledReason = options.disabledReason();
+      if (disabledReason) {
+        notify(`LiteLLM: budget check skipped (${disabledReason}).`, "warning");
+        return;
+      }
+      const requested = args.trim();
+      const selected = requested ? options.providers.filter(({ name }) => name === requested) : options.providers;
+      if (selected.length === 0) {
+        const configured = options.providers.map(({ name }) => JSON.stringify(name)).join(", ");
+        notify(`LiteLLM: unknown provider ${JSON.stringify(requested)}; configured: ${configured}.`, "warning");
+        return;
+      }
+      for (const { name } of selected) {
+        const label = `LiteLLM (${JSON.stringify(name)})`;
+        const state = stateFor(name);
+        state.denied.clear();
+        const outcome = await poll(ctx, name);
+        if (outcome === "no-auth") {
+          notify(`${label}: budget check skipped; ${options.missingCredentials(name)}`, "warning");
+        } else if (outcome !== "ok") {
+          notify(`${label}: budget check failed (${outcome.failed}).`, "warning");
+        } else {
+          notify(formatBudgetDetails(name, state.levels, state.denied, Date.now()), "info");
+        }
+      }
+    },
+  });
 }

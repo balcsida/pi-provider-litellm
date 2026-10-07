@@ -20,15 +20,18 @@ export function status(code: number): Response {
 }
 
 // Maps `pathname + search` to a fresh response (an Error rejects) and returns the recorded requests.
-export function mockProxy(routes: Record<string, () => Response | Error>): string[] {
+export function mockProxy(
+  routes: Record<string, () => Response | Error>,
+  expected: { token: string; gateway: string } = { token: "sk-test", gateway: "g1" },
+): string[] {
   const seen: string[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input));
     const key = url.pathname + url.search;
     seen.push(key);
     const headers = new Headers(init?.headers);
-    expect(headers.get("authorization")).toBe("Bearer sk-test");
-    expect(headers.get("x-gateway")).toBe("g1");
+    expect(headers.get("authorization")).toBe(`Bearer ${expected.token}`);
+    expect(headers.get("x-gateway")).toBe(expected.gateway);
     const route = routes[key];
     if (!route) return new Response("{}", { status: 404 });
     const result = route();
