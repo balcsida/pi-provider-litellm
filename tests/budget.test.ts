@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type BudgetEndpoint, type BudgetLevels, pollBudget } from "../src/budget.js";
+import {
+  type BudgetEndpoint,
+  type BudgetLevels,
+  type BudgetTheme,
+  budgetDisplaySetting,
+  formatBudgetDetails,
+  formatBudgetStatus,
+  formatCompactAmount,
+  formatRelativeReset,
+  mergeKeyHeaders,
+  pollBudget,
+} from "../src/budget.js";
 import { AUTH, fixture, mockProxy, ok, RESET, status } from "./budget-helpers.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -232,5 +243,159 @@ describe("pollBudget", () => {
     await pollBudget({ ...AUTH, baseUrl: "https://proxy.example.com/v1/" }, new Map(), {}, 5000);
     expect(seen).toContain("/key/info");
     expect(seen).not.toContain("/v1/key/info");
+  });
+});
+
+const PLAIN: BudgetTheme = { fg: (_c, t) => t };
+const MARK: BudgetTheme = { fg: (c, t) => `<${c}>${t}</${c}>` };
+const NOW = Date.parse("2026-10-07T12:00:00Z");
+const DAY = 86_400_000;
+
+describe("mergeKeyHeaders", () => {
+  const key = { spend: 5, maxBudget: 10, resetAt: 1 };
+  it("raises a polled key spend but never lowers it", () => {
+    expect(mergeKeyHeaders(key, true, { "x-litellm-key-spend": "6", "x-litellm-key-max-budget": "10.0" })).toEqual({
+      spend: 6,
+      maxBudget: 10,
+      resetAt: 1,
+    });
+    expect(mergeKeyHeaders(key, true, { "x-litellm-key-spend": "0.0" })).toEqual(key);
+  });
+  it("takes a numeric header limit and ignores a missing, empty, or non-numeric one", () => {
+    expect(
+      mergeKeyHeaders(key, true, { "x-litellm-key-spend": "5", "x-litellm-key-max-budget": "12" })?.maxBudget,
+    ).toBe(12);
+    for (const limit of [undefined, "", "None"]) {
+      const headers: Record<string, string> = { "x-litellm-key-spend": "5" };
+      if (limit !== undefined) headers["x-litellm-key-max-budget"] = limit;
+      expect(mergeKeyHeaders(key, true, headers)?.maxBudget).toBe(10);
+    }
+  });
+  it("lets headers alone set the key until a poll succeeds", () => {
+    expect(
+      mergeKeyHeaders(undefined, false, { "x-litellm-key-spend": "0.144", "x-litellm-key-max-budget": "10.0" }),
+    ).toEqual({ spend: 0.144, maxBudget: 10 });
+    expect(mergeKeyHeaders(undefined, false, { "x-litellm-key-spend": "0.144" })).toBeUndefined();
+  });
+  it("creates a key level when a polled key gains a limit", () => {
+    expect(mergeKeyHeaders(undefined, true, { "x-litellm-key-spend": "1", "x-litellm-key-max-budget": "10" })).toEqual({
+      spend: 1,
+      maxBudget: 10,
+    });
+  });
+  it("ignores responses without a key-spend header", () => {
+    expect(mergeKeyHeaders(key, true, { "x-litellm-key-max-budget": "99" })).toBe(key);
+  });
+});
+
+describe("budget formatting", () => {
+  it("formats compact amounts", () => {
+    expect([3.1, 40, 0.042, 412.3, 1000, 9210, 50000, 1_200_000].map(formatCompactAmount)).toEqual([
+      "$3.10",
+      "$40",
+      "$0.04",
+      "$412",
+      "$1k",
+      "$9.2k",
+      "$50k",
+      "$1.2M",
+    ]);
+  });
+  it("formats relative reset times", () => {
+    expect(formatRelativeReset(NOW + 12.5 * DAY, NOW)).toBe("12d");
+    expect(formatRelativeReset(NOW + 5.5 * 3_600_000, NOW)).toBe("5h");
+    expect(formatRelativeReset(NOW + 40.5 * 60_000, NOW)).toBe("40m");
+    expect(formatRelativeReset(NOW + 30_000, NOW)).toBe("1m");
+    expect(formatRelativeReset(NOW - 1, NOW)).toBeUndefined();
+    expect(formatRelativeReset(undefined, NOW)).toBeUndefined();
+  });
+  it("shows every set level in order", () => {
+    const levels = {
+      org: { spend: 9210, maxBudget: 50000 },
+      key: { spend: 3.1, maxBudget: 10 },
+      member: { spend: 20, maxBudget: 50 },
+      user: { spend: 40, maxBudget: 100 },
+      team: { spend: 412.3, maxBudget: 1000 },
+    };
+    expect(formatBudgetStatus(levels, "all", "LiteLLM", PLAIN, NOW)).toBe(
+      "LiteLLM key $3.10/$10 · user $40/$100 · team $412/$1k · member $20/$50 · org $9.2k/$50k",
+    );
+  });
+  it("shows only the level with the least money left in tightest mode", () => {
+    const levels = {
+      user: { spend: 40, maxBudget: 1000 },
+      team: { spend: 412.3, maxBudget: 1000, resetAt: NOW + 12.5 * DAY },
+    };
+    expect(formatBudgetStatus(levels, "tightest", "LiteLLM", PLAIN, NOW)).toBe(
+      "LiteLLM team $412/$1k (41%) · resets 12d",
+    );
+  });
+  it("colours segments by use and picks an exceeded level as tightest", () => {
+    const one = (spend: number) => formatBudgetStatus({ key: { spend, maxBudget: 10 } }, "all", "P", MARK, NOW);
+    expect(one(7.9)).toBe("<dim>P</dim> <dim>key $7.90/$10</dim>");
+    expect(one(8)).toContain("<warning>key $8/$10</warning>");
+    expect(one(10.2)).toContain("<error>key $10.20/$10</error>");
+    const levels = { key: { spend: 10.2, maxBudget: 10 }, team: { spend: 1, maxBudget: 1000 } };
+    expect(formatBudgetStatus(levels, "tightest", "P", MARK, NOW)).toBe(
+      "<dim>P</dim> <error>key $10.20/$10 (102%)</error>",
+    );
+    expect(formatBudgetStatus({ ...levels, user: { spend: 0, maxBudget: 5 } }, "all", "P", MARK, NOW)).toContain(
+      "</error><dim> · </dim><dim>user",
+    );
+  });
+  it("breaks tightest ties in level order", () => {
+    const levels = { key: { spend: 5, maxBudget: 10 }, team: { spend: 995, maxBudget: 1000 } };
+    expect(formatBudgetStatus(levels, "tightest", "P", PLAIN, NOW)).toMatch(/^P key /);
+  });
+  it("returns undefined when no level is set", () => {
+    expect(formatBudgetStatus({}, "all", "P", PLAIN, NOW)).toBeUndefined();
+  });
+});
+
+describe("formatBudgetDetails", () => {
+  it("formats the command breakdown", () => {
+    const levels = {
+      key: { spend: 3.1, maxBudget: 10, resetAt: NOW + 12.5 * 3_600_000 },
+      user: { spend: 40, maxBudget: 100, resetAt: NOW + 24.5 * DAY },
+      team: { spend: 412.3, maxBudget: 1000, resetAt: NOW + 24.5 * DAY },
+      member: { spend: 20, maxBudget: 50 },
+    };
+    expect(formatBudgetDetails("litellm", levels, new Map([["org", 401]]), NOW)).toBe(
+      [
+        'LiteLLM ("litellm") budget',
+        "  key     $3.10 of $10 (31%), resets in 12h",
+        "  user    $40.00 of $100 (40%), resets in 24d",
+        "  team    $412.30 of $1,000 (41%), resets in 24d",
+        "  member  $20.00 of $50 (40%)",
+        "  Not readable with this credential: org (401)",
+      ].join("\n"),
+    );
+  });
+  it("lists unreadable user endpoints once, and not a successful fallback", () => {
+    const text = (denied: [BudgetEndpoint, number][]) => formatBudgetDetails("p", {}, new Map(denied), NOW);
+    expect(text([["userV2", 403]])).toContain("user (403)");
+    expect(
+      text([
+        ["userV2", 404],
+        ["user", 404],
+      ]),
+    ).toContain("user (404)");
+    expect(text([["userV2", 404]])).not.toContain("Not readable");
+  });
+  it("says when no budgets are set", () => {
+    expect(formatBudgetDetails("litellm", {}, new Map(), NOW)).toBe('LiteLLM ("litellm") budget\n  no budgets set');
+  });
+});
+
+describe("budgetDisplaySetting", () => {
+  it("reads the display setting", () => {
+    expect(budgetDisplaySetting(undefined)).toEqual({ display: "all" });
+    expect(budgetDisplaySetting({})).toEqual({ display: "all" });
+    expect(budgetDisplaySetting({ display: "tightest" })).toEqual({ display: "tightest" });
+    expect(budgetDisplaySetting({ display: "compact" })).toEqual({
+      display: "all",
+      warning: 'LiteLLM budget: unknown display "compact"; using "all".',
+    });
+    expect(budgetDisplaySetting({ display: 5 }).warning).toBe('LiteLLM budget: unknown display 5; using "all".');
   });
 });

@@ -176,3 +176,115 @@ export async function pollBudget(
   if (org && userId && !denied.has("org")) Object.assign(levels, await pollOrg(auth, org, denied, previous, timeoutMs));
   return { ok: true, levels, keyPolled: keyKnown };
 }
+
+export type BudgetDisplay = "all" | "tightest";
+export interface BudgetTheme {
+  fg(color: "dim" | "warning" | "error", text: string): string;
+}
+
+// A header counts when it is a non-blank string holding a finite number >= 0.
+function headerNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+export function mergeKeyHeaders(
+  key: BudgetLevel | undefined,
+  keyPolled: boolean,
+  headers: Record<string, string>,
+): BudgetLevel | undefined {
+  const spend = headerNumber(headers["x-litellm-key-spend"]);
+  if (spend === undefined) return key;
+  const limit = headerNumber(headers["x-litellm-key-max-budget"]);
+  const maxBudget = limit !== undefined && limit > 0 ? limit : undefined;
+  if (!keyPolled) return maxBudget === undefined ? undefined : { spend, maxBudget };
+  if (key) return { ...key, spend: Math.max(key.spend, spend), maxBudget: maxBudget ?? key.maxBudget };
+  return maxBudget === undefined ? undefined : { spend, maxBudget };
+}
+
+export function formatCompactAmount(value: number): string {
+  if (value < 100) return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
+  if (value < 1000) return `$${Math.round(value)}`;
+  const [scaled, suffix] = value >= 1_000_000 ? [value / 1_000_000, "M"] : [value / 1000, "k"];
+  return `$${scaled < 10 ? scaled.toFixed(1).replace(/\.0$/, "") : Math.round(scaled)}${suffix}`;
+}
+
+export function formatRelativeReset(resetAt: number | undefined, now: number): string | undefined {
+  if (resetAt === undefined || resetAt <= now) return undefined;
+  const ms = resetAt - now;
+  if (ms >= 86_400_000) return `${Math.floor(ms / 86_400_000)}d`;
+  if (ms >= 3_600_000) return `${Math.floor(ms / 3_600_000)}h`;
+  return `${Math.max(1, Math.floor(ms / 60_000))}m`;
+}
+
+const percent = (l: BudgetLevel): number => Math.floor((l.spend / l.maxBudget) * 100);
+
+function colour(l: BudgetLevel): "dim" | "warning" | "error" {
+  const ratio = l.spend / l.maxBudget;
+  return ratio >= 1 ? "error" : ratio >= 0.8 ? "warning" : "dim";
+}
+
+export function formatBudgetStatus(
+  levels: BudgetLevels,
+  display: BudgetDisplay,
+  prefix: string,
+  theme: BudgetTheme,
+  now: number,
+): string | undefined {
+  const set = BUDGET_LEVELS.flatMap((name) => (levels[name] ? [{ name, level: levels[name] }] : []));
+  if (set.length === 0) return undefined;
+  const head = `${theme.fg("dim", prefix)} `;
+  const text = (name: string, l: BudgetLevel) =>
+    `${name} ${formatCompactAmount(l.spend)}/${formatCompactAmount(l.maxBudget)}`;
+  if (display === "all") {
+    return head + set.map(({ name, level: l }) => theme.fg(colour(l), text(name, l))).join(theme.fg("dim", " · "));
+  }
+  // Strict "<" keeps the first level in order on ties.
+  const { name, level: l } = set.reduce((a, b) =>
+    b.level.maxBudget - b.level.spend < a.level.maxBudget - a.level.spend ? b : a,
+  );
+  const reset = formatRelativeReset(l.resetAt, now);
+  return (
+    head +
+    theme.fg(colour(l), `${text(name, l)} (${percent(l)}%)`) +
+    (reset ? theme.fg("dim", ` · resets ${reset}`) : "")
+  );
+}
+
+const money = (value: number, decimals: number): string =>
+  `$${value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: 2 })}`;
+
+export function formatBudgetDetails(
+  providerName: string,
+  levels: BudgetLevels,
+  denied: ReadonlyMap<BudgetEndpoint, number>,
+  now: number,
+): string {
+  const lines = [`LiteLLM ("${providerName}") budget`];
+  for (const name of BUDGET_LEVELS) {
+    const l = levels[name];
+    if (!l) continue;
+    const reset = formatRelativeReset(l.resetAt, now);
+    const limit = money(l.maxBudget, Number.isInteger(l.maxBudget) ? 0 : 2);
+    lines.push(
+      `  ${name.padEnd(8)}${money(l.spend, 2)} of ${limit} (${percent(l)}%)${reset ? `, resets in ${reset}` : ""}`,
+    );
+  }
+  if (lines.length === 1) lines.push("  no budgets set");
+  const userV2 = denied.get("userV2");
+  const unreadable = [
+    ["key", denied.get("key")],
+    ["user", userV2 !== undefined && userV2 !== 404 ? userV2 : denied.get("user")],
+    ["team", denied.get("team")],
+    ["org", denied.get("org")],
+  ].flatMap(([name, code]) => (code === undefined ? [] : [`${name} (${code})`]));
+  if (unreadable.length > 0) lines.push(`  Not readable with this credential: ${unreadable.join(", ")}`);
+  return lines.join("\n");
+}
+
+export function budgetDisplaySetting(budgetSettings: unknown): { display: BudgetDisplay; warning?: string } {
+  const display = obj(budgetSettings)?.display;
+  if (display === undefined || display === "all" || display === "tightest") return { display: display ?? "all" };
+  return { display: "all", warning: `LiteLLM budget: unknown display ${JSON.stringify(display)}; using "all".` };
+}
