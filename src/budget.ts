@@ -69,32 +69,41 @@ async function get(
   }
 }
 
+type UserPoll = { levels: BudgetLevels; userId?: string; teamIds?: string[]; transient?: true };
+
 async function pollUser(
   auth: LiteLLMRuntimeAuth,
   denied: Map<BudgetEndpoint, number>,
   previous: BudgetLevels,
   timeoutMs: number,
-): Promise<BudgetLevels> {
-  const keepUser = (): BudgetLevels => keep(previous, ["user"]);
+): Promise<UserPoll> {
+  const keepUser = (): UserPoll => ({ levels: keep(previous, ["user"]), transient: true });
   let fetched: Fetched | undefined;
   let nested = false;
   if (!denied.has("userV2")) {
     fetched = await get(auth, "/v2/user/info", "userV2", denied, timeoutMs);
     if (fetched.status === "denied" && denied.get("userV2") === 404) fetched = undefined;
   } else if (denied.get("userV2") !== 404) {
-    return {};
+    return { levels: {} };
   }
   if (!fetched) {
-    if (denied.has("user")) return {};
+    if (denied.has("user")) return { levels: {} };
     nested = true;
     fetched = await get(auth, "/user/info", "user", denied, timeoutMs);
   }
-  if (fetched.status === "denied") return {};
+  if (fetched.status === "denied") return { levels: {} };
   if (fetched.status === "transient") return keepUser();
-  const body = nested ? obj(obj(fetched.data)?.user_info) : obj(fetched.data);
+  const data = obj(fetched.data);
+  const body = nested ? obj(data?.user_info) : data;
   if (!body) return keepUser();
   const user = level(body.spend, body.max_budget, body.budget_reset_at);
-  return user ? { user } : {};
+  // `/v2/user/info` lists team ids; `/user/info` lists team rows.
+  const teams = Array.isArray(data?.teams) ? data.teams.map((team) => str(team) ?? str(obj(team)?.team_id)) : [];
+  return {
+    levels: user ? { user } : {},
+    userId: str(body.user_id),
+    teamIds: teams.filter((team): team is string => team !== undefined),
+  };
 }
 
 type TeamPoll = { levels: BudgetLevels; organizationId?: string; transient?: true };
@@ -170,13 +179,22 @@ export async function pollBudget(
   }
   const keyKnown = keyPolled && !denied.has("key");
 
+  const userPoll: Promise<UserPoll> =
+    userId || !keyKnown ? pollUser(auth, denied, previous, timeoutMs) : Promise.resolve({ levels: {} });
+  if (!keyKnown) {
+    // Without a key row (an OIDC login's JWT), LiteLLM charges the user's team: the only one is certain, but with
+    // several it depends on the proxy's JWT settings, so those users get the user level only.
+    const user = await userPoll;
+    if (user.transient) Object.assign(levels, keep(previous, ["team", "member", "org"]));
+    else if (user.teamIds?.length === 1) [teamId, userId] = [user.teamIds[0], user.userId];
+  }
   const [user, team] = await Promise.all([
-    userId || !keyKnown ? pollUser(auth, denied, previous, timeoutMs) : {},
+    userPoll,
     teamId && !denied.has("team")
       ? pollTeam(auth, teamId, userId, denied, previous, timeoutMs)
       : ({ levels: {} } as TeamPoll),
   ]);
-  Object.assign(levels, user, team.levels);
+  Object.assign(levels, user.levels, team.levels);
 
   const org = organizationId ?? team.organizationId;
   if (org && userId && !denied.has("org")) Object.assign(levels, await pollOrg(auth, org, denied, previous, timeoutMs));

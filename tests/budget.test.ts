@@ -141,10 +141,10 @@ describe("pollBudget", () => {
     }
   });
 
-  it("still tries the user when /key/info answers 4xx, and skips team and org", async () => {
+  it("still tries the user when /key/info answers 4xx", async () => {
     const seen = mockProxy({
       "/key/info": () => status(403),
-      "/v2/user/info": () => ok(fixture("user-info-v2")),
+      "/v2/user/info": () => ok({ ...fixture("user-info-v2"), teams: [] }),
     });
     const denied = new Map<BudgetEndpoint, number>();
     const result = await poll(denied);
@@ -168,6 +168,49 @@ describe("pollBudget", () => {
     seen.length = 0;
     await poll(denied);
     expect(seen).toEqual(["/v2/user/info"]);
+  });
+
+  it("takes team, member and org from the user's only team when /key/info cannot be read", async () => {
+    const team = fixture("team-info");
+    const routes = {
+      "/key/info": () => status(500),
+      "/v2/user/info": () => ok(fixture("user-info-v2")),
+      "/team/info?team_id=T": () => ok({ ...team, team_info: { ...team.team_info, organization_id: "O" } }),
+      "/organization/list": () => ok(fixture("organization-list")),
+    };
+    mockProxy(routes);
+    const levels = {
+      user: { spend: 0.343, maxBudget: 100, resetAt: RESET },
+      team: { spend: 0.294, maxBudget: 1000, resetAt: RESET },
+      member: { spend: 0.147, maxBudget: 50 },
+      org: { spend: 9210, maxBudget: 50000 },
+    };
+    expect(await poll()).toEqual({ ok: true, keyPolled: false, levels });
+    vi.restoreAllMocks();
+
+    // A temporary user failure keeps the levels its team list led to.
+    mockProxy({ ...routes, "/v2/user/info": () => status(503) });
+    expect(await poll(new Map(), levels)).toEqual({ ok: true, keyPolled: false, levels });
+  });
+
+  it("reads the only team from /user/info, and none when the user has several", async () => {
+    mockProxy({
+      "/key/info": () => status(404),
+      "/v2/user/info": () => status(404),
+      "/user/info": () => ok(fixture("user-info-v1")),
+      "/team/info?team_id=T": () => ok(fixture("team-info")),
+    });
+    let result = await poll();
+    expect(result.ok && result.levels.member).toEqual({ spend: 0.147, maxBudget: 50 });
+    vi.restoreAllMocks();
+
+    const seen = mockProxy({
+      "/key/info": () => status(500),
+      "/v2/user/info": () => ok({ ...fixture("user-info-v2"), teams: ["T", "T2"] }),
+    });
+    result = await poll();
+    expect(result.ok && Object.keys(result.levels)).toEqual(["user"]);
+    expect(seen.filter((path) => path.startsWith("/team/info"))).toEqual([]);
   });
 
   it("ends the poll on a transient /key/info failure", async () => {
