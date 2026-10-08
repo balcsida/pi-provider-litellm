@@ -58,6 +58,16 @@ The same inspection host backs `pig login --list` and the CLI `pig login litellm
 `extension "litellm" inspection failed` on 0.4.1; configure credentials through the environment or
 `settings.json`, or log in inside a session, where the registry is bound.
 
+### Logging in inside a session
+
+On stock PiG 0.4.1, `/login litellm` offers only PiG's generic API-key prompt: the SSO flows (CLI SSO, PKCE,
+direct OIDC, pasted token) never appear, and the key is stored without the proxy URL. PiG records a native
+provider's registration without its account login method, answers a flow's `select` prompt with `Login cancelled`,
+and does not run a provider's own API-key login. The fork branch `fix/native-provider-login` of `balcsida/PiG`
+fixes all of it without any change here; with that build the login smoke in `pig/tools/login-smoke` passes for CLI
+SSO, PKCE with refresh, pasted token and API key. Until PiG ships the fix, configure credentials through
+`LITELLM_API_KEY` and `LITELLM_BASE_URL` or `settings.json`.
+
 ### Reasoning models without an effort carrier crash model selection
 
 When discovery finds a reasoning model but no evidence of a transmissible effort level (for example a Claude route
@@ -87,5 +97,15 @@ export PIG_CODING_AGENT_DIR=$(mktemp -d) LITELLM_BASE_URL=http://127.0.0.1:48417
 pig -e ./pig/extensions/litellm --list-models
 pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"
 ```
+
+The mock also plays the proxy's SSO endpoints (`-sso cli|pkce|paste`), and `pig/tools/login-smoke/login-smoke.mts`
+drives `/login litellm` through a real terminal against them:
+
+```bash
+(cd pig/tools/mockproxy && go run . -key test-key -addr 127.0.0.1:48417 -sso cli) &
+PIG_BIN=pig LITELLM_BASE_URL=http://127.0.0.1:48417 LOGIN_SMOKE_MODE=cli npx tsx pig/tools/login-smoke/login-smoke.mts
+```
+
+`LOGIN_SMOKE_MODE` is `cli`, `pkce`, `paste` or `apikey`. It needs a PiG with the login fixes described above.
 
 The `PiG` GitHub workflow runs these checks on every push and pull request.

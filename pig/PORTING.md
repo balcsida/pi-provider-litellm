@@ -97,6 +97,17 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
 
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
+5. Login inside a session: `pig/tools/login-smoke/login-smoke.mts` drives `/login litellm` through a real terminal
+   against the mock proxy's SSO modes (`go run . -key test-key -addr 127.0.0.1:48417 -sso cli|pkce|paste`), then
+   proves the stored `auth.json` entry lists models and chats outside the TUI, and for PKCE that an expired entry is
+   refreshed through PiG's host:
+
+   ```sh
+   PIG_BIN=pig LITELLM_BASE_URL=http://127.0.0.1:48417 LOGIN_SMOKE_MODE=cli npx tsx pig/tools/login-smoke/login-smoke.mts
+   ```
+
+   `LOGIN_SMOKE_MODE` is `cli`, `pkce`, `paste` or `apikey`; the mock's `-sso` mode must match the first three.
+   Stock PiG 0.4.1 fails this step (see Known PiG 0.4.1 issues); the fork branch named there passes all four.
 
 ## Status
 
@@ -134,6 +145,15 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   the same way (`extension "litellm" inspection failed: ... native provider registry is not bound`); a real
   session binds the registry, so configure credentials through the environment or `settings.json`, or log in
   inside a session.
+- `/login litellm` inside a stock 0.4.1 session offers only PiG's generic `Enter API key` prompt, stores the key
+  without the proxy URL, and never shows the SSO flows. The extension declares both methods correctly and the host
+  publishes the OAuth flow; the gaps are PiG's, fixed on the fork branch `fix/native-provider-login` of
+  `balcsida/PiG`: the registry records a native provider's registration without its OAuth method and rewrites it on
+  every catalog refresh (0.4.1 also predates PiG#192, the inheritance of a published flow); a flow's `select` prompt
+  is answered with `Login cancelled`; a provider's own `apiKey.login` is not run; and the flow's `loginLabel` is not
+  shown. With that build, step 5 of the verification ladder passes for CLI SSO, PKCE (with refresh), pasted token
+  and API key, with no change to the extension. Until PiG ships it, configure credentials through the environment or
+  `settings.json`.
 - `pig piglet build` cannot fuse a Go factory that depends on a third-party module
   ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)): the fused builder overlays Pig's own
   `go.mod` and compiles read-only, and a Binary fuses every compatible factory whether or not
