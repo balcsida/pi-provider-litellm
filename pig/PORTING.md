@@ -83,6 +83,16 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
 ## Verification ladder
 
 1. `go test ./...` in `pig/extensions/litellm`.
-2. `pig install --validate-only --json ./pig/extensions/litellm` builds and registers the factory.
-3. `pig -e ./pig/extensions/litellm` against a local mock proxy (phase 2 adds the mock).
+2. `pig install --validate-only --json ./pig/extensions/litellm` proves the factory builds, but PiG 0.4.1's
+   validate host never binds the native provider registry, so any extension that registers a native provider
+   fails it with `native provider registry is not bound`. Treat that exact error as expected there; a real load
+   is the test.
+3. Live smoke against the mock proxy in `pig/tools/mockproxy` (`go run . -key test-key -addr 127.0.0.1:48417`):
+
+   ```sh
+   export PIG_CODING_AGENT_DIR=$(mktemp -d) LITELLM_BASE_URL=http://127.0.0.1:48417 LITELLM_API_KEY=test-key
+   pig -e ./pig/extensions/litellm --list-models            # lists mock-chat, mock-claude, mock-responses
+   pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"   # streams "mock reply to: ..."
+   ```
+
 4. `pig piglet build` of a sample Piglet with `extensionRealization: fused` (phase 6).
