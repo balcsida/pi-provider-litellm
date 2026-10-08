@@ -18,6 +18,7 @@ import type { ExtensionAPI, ExtensionContext, McpServerConfig } from "@earendil-
 // A namespace import, so a Pi without `VERSION` reaches the version check instead of failing to link.
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
+import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
@@ -488,7 +489,10 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
   return record;
 }
 
-function isFeatureEnabled(settings: Record<string, unknown> | undefined, feature: "skills" | "mcp"): boolean {
+function isFeatureEnabled(
+  settings: Record<string, unknown> | undefined,
+  feature: "skills" | "mcp" | "budget",
+): boolean {
   const raw = settings?.[feature];
   return !isPlainObject(raw) || raw.enabled !== false;
 }
@@ -1883,6 +1887,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
+  const budgetEnabled = isFeatureEnabled(settings, "budget");
   const providerNames = new Set(definitions.map((definition) => definition.name));
   const oauthRuntimeRoots = new Map<string, { apiKey: string; root: string }>();
   let mcpUI: ExtensionContext["ui"] | undefined;
@@ -2229,6 +2234,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   setupLiteLLMCostTracking(pi, [...providerNames]);
+
+  if (budgetEnabled) {
+    const { display, warning } = budgetDisplaySetting(settings?.budget);
+    const definitionNamed = (name: string) => definitions.find((definition) => definition.name === name)!;
+    setupLiteLLMBudget(pi, {
+      providers: definitions.map(({ name, displayName }) => ({ name, displayName })),
+      display,
+      displayWarning: warning,
+      resolveAuth: (ctx, name) => getRuntimeAuth(ctx, definitionNamed(name)),
+      timeoutMs: getDiscoveryTimeoutMs,
+      disabledReason: discoveryDisabledReason,
+      hostOffline: isHostOffline,
+      missingCredentials: (name) => missingCredentials(definitionNamed(name)),
+    });
+  }
 
   if (skillsEnabled) {
     for (const tool of createSkillToolDefinitions(resolveDefaultRuntimeAuth)) {

@@ -96,6 +96,23 @@
 - Never register `/mcp`, `codemode`, or `tool_search`: Pi unloads the built-in extension whose tool, command, or flag an
   extension re-registers.
 
+## Budget Status
+
+- `src/budget.ts` hooks fire only for the configured LiteLLM providers and are registered after `setupLiteLLMCostTracking`, because `tests/features.test.ts` calls `after_provider_response` handler `[0]` and expects the cost hook.
+- Automatic polls run only with a UI and never under `LITELLM_OFFLINE=1`, a zero discovery timeout, or `PI_OFFLINE`; `/litellm-budget` ignores only `PI_OFFLINE`.
+- The footer and command show no proxy-supplied text (aliases, messages), and responses are never logged. The credential
+  and custom headers are kept only as an HMAC digest under a per-session random key, like the MCP registration identity;
+  CodeQL's `js/insufficient-password-hash` flags it, a false positive for an in-memory change detector.
+- A 4xx (not 429) or 500 endpoint is not retried until the credential digest (key or custom headers) changes or the
+  command runs. LiteLLM's 500
+  here repeats on every call (no database, a credential it cannot look up), while 429 and 502-504 stay retryable.
+- Polls set the key level; headers only raise it, or set it alone while `/key/info` has not succeeded.
+- A JWT credential (three dot-separated parts, LiteLLM's own `is_jwt` test), such as a Direct OIDC login's, has no key
+  row (LiteLLM 1.102 answers `/key/info` with 500); its team, member, and org come from the user's only team in
+  `/v2/user/info` (`/user/info`). A user in several teams gets the user level only: which team LiteLLM charges depends
+  on the proxy's JWT settings. Never apply this to a virtual key whose `/key/info` is denied: its user's team need not
+  be the one it is charged to (the master key's default user is added to every team the master key creates).
+
 ## Reasoning Policy
 
 - Discovered `litellmPolicy` scopes request and response behavior to backend evidence; route text never authorizes generation controls or request-side visibility parameters.
