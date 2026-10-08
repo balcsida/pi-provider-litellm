@@ -130,6 +130,12 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 ## Known PiG 0.4.1 issues
 
 - `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
+- `pig piglet build` cannot fuse a Go factory that depends on a third-party module
+  ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)): the fused builder overlays Pig's own
+  `go.mod` and compiles read-only, and a Binary fuses every compatible factory whether or not
+  `extensionRealization` is set. This is why the login flows stay hand-written instead of using
+  `github.com/balcsida/litellm-auth-go`, and why this module must keep depending only on the standard library,
+  PiG and the SDK until that issue is resolved.
 - A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted
   when no effort carrier is evidenced, for example a Claude route on Chat Completions without
   `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:173` (`thinkingMaxLevelForEntry`) indexes

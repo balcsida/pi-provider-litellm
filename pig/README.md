@@ -42,6 +42,13 @@ The first build downloads the PiG source and needs a Go toolchain (`pig setup go
 
 ## Known PiG 0.4.1 issues
 
+### Fused builds and third-party Go modules
+
+`pig piglet build` cannot fuse a Go factory that depends on a third-party module
+([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)). This extension therefore depends only on
+the standard library, PiG and the SDK, and its login flows are implemented here rather than through a shared
+library.
+
 ### `--validate-only`
 
 `pig install --validate-only` fails with `native provider registry is not bound` for this extension. PiG 0.4.1's
