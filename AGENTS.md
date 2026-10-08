@@ -177,7 +177,8 @@
   `refs` and the `.../issues/N` link for each issue. Use indented sub-bullets only for a large feature or a breaking
   change's migration details. Keep dollar amounts in backticks, or GitHub renders them as math.
 - Say what upgrading costs. Give migration steps for breaking changes (for example pinning the last release for older
-  Pi), and add `Stored models are rediscovered once after updating.` when `LITELLM_DISCOVERY_VERSION` differs from the
+  Pi), and add `Stored models are rediscovered after updating when networking is allowed and discovery succeeds;
+  otherwise cached models remain until a later successful refresh.` when `LITELLM_DISCOVERY_VERSION` differs from the
   previous tag (`git grep -h 'LITELLM_DISCOVERY_VERSION =' <tag> -- src/backend-identity.ts`).
 - Leave out `chore: release` PRs. Fold dependency bumps, assets, CI, and docs-only work into one `## Maintenance`
   bullet each, or drop them when nothing else needs a section.
