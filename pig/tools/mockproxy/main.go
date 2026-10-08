@@ -76,8 +76,13 @@ var defaultModels = []ModelInfo{
 	},
 }
 
+// auth accepts the configured key or an issued token as a bearer token, or in the x-api-key header LiteLLM
+// uses when it forwards to an Anthropic backend.
 func auth(w http.ResponseWriter, r *http.Request, checkKey string) bool {
 	auth := r.Header.Get("Authorization")
+	if apiKey := r.Header.Get("x-api-key"); apiKey != "" && auth == "" {
+		auth = "Bearer " + apiKey
+	}
 	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != checkKey && !isIssued(strings.TrimPrefix(auth, "Bearer ")) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -322,8 +327,13 @@ func makeHandleMessages(checkKey string) http.HandlerFunc {
 			`{"type":"message_stop"}`,
 		}
 
+		// Anthropic names each event on an event: line before its data: line; PiG's driver keys on it.
 		for _, event := range events {
-			fmt.Fprintf(w, "data: %s\n\n", event)
+			var typed struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal([]byte(event), &typed)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
 		}
 	}
 }
