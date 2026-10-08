@@ -93,6 +93,13 @@
 - The remembered registration identity is an HMAC of the config, because custom headers can carry credentials. Register
   again only when it changes, unregister when no proxy root remains (logout), and register nothing under
   `LITELLM_OFFLINE`, a zero discovery timeout, or `PI_OFFLINE`.
+- Before each new registration, `mcpAccessRefused` sends one `initialize`, with the credential and headers Pi will send,
+  to that credential's own root, and a 403 registers the server with `enabled: false`: LiteLLM 1.102.0+ refuses a key
+  with no MCP servers, and Pi warns about a failed server at every start and still turns on `codemode` for it. Any
+  other answer or a failed check registers it enabled, and so does a configured key helper (`!command`) or ADC: like
+  seeding, the check runs neither, and resolving without them falls through to another key. The check `DELETE`s the
+  session it opened, and `syncMcpServer` claims the attempt before awaiting it, so a login that starts meanwhile
+  drops the claim and the registration never lands.
 - Never register `/mcp`, `codemode`, or `tool_search`: Pi unloads the built-in extension whose tool, command, or flag an
   extension re-registers.
 
