@@ -54,6 +54,9 @@ library.
 `pig install --validate-only` fails with `native provider registry is not bound` for this extension. PiG 0.4.1's
 validate host does not bind the native provider registry, and this extension registers one. Use
 `pig package validate ./pig` to validate the package, and a real load (`pig -e ...`) to prove the extension works.
+The same inspection host backs `pig login --list` and the CLI `pig login litellm`, which report
+`extension "litellm" inspection failed` on 0.4.1; configure credentials through the environment or
+`settings.json`, or log in inside a session, where the registry is bound.
 
 ### Reasoning models without an effort carrier crash model selection
 

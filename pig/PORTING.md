@@ -130,6 +130,10 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 ## Known PiG 0.4.1 issues
 
 - `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
+  `pig login --list` and the CLI `pig login litellm` start the extension through the same inspection host and fail
+  the same way (`extension "litellm" inspection failed: ... native provider registry is not bound`); a real
+  session binds the registry, so configure credentials through the environment or `settings.json`, or log in
+  inside a session.
 - `pig piglet build` cannot fuse a Go factory that depends on a third-party module
   ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)): the fused builder overlays Pig's own
   `go.mod` and compiles read-only, and a Binary fuses every compatible factory whether or not
