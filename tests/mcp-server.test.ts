@@ -29,10 +29,11 @@ function mockProxy(mcp?: (request: Request) => Response | Promise<Response>): vo
 
 // LiteLLM 1.102.0's answer to `initialize` for a key with no MCP servers granted.
 function noServersGranted(): Response {
-  return Response.json(
-    { detail: { error: "The key has no MCP servers granted, or none of its granted servers is loaded and allowed." } },
-    { status: 403 },
-  );
+  const error =
+    "The key has no MCP servers granted, or none of its granted servers is loaded and allowed for this client IP. " +
+    "Grant servers or access groups to the key, its team, or its organization (object_permission.mcp_servers), " +
+    "check the server's allowed IPs, and reconnect.";
+  return Response.json({ detail: { error } }, { status: 403 });
 }
 
 async function makeAgentDir(litellm: Record<string, unknown> = {}): Promise<string> {
@@ -315,9 +316,14 @@ describe("LiteLLM MCP server registration", () => {
     process.env.LITELLM_HEADERS = JSON.stringify({ "x-mcp-client": "pi" });
     const pi = await load(await makeAgentDir());
 
-    expect(pi.mcpServers.get("litellm")).not.toHaveProperty("enabled");
+    expect(pi.mcpServers.get("litellm")).toEqual({
+      url: "https://proxy.example.com/mcp",
+      auth: { provider: "litellm" },
+      headers: { "x-mcp-client": "pi" },
+    });
     const check = requests[0]!;
     expect(check.method).toBe("POST");
+    expect(check.redirect).toBe("manual");
     expect(check.headers.get("authorization")).toBe("Bearer sk-default");
     expect(check.headers.get("x-mcp-client")).toBe("pi");
     expect(await check.json()).toMatchObject({ method: "initialize" });
@@ -326,6 +332,58 @@ describe("LiteLLM MCP server registration", () => {
     expect(close.method).toBe("DELETE");
     expect(close.headers.get("mcp-session-id")).toBe("check-session");
     expect(close.headers.get("authorization")).toBe("Bearer sk-default");
+  });
+
+  it.each([401, 404, 500])("registers the server enabled when the check gets %i", async (status) => {
+    mockProxy(() => new Response(null, { status }));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")).toEqual({
+      url: "https://proxy.example.com/mcp",
+      auth: { provider: "litellm" },
+    });
+  });
+
+  it("gives up a check the proxy does not answer within the discovery budget", async () => {
+    mockProxy(
+      (request) =>
+        new Promise((_, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason))),
+    );
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "50";
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")).toEqual({
+      url: "https://proxy.example.com/mcp",
+      auth: { provider: "litellm" },
+    });
+  });
+
+  it.each([
+    ["a stored key helper", { type: "api_key", key: "!print-key" }, {}],
+    ["Google ADC", undefined, { LITELLM_GCLOUD_TOKEN_AUTH: "1" }],
+  ])("skips the check when %s supplies the credential Pi sends", async (_source, stored, env) => {
+    const checks: Request[] = [];
+    mockProxy((request) => {
+      checks.push(request);
+      return noServersGranted();
+    });
+    // Without the helper or ADC, resolution would fall through to this key.
+    process.env.LITELLM_API_KEY = "sk-env";
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    Object.assign(process.env, env);
+    const agentDir = await makeAgentDir();
+    if (stored) await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: stored }), "utf8");
+    const pi = await load(agentDir);
+
+    expect(checks).toHaveLength(0);
+    expect(pi.mcpServers.get("litellm")).toEqual({
+      url: "https://proxy.example.com/mcp",
+      auth: { provider: "litellm" },
+    });
   });
 
   it("drops a check that a login overtakes, and checks again on the next turn", async () => {

@@ -1963,7 +1963,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   async function mcpAccessRefused(definition: ProviderDefinition, url: string): Promise<boolean> {
     try {
       const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
-      // As in seeding, no key helper or ADC exchange runs here; a credential that needs one is not checked.
+      // The check must send the credential Pi will send. Like seeding, it runs no key helper and
+      // mints no ADC token, and resolving without them would fall through to another key.
+      if (
+        (stored?.type === "api_key" && stored.key?.startsWith("!")) ||
+        definition.apiKeyConfig?.startsWith("!") ||
+        (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+      ) {
+        return false;
+      }
       const auth = await authForCredential(definition, stored, false);
       // The credential goes only to its own root.
       if (`${auth.baseUrl}/mcp` !== url) return false;
