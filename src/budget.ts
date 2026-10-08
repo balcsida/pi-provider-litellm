@@ -181,9 +181,10 @@ export async function pollBudget(
 
   const userPoll: Promise<UserPoll> =
     userId || !keyKnown ? pollUser(auth, denied, previous, timeoutMs) : Promise.resolve({ levels: {} });
-  if (!keyKnown) {
-    // Without a key row (an OIDC login's JWT), LiteLLM charges the user's team: the only one is certain, but with
-    // several it depends on the proxy's JWT settings, so those users get the user level only.
+  // A JWT (LiteLLM's own test: three dot-separated parts), such as an OIDC login's id_token, has no key row, and LiteLLM
+  // charges its user's team: the only one is certain, but with several it depends on the proxy's JWT settings. A
+  // virtual key's user may be in a team the key is not charged to, such as the master key's default user.
+  if (!keyKnown && auth.apiKey.split(".").length === 3) {
     const user = await userPoll;
     if (user.transient) Object.assign(levels, keep(previous, ["team", "member", "org"]));
     else if (user.teamIds?.length === 1) [teamId, userId] = [user.teamIds[0], user.userId];

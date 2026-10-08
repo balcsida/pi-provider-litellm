@@ -107,9 +107,11 @@
   command runs. LiteLLM's 500
   here repeats on every call (no database, a credential it cannot look up), while 429 and 502-504 stay retryable.
 - Polls set the key level; headers only raise it, or set it alone while `/key/info` has not succeeded.
-- Without a readable `/key/info` (a JWT, such as a Direct OIDC login's, has no key row; LiteLLM 1.102 answers 500), team,
-  member, and org come from the user's only team in `/v2/user/info` (`/user/info`). A user in several teams gets the user
-  level only: which team LiteLLM charges depends on the proxy's JWT settings.
+- A JWT credential (three dot-separated parts, LiteLLM's own `is_jwt` test), such as a Direct OIDC login's, has no key
+  row (LiteLLM 1.102 answers `/key/info` with 500); its team, member, and org come from the user's only team in
+  `/v2/user/info` (`/user/info`). A user in several teams gets the user level only: which team LiteLLM charges depends
+  on the proxy's JWT settings. Never apply this to a virtual key whose `/key/info` is denied: its user's team need not
+  be the one it is charged to (the master key's default user is added to every team the master key creates).
 
 ## Reasoning Policy
 

@@ -21,6 +21,11 @@ const keyWith = (name: string, info: Record<string, unknown>) => {
 };
 const poll = (denied = new Map<BudgetEndpoint, number>(), previous: BudgetLevels = {}) =>
   pollBudget(AUTH, denied, previous, 5000);
+// Shaped like an OIDC id_token: three dot-separated parts, which is how LiteLLM tells a JWT from a key.
+const JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJVMSJ9.c2ln";
+const JWT_AUTH = { token: JWT, gateway: "g1" };
+const pollJwt = (denied = new Map<BudgetEndpoint, number>(), previous: BudgetLevels = {}) =>
+  pollBudget({ ...AUTH, apiKey: JWT }, denied, previous, 5000);
 
 describe("pollBudget", () => {
   it("reads key, user, team and member budgets for a key with a user and a team", async () => {
@@ -141,10 +146,11 @@ describe("pollBudget", () => {
     }
   });
 
-  it("still tries the user when /key/info answers 4xx", async () => {
+  it("still tries the user when /key/info answers 4xx, and skips team and org", async () => {
+    // A virtual key's user may be in a team the key is not charged to, such as the master key's default user.
     const seen = mockProxy({
       "/key/info": () => status(403),
-      "/v2/user/info": () => ok({ ...fixture("user-info-v2"), teams: [] }),
+      "/v2/user/info": () => ok(fixture("user-info-v2")),
     });
     const denied = new Map<BudgetEndpoint, number>();
     const result = await poll(denied);
@@ -170,7 +176,7 @@ describe("pollBudget", () => {
     expect(seen).toEqual(["/v2/user/info"]);
   });
 
-  it("takes team, member and org from the user's only team when /key/info cannot be read", async () => {
+  it("takes team, member and org from a JWT user's only team, as a JWT has no key row", async () => {
     const team = fixture("team-info");
     const routes = {
       "/key/info": () => status(500),
@@ -178,37 +184,43 @@ describe("pollBudget", () => {
       "/team/info?team_id=T": () => ok({ ...team, team_info: { ...team.team_info, organization_id: "O" } }),
       "/organization/list": () => ok(fixture("organization-list")),
     };
-    mockProxy(routes);
+    mockProxy(routes, JWT_AUTH);
     const levels = {
       user: { spend: 0.343, maxBudget: 100, resetAt: RESET },
       team: { spend: 0.294, maxBudget: 1000, resetAt: RESET },
       member: { spend: 0.147, maxBudget: 50 },
       org: { spend: 9210, maxBudget: 50000 },
     };
-    expect(await poll()).toEqual({ ok: true, keyPolled: false, levels });
+    expect(await pollJwt()).toEqual({ ok: true, keyPolled: false, levels });
     vi.restoreAllMocks();
 
     // A temporary user failure keeps the levels its team list led to.
-    mockProxy({ ...routes, "/v2/user/info": () => status(503) });
-    expect(await poll(new Map(), levels)).toEqual({ ok: true, keyPolled: false, levels });
+    mockProxy({ ...routes, "/v2/user/info": () => status(503) }, JWT_AUTH);
+    expect(await pollJwt(new Map(), levels)).toEqual({ ok: true, keyPolled: false, levels });
   });
 
-  it("reads the only team from /user/info, and none when the user has several", async () => {
-    mockProxy({
-      "/key/info": () => status(404),
-      "/v2/user/info": () => status(404),
-      "/user/info": () => ok(fixture("user-info-v1")),
-      "/team/info?team_id=T": () => ok(fixture("team-info")),
-    });
-    let result = await poll();
+  it("reads a JWT user's only team from /user/info, and none when the user has several", async () => {
+    mockProxy(
+      {
+        "/key/info": () => status(404),
+        "/v2/user/info": () => status(404),
+        "/user/info": () => ok(fixture("user-info-v1")),
+        "/team/info?team_id=T": () => ok(fixture("team-info")),
+      },
+      JWT_AUTH,
+    );
+    let result = await pollJwt();
     expect(result.ok && result.levels.member).toEqual({ spend: 0.147, maxBudget: 50 });
     vi.restoreAllMocks();
 
-    const seen = mockProxy({
-      "/key/info": () => status(500),
-      "/v2/user/info": () => ok({ ...fixture("user-info-v2"), teams: ["T", "T2"] }),
-    });
-    result = await poll();
+    const seen = mockProxy(
+      {
+        "/key/info": () => status(500),
+        "/v2/user/info": () => ok({ ...fixture("user-info-v2"), teams: ["T", "T2"] }),
+      },
+      JWT_AUTH,
+    );
+    result = await pollJwt();
     expect(result.ok && Object.keys(result.levels)).toEqual(["user"]);
     expect(seen.filter((path) => path.startsWith("/team/info"))).toEqual([]);
   });
