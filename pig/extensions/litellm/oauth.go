@@ -1,15 +1,13 @@
 package litellm
 
 // Ports src/index.ts (promptBaseUrl through refreshLiteLLM): the API-key login, the native PKCE, direct OIDC,
-// CLI SSO and pasted-token OAuth flows, and the OAuth refresh with its transient-failure backoff.
+// CLI SSO and pasted-token OAuth flows, and the OAuth refresh with its transient-failure backoff. The login
+// protocols (CLI SSO, proxy PKCE, IdP-direct OIDC and their refreshes) come from github.com/balcsida/litellm-auth-go;
+// this file is the glue that picks the flow, talks to the user and maps results to the auth.json shapes.
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,18 +17,19 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	litellmauth "github.com/balcsida/litellm-auth-go"
 
 	"github.com/MichaelKinsy/PiG/ai"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/protocols"
 )
 
 const (
-	cliSSOExpiresInSeconds  = 600
-	cliAuthDiscoveryPath    = "/.well-known/litellm-cli-auth"
 	pkceFlow                = "litellm_cli_pkce"
 	oidcFlow                = "oidc_pkce" // persisted in auth.json; never rename
 	oidcDiscoveryPath       = "/.well-known/openid-configuration"
@@ -38,9 +37,10 @@ const (
 	pkceTransientBackoffMs  = 5_000
 	expireTokenImmediately  = 0
 	maxSafeInteger          = float64(1<<53 - 1)
-	pkceClientName          = "pi-provider-litellm"
-	loginCompletePage       = "<!doctype html><title>LiteLLM login complete</title><p>You can close this window.</p>"
 	virtualKeyProgressStart = "Generating virtual key..."
+	// oidcClientBaseURL is the base the OIDC client is built on: the IdP flow never contacts the proxy, but the
+	// library insists on a valid one.
+	oidcClientBaseURL = "https://litellm.invalid"
 )
 
 // Timing knobs that tests shorten.
@@ -56,8 +56,6 @@ var authTransport http.RoundTripper
 
 var (
 	authTokenPattern  = regexp.MustCompile(`^[\x21-\x7e]+$`)
-	oauthCodePattern  = regexp.MustCompile(`^[a-z_]{1,64}$`)
-	jwtPartPattern    = regexp.MustCompile(`^[\w-]+$`)
 	bearerPrefix      = regexp.MustCompile(`(?i)^Bearer\s+`)
 	errAuthNetwork    = errors.New("network error")
 	transientBackoffs = struct {
@@ -72,11 +70,11 @@ func init() {
 
 // ---- HTTP plumbing --------------------------------------------------------------------------------------
 
+// The raw helpers below serve the requests the library does not own: OIDC discovery and virtual key generation.
+
 const (
 	maxAuthBodyBytes = 1 << 20
 	maxAuthRedirects = 5
-	// maxCliSSOExpiresInSeconds bounds a server-supplied CLI SSO lifetime so the deadline arithmetic cannot overflow.
-	maxCliSSOExpiresInSeconds = 3600
 )
 
 var errAuthBodyTooLarge = errors.New("response body too large")
@@ -167,7 +165,7 @@ func doAuthWith(ctx context.Context, follow bool, method, endpoint string, heade
 	return &authResponse{status: response.StatusCode, body: buffer.Bytes(), bodyErr: readErr}, nil
 }
 
-// authRequestHeaders is authRequestHeaders: Accept is always JSON.
+// authRequestHeaders copies headers and sets Accept to JSON, plus Content-Type when contentType is set.
 func authRequestHeaders(headers map[string]string, contentType string) http.Header {
 	result := http.Header{}
 	for name, value := range headers {
@@ -204,32 +202,8 @@ func isAuthToken(value any) bool {
 	return ok && authTokenPattern.MatchString(text)
 }
 
-// oauthErrorCode is the OAuth `error` code when it is a plain code; descriptions are never echoed.
-func oauthErrorCode(value any) string {
-	if text, ok := value.(string); ok && oauthCodePattern.MatchString(text) {
-		return text
-	}
-	return ""
-}
-
-func constantTimeEqual(value any, expected string) bool {
-	text, ok := value.(string)
-	return ok && subtle.ConstantTimeCompare([]byte(text), []byte(expected)) == 1
-}
-
 func isSafeInteger(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value == math.Trunc(value) && math.Abs(value) <= maxSafeInteger
-}
-
-func randomToken() string {
-	buffer := make([]byte, 32)
-	_, _ = rand.Read(buffer)
-	return base64.RawURLEncoding.EncodeToString(buffer)
-}
-
-func pkceChallenge(verifier string) string {
-	digest := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 // urlOrigin is scheme://host[:port] with the scheme's default port dropped, as URL.origin.
@@ -246,14 +220,6 @@ func urlOrigin(u *url.URL) string {
 		host += ":" + port
 	}
 	return strings.ToLower(u.Scheme) + "://" + host
-}
-
-func canonicalIssuer(value string) (string, error) {
-	u, err := url.Parse(value)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("LiteLLM CLI auth has invalid issuer")
-	}
-	return urlOrigin(u) + firstNonEmpty(strings.TrimRight(u.EscapedPath(), "/"), "/"), nil
 }
 
 func sameOriginURL(value any, issuer *url.URL, field string) (string, error) {
@@ -286,23 +252,6 @@ func httpsURL(value any, allowQuery bool) (string, bool) {
 		return "", false
 	}
 	return text, true
-}
-
-func jwtClaims(token string) map[string]any {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 || parts[1] == "" || !jwtPartPattern.MatchString(parts[1]) {
-		return nil
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil
-	}
-	var claims any
-	if json.Unmarshal(payload, &claims) != nil {
-		return nil
-	}
-	object, _ := claims.(map[string]any)
-	return object
 }
 
 // ---- credential fields ----------------------------------------------------------------------------------
@@ -399,253 +348,12 @@ func loginAPIKey(ctx context.Context, interaction ai.AuthInteraction, definition
 	return ai.Credential{Type: ai.CredentialAPIKey, Key: key, Env: map[string]string{envBaseURL: baseURL}}, nil
 }
 
-// ---- token endpoints ------------------------------------------------------------------------------------
+// ---- token failures -------------------------------------------------------------------------------------
 
-// tokenFailure is a token-endpoint outcome that is not a success. Transient failures may be retried.
+// tokenFailure is a refresh outcome that is not a success. Transient failures may be retried.
 type tokenFailure struct {
 	transient bool
 	message   string
-}
-
-// postTokenForm POSTs a token form without following redirects; each flow validates its own success fields.
-// A non-nil error is a cancellation; failure describes everything else.
-func postTokenForm(ctx context.Context, endpoint string, form url.Values, headers map[string]string, label string) (map[string]any, *tokenFailure, error) {
-	response, err := doAuth(ctx, http.MethodPost, endpoint, authRequestHeaders(headers, "application/x-www-form-urlencoded"), []byte(form.Encode()))
-	if err != nil {
-		if errors.Is(err, errAuthNetwork) {
-			return nil, &tokenFailure{true, label + " token exchange failed (network error)"}, nil
-		}
-		return nil, nil, err
-	}
-	if response.bodyErr != nil && response.ok() {
-		return nil, &tokenFailure{true, label + " token exchange failed (network error)"}, nil
-	}
-	data := response.object()
-	if !response.ok() {
-		message := fmt.Sprintf("%s token exchange failed (HTTP %d)", label, response.status)
-		if code := oauthErrorCode(data["error"]); code != "" {
-			message = fmt.Sprintf("%s token exchange rejected (%s)", label, code)
-		}
-		return nil, &tokenFailure{response.status == http.StatusTooManyRequests || response.status >= 500, message}, nil
-	}
-	if data == nil {
-		data = map[string]any{}
-	}
-	return data, nil, nil
-}
-
-type pkceToken struct {
-	access, refresh string
-	expires         int64
-	userID, teamID  string
-}
-
-func optionalString(data map[string]any, name string) string {
-	text, _ := data[name].(string)
-	return text
-}
-
-func requestPkceToken(ctx context.Context, endpoint string, form url.Values, headers map[string]string, existingRefresh string) (*pkceToken, *tokenFailure, error) {
-	data, failure, err := postTokenForm(ctx, endpoint, form, headers, "LiteLLM")
-	if err != nil || failure != nil {
-		return nil, failure, err
-	}
-	invalid := &tokenFailure{false, "LiteLLM token exchange returned an invalid response"}
-	expiresIn, hasLifetime := data["expires_in"].(float64)
-	if !hasLifetime || math.IsNaN(expiresIn) || math.IsInf(expiresIn, 0) || expiresIn <= 0 {
-		return nil, invalid, nil
-	}
-	expires := float64(now().UnixMilli()) + expiresIn*1000
-	tokenType, _ := data["token_type"].(string)
-	if !isAuthToken(data["access_token"]) || (!isAuthToken(data["refresh_token"]) && !isAuthToken(existingRefresh)) ||
-		strings.ToLower(tokenType) != "bearer" || !isSafeInteger(expires) {
-		return nil, invalid, nil
-	}
-	refresh := existingRefresh // a refresh may not rotate the refresh token
-	if isAuthToken(data["refresh_token"]) {
-		refresh = data["refresh_token"].(string)
-	}
-	return &pkceToken{
-		access: data["access_token"].(string), refresh: refresh, expires: int64(expires),
-		userID: optionalString(data, "user_id"), teamID: optionalString(data, "team_id"),
-	}, nil, nil
-}
-
-// ---- loopback redirect ----------------------------------------------------------------------------------
-
-type loopbackCallback struct {
-	RedirectURI string
-	State       string
-	// Code returns the authorization code of the first callback carrying the expected state.
-	Code func() (string, error)
-}
-
-type callbackResult struct {
-	code string
-	err  error
-}
-
-// withLoopbackCallback serves an RFC 8252 loopback redirect on 127.0.0.1 for the lifetime of run and shuts the
-// listener down on every exit path. Each port is tried in order; without any, the OS assigns one.
-func withLoopbackCallback[T any](ctx context.Context, label string, ports []int, run func(loopbackCallback) (T, error)) (T, error) {
-	var zero T
-	state := randomToken()
-	results := make(chan callbackResult, 1)
-	settle := func(result callbackResult) {
-		select {
-		case results <- result:
-		default:
-		}
-	}
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path != "/callback" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		query := r.URL.Query()
-		if !constantTimeEqual(firstQuery(query, "state"), state) {
-			http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
-			return
-		}
-		if query.Get("error") != "" {
-			http.Error(w, "OAuth login failed", http.StatusBadRequest)
-			message := label + " login was denied"
-			if code := oauthErrorCode(query.Get("error")); code != "" {
-				message += " (" + code + ")"
-			}
-			settle(callbackResult{err: errors.New(message)})
-			return
-		}
-		code := query.Get("code")
-		if code == "" {
-			http.Error(w, "Missing OAuth code", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(loginCompletePage))
-		settle(callbackResult{code: code})
-	})
-
-	candidates := ports
-	if len(candidates) == 0 {
-		candidates = []int{0}
-	}
-	var listener net.Listener
-	var listenErr error
-	for _, port := range candidates {
-		if listener, listenErr = net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); listenErr == nil {
-			break
-		}
-	}
-	if listenErr != nil {
-		return zero, listenErr
-	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: loginTimeout}
-	served := make(chan struct{})
-	go func() {
-		defer close(served)
-		_ = server.Serve(listener)
-	}()
-	defer func() {
-		_ = server.Close()
-		<-served
-	}()
-
-	code := func() (string, error) {
-		timer := time.NewTimer(callbackTimeout)
-		defer timer.Stop()
-		select {
-		case result := <-results:
-			return result.code, result.err
-		case <-timer.C:
-			return "", fmt.Errorf("%s login timed out", label)
-		case <-ctx.Done():
-			return "", context.Cause(ctx)
-		}
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	return run(loopbackCallback{RedirectURI: fmt.Sprintf("http://127.0.0.1:%d/callback", port), State: state, Code: code})
-}
-
-func firstQuery(query url.Values, name string) any {
-	values, ok := query[name]
-	if !ok || len(values) == 0 {
-		return nil
-	}
-	return values[0]
-}
-
-// ---- native PKCE ----------------------------------------------------------------------------------------
-
-type cliAuthDiscovery struct {
-	issuer, authorizationEndpoint, tokenEndpoint, registrationEndpoint, resource string
-}
-
-func discoverPkce(ctx context.Context, baseURL string, headers map[string]string) (*cliAuthDiscovery, error) {
-	baseIssuer, err := canonicalIssuer(baseURL)
-	if err != nil {
-		return nil, err
-	}
-	response, err := doAuth(ctx, http.MethodGet, baseURL+cliAuthDiscoveryPath, authRequestHeaders(headers, ""), nil)
-	if err != nil {
-		if errors.Is(err, errAuthNetwork) {
-			return nil, errors.New("LiteLLM CLI auth discovery failed (network error)")
-		}
-		return nil, err
-	}
-	if response.status == http.StatusNotFound {
-		return nil, nil
-	}
-	if !response.ok() {
-		return nil, fmt.Errorf("LiteLLM CLI auth discovery failed (HTTP %d)", response.status)
-	}
-	parsed, err := readAuthJSON(response, "LiteLLM CLI auth discovery")
-	if err != nil {
-		return nil, err
-	}
-	data, _ := parsed.(map[string]any)
-	if version, _ := data["contract_version"].(float64); data == nil || version != 1 {
-		return nil, errors.New("LiteLLM CLI auth discovery has unsupported contract version")
-	}
-	if !includesString(data["code_challenge_methods_supported"], "S256") {
-		return nil, errors.New("LiteLLM CLI auth discovery does not support S256")
-	}
-	issuerText, _ := data["issuer"].(string)
-	if strings.TrimSpace(issuerText) == "" {
-		return nil, errors.New("LiteLLM CLI auth discovery has invalid issuer")
-	}
-	issuer, err := url.Parse(issuerText)
-	if err != nil {
-		return nil, errors.New("LiteLLM CLI auth discovery has invalid issuer")
-	}
-	canonical, err := canonicalIssuer(issuerText)
-	if err != nil {
-		return nil, err
-	}
-	if canonical != baseIssuer {
-		return nil, errors.New("LiteLLM CLI auth discovery issuer does not match the proxy URL")
-	}
-	discovery := &cliAuthDiscovery{issuer: issuerText}
-	for _, field := range []struct {
-		key, label string
-		target     *string
-	}{
-		{"authorization_endpoint", "authorization endpoint", &discovery.authorizationEndpoint},
-		{"token_endpoint", "token endpoint", &discovery.tokenEndpoint},
-		{"registration_endpoint", "registration endpoint", &discovery.registrationEndpoint},
-		{"resource", "resource", &discovery.resource},
-	} {
-		if *field.target, err = sameOriginURL(data[field.key], issuer, field.label); err != nil {
-			return nil, err
-		}
-	}
-	return discovery, nil
 }
 
 func includesString(value any, want string) bool {
@@ -661,93 +369,108 @@ func includesString(value any, want string) bool {
 	return false
 }
 
-func loginPkce(ctx context.Context, interaction ai.AuthInteraction, baseURL string, discovery *cliAuthDiscovery, headers map[string]string) (ai.Credential, error) {
-	verifier := randomToken()
-	return withLoopbackCallback(ctx, "LiteLLM PKCE", nil, func(callback loopbackCallback) (ai.Credential, error) {
-		body, _ := json.Marshal(map[string]any{
-			"client_name":                pkceClientName,
-			"redirect_uris":              []string{callback.RedirectURI},
-			"token_endpoint_auth_method": "none",
-			"grant_types":                []string{"authorization_code", "refresh_token"},
-			"response_types":             []string{"code"},
-		})
-		registrationResponse, err := doAuth(ctx, http.MethodPost, discovery.registrationEndpoint, authRequestHeaders(headers, "application/json"), body)
-		if err != nil {
-			if errors.Is(err, errAuthNetwork) {
-				return ai.Credential{}, errors.New("LiteLLM PKCE client registration failed (network error)")
-			}
-			return ai.Credential{}, err
-		}
-		if !registrationResponse.ok() {
-			return ai.Credential{}, fmt.Errorf("LiteLLM PKCE client registration failed (HTTP %d)", registrationResponse.status)
-		}
-		parsed, err := readAuthJSON(registrationResponse, "LiteLLM CLI auth registration")
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		registration, _ := parsed.(map[string]any)
-		clientID, _ := registration["client_id"].(string)
-		if registration == nil || !isAuthToken(clientID) || !includesString(registration["redirect_uris"], callback.RedirectURI) {
-			return ai.Credential{}, errors.New("LiteLLM PKCE client registration returned an invalid response")
-		}
-		authorizationURL, err := authorizationURL(discovery.authorizationEndpoint, map[string]string{
-			"client_id":             clientID,
-			"redirect_uri":          callback.RedirectURI,
-			"response_type":         "code",
-			"resource":              discovery.resource,
-			"code_challenge":        pkceChallenge(verifier),
-			"code_challenge_method": "S256",
-			"state":                 callback.State,
-		})
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		notifyAuth(interaction, ai.AuthURLEvent{URL: authorizationURL, Instructions: "Open this URL in a browser to sign in with LiteLLM."})
-		code, err := callback.Code()
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		token, failure, err := requestPkceToken(ctx, discovery.tokenEndpoint, url.Values{
-			"grant_type":    {"authorization_code"},
-			"code":          {code},
-			"redirect_uri":  {callback.RedirectURI},
-			"client_id":     {clientID},
-			"code_verifier": {verifier},
-			"resource":      {discovery.resource},
-		}, headers, "")
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		if failure != nil {
-			return ai.Credential{}, errors.New(failure.message)
-		}
-		credential := newOAuthCredential(token.access, token.refresh, float64(token.expires), baseURL)
-		setExtra(&credential, "flow", pkceFlow)
-		setExtra(&credential, "clientId", clientID)
-		setExtra(&credential, "tokenEndpoint", discovery.tokenEndpoint)
-		setExtra(&credential, "resource", discovery.resource)
-		if token.userID != "" {
-			setExtra(&credential, "userId", token.userID)
-		}
-		if token.teamID != "" {
-			setExtra(&credential, "teamId", token.teamID)
-		}
-		return credential, nil
-	})
+// ---- library clients ------------------------------------------------------------------------------------
+
+// headerTransport adds the resolved custom headers to each request, never overriding one the request sets.
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
 }
 
-// authorizationURL sets params on the endpoint's own query, replacing any parameter it already carries.
-func authorizationURL(endpoint string, params map[string]string) (string, error) {
-	u, err := url.Parse(endpoint)
+func (t headerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	request = request.Clone(request.Context())
+	for name, value := range t.headers {
+		if _, set := request.Header[http.CanonicalHeaderKey(name)]; !set {
+			request.Header.Set(name, value)
+		}
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(request)
+}
+
+// newAuthClient builds a library client over authTransport. headers are added to every request: the proxy
+// flows pass the resolved custom headers, the IdP flow passes none.
+func newAuthClient(baseURL string, definition providerDefinition, headers map[string]string) (*litellmauth.Client, error) {
+	options := []litellmauth.Option{
+		litellmauth.WithHTTPClient(&http.Client{Transport: headerTransport{base: authTransport, headers: headers}}),
+		litellmauth.WithRequestTimeout(loginTimeout),
+		litellmauth.WithMaxWait(callbackTimeout),
+		litellmauth.WithPollInterval(cliSSOPollInterval),
+	}
+	if definition.AllowInsecureHTTP {
+		options = append(options, litellmauth.WithAllowInsecureHTTP())
+	}
+	return litellmauth.New(baseURL, options...)
+}
+
+// loginError reports a cancelled ctx as its cause, a library timeout as "<flow> login timed out" and a typed
+// library error as it is. Any other library error may carry the proxy URL, which this extension never prints,
+// so its text names "the proxy" instead.
+func loginError(ctx context.Context, err error, flow, baseURL string) error {
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	var timeout litellmauth.LoginTimeoutError
+	var timeoutPointer *litellmauth.LoginTimeoutError
+	var httpErr *litellmauth.HTTPError
+	switch {
+	case errors.As(err, &timeout), errors.As(err, &timeoutPointer):
+		return &loginTimeoutError{flow: flow, err: err}
+	case errors.Is(err, litellmauth.ErrPKCEUnsupported), errors.Is(err, litellmauth.ErrUnsupportedProxy),
+		errors.Is(err, litellmauth.ErrProtocol), errors.As(err, &httpErr):
+		return err
+	}
+	return &redactedError{text: strings.ReplaceAll(err.Error(), baseURL, "the proxy"), err: err}
+}
+
+// loginTimeoutError keeps the library timeout (and its context.DeadlineExceeded chain) under the flow's own text.
+type loginTimeoutError struct {
+	flow string
+	err  error
+}
+
+func (e *loginTimeoutError) Error() string { return e.flow + " login timed out" }
+func (e *loginTimeoutError) Unwrap() error { return e.err }
+
+// redactedError carries err's chain under text, which has the proxy URL removed.
+type redactedError struct {
+	text string
+	err  error
+}
+
+func (e *redactedError) Error() string { return e.text }
+func (e *redactedError) Unwrap() error { return e.err }
+
+func millis(t time.Time) float64 { return float64(t.UnixMilli()) }
+
+// ---- native PKCE ----------------------------------------------------------------------------------------
+
+// loginPkce returns litellmauth.ErrPKCEUnsupported, before anything is shown, for a proxy without the contract.
+func loginPkce(ctx context.Context, interaction ai.AuthInteraction, baseURL string, client *litellmauth.Client) (ai.Credential, error) {
+	token, err := client.AuthenticatePKCE(ctx, litellmauth.PKCEOptions{
+		OnSession: func(_ context.Context, session litellmauth.PKCESession) error {
+			notifyAuth(interaction, ai.AuthURLEvent{URL: session.AuthorizeURL.String(), Instructions: "Open this URL in a browser to sign in with LiteLLM."})
+			return nil
+		},
+	})
 	if err != nil {
-		return "", errors.New("authorization endpoint is invalid")
+		return ai.Credential{}, loginError(ctx, err, "LiteLLM PKCE", baseURL)
 	}
-	query := u.Query()
-	for name, value := range params {
-		query.Set(name, value)
+	credential := newOAuthCredential(token.Key, token.RefreshToken, millis(token.ExpiresAt), baseURL)
+	setExtra(&credential, "flow", pkceFlow)
+	setExtra(&credential, "clientId", token.ClientID)
+	setExtra(&credential, "tokenEndpoint", token.TokenEndpoint)
+	setExtra(&credential, "resource", token.Resource)
+	if token.UserID != "" {
+		setExtra(&credential, "userId", token.UserID)
 	}
-	u.RawQuery = query.Encode()
-	return u.String(), nil
+	if token.TeamID != "" {
+		setExtra(&credential, "teamId", token.TeamID)
+	}
+	return credential, nil
 }
 
 // ---- direct OIDC ----------------------------------------------------------------------------------------
@@ -777,7 +500,7 @@ func parseOidcConfig(raw any) (oidcConfig, error) {
 	scope := "openid"
 	if value := object["scope"]; value != nil {
 		text, isString := value.(string)
-		if !isString || !contains(strings.Split(text, " "), "openid") {
+		if !isString || !slices.Contains(strings.Split(text, " "), "openid") {
 			return oidcConfig{}, invalid("oidc.scope", `a space-separated scope list that includes "openid"`)
 		}
 		scope = text
@@ -797,15 +520,6 @@ func parseOidcConfig(raw any) (oidcConfig, error) {
 		}
 	}
 	return oidcConfig{issuer: issuer, clientID: object["clientId"].(string), scope: scope, redirectPorts: ports}, nil
-}
-
-func contains(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
 }
 
 // discoverOidc never sends the proxy's headers: LITELLM_HEADERS and provider headers can hold gateway credentials.
@@ -844,291 +558,76 @@ func discoverOidc(ctx context.Context, issuer string) (*oidcDiscovery, error) {
 	return &oidcDiscovery{issuer: advertised, authorizationEndpoint: authorizationEndpoint, tokenEndpoint: tokenEndpoint}, nil
 }
 
-type oidcToken struct {
-	access, refresh string
-	expires         int64
-	subject         string
+// oidcExpires refreshes ahead of expiry, but by at most half the remaining lifetime, so a short-lived id_token
+// is still used rather than treated as already expired.
+func oidcExpires(expiresAt time.Time) float64 {
+	expires := millis(expiresAt)
+	lead := math.Ceil(math.Min(tokenRefreshLeadMs, (expires-millis(now()))/2))
+	return expires - lead
 }
 
-// expectedIDToken is what requestOidcToken checks an id_token against. A nil nonce or subject is not checked.
-type expectedIDToken struct {
-	issuer, clientID string
-	nonce, subject   *string
-}
-
-// requestOidcToken exchanges a grant for an id_token and checks its claims (OIDC Core §3.1.3.7). The signature
-// is deliberately not verified here: the proxy verifies it against the IdP's JWKS before honouring the bearer,
-// so these checks only stop the extension from storing a token meant for another client or login.
-func requestOidcToken(ctx context.Context, endpoint string, form url.Values, expected expectedIDToken, existingRefresh string) (*oidcToken, *tokenFailure, error) {
-	data, failure, err := postTokenForm(ctx, endpoint, form, nil, "OIDC")
-	if err != nil || failure != nil {
-		return nil, failure, err
-	}
-	idToken, _ := data["id_token"].(string)
-	var claims map[string]any
-	if isAuthToken(idToken) {
-		claims = jwtClaims(idToken)
-	}
-	if claims == nil {
-		return nil, &tokenFailure{false, "OIDC token response has no valid id_token"}, nil
-	}
-	invalid := func(claim string) (*oidcToken, *tokenFailure, error) {
-		return nil, &tokenFailure{false, "OIDC id_token has invalid " + claim}, nil
-	}
-	if issuer, ok := claims["iss"].(string); !ok || issuer != expected.issuer {
-		return invalid("iss")
-	}
-	audiences, isList := claims["aud"].([]any)
-	if !isList {
-		audiences = []any{claims["aud"]}
-	}
-	audienceMatch := false
-	for _, audience := range audiences {
-		if text, ok := audience.(string); ok && text == expected.clientID {
-			audienceMatch = true
-		}
-	}
-	if !audienceMatch {
-		return invalid("aud")
-	}
-	// OIDC Core §3.1.3.7 (errata set 2): azp is optional, even with several audiences, but when present it must name us.
-	if azp, present := claims["azp"]; present {
-		if text, ok := azp.(string); !ok || text != expected.clientID {
-			return invalid("azp")
-		}
-	}
-	subject, _ := claims["sub"].(string)
-	if subject == "" || (expected.subject != nil && subject != *expected.subject) {
-		return invalid("sub")
-	}
-	current := float64(now().UnixMilli())
-	exp, isNumber := claims["exp"].(float64)
-	expiresAt := math.Floor(exp * 1000)
-	if !isNumber || !isSafeInteger(expiresAt) || expiresAt <= current {
-		return invalid("exp")
-	}
-	if expected.nonce != nil && !constantTimeEqual(claims["nonce"], *expected.nonce) {
-		return invalid("nonce")
-	}
-	refresh := existingRefresh // the refresh token is optional, and an IdP that does not rotate it keeps the existing one valid
-	if isAuthToken(data["refresh_token"]) {
-		refresh = data["refresh_token"].(string)
-	}
-	// Refresh ahead of expiry, but by at most half the remaining lifetime, so a short-lived id_token is still
-	// used rather than treated as already expired.
-	lead := math.Ceil(math.Min(tokenRefreshLeadMs, (expiresAt-current)/2))
-	return &oidcToken{access: idToken, refresh: refresh, expires: int64(expiresAt - lead), subject: subject}, nil, nil
-}
-
-func loginOidc(ctx context.Context, interaction ai.AuthInteraction, baseURL string, config oidcConfig) (ai.Credential, error) {
+// loginOidc sends nothing to the proxy and, unlike the proxy flows, no custom header to the IdP. The library
+// checks the id_token's nonce, issuer and audience; the proxy verifies its signature.
+func loginOidc(ctx context.Context, interaction ai.AuthInteraction, baseURL string, config oidcConfig, definition providerDefinition) (ai.Credential, error) {
 	discovery, err := discoverOidc(ctx, config.issuer)
 	if err != nil {
 		return ai.Credential{}, err
 	}
-	verifier, nonce := randomToken(), randomToken()
-	return withLoopbackCallback(ctx, "OIDC", config.redirectPorts, func(callback loopbackCallback) (ai.Credential, error) {
-		authorizationURL, err := authorizationURL(discovery.authorizationEndpoint, map[string]string{
-			"response_type":         "code",
-			"client_id":             config.clientID,
-			"redirect_uri":          callback.RedirectURI,
-			"scope":                 config.scope,
-			"state":                 callback.State,
-			"nonce":                 nonce,
-			"code_challenge":        pkceChallenge(verifier),
-			"code_challenge_method": "S256",
-		})
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		notifyAuth(interaction, ai.AuthURLEvent{URL: authorizationURL, Instructions: "Open this URL in a browser to sign in with your identity provider."})
-		code, err := callback.Code()
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		token, failure, err := requestOidcToken(ctx, discovery.tokenEndpoint, url.Values{
-			"grant_type":    {"authorization_code"},
-			"code":          {code},
-			"redirect_uri":  {callback.RedirectURI},
-			"client_id":     {config.clientID},
-			"code_verifier": {verifier},
-		}, expectedIDToken{issuer: discovery.issuer, clientID: config.clientID, nonce: &nonce}, "")
-		if err != nil {
-			return ai.Credential{}, err
-		}
-		if failure != nil {
-			return ai.Credential{}, errors.New(failure.message)
-		}
-		credential := newOAuthCredential(token.access, token.refresh, float64(token.expires), baseURL)
-		setExtra(&credential, "flow", oidcFlow)
-		setExtra(&credential, "issuer", discovery.issuer)
-		setExtra(&credential, "clientId", config.clientID)
-		setExtra(&credential, "tokenEndpoint", discovery.tokenEndpoint)
-		setExtra(&credential, "subject", token.subject)
-		return credential, nil
+	client, err := newAuthClient(baseURL, definition, nil)
+	if err != nil {
+		return ai.Credential{}, err
+	}
+	token, err := client.AuthenticateOIDC(ctx, litellmauth.OIDCOptions{
+		Provider: litellmauth.OIDCProvider{
+			Issuer: discovery.issuer, ClientID: config.clientID, Scope: config.scope,
+			AuthorizeURL: discovery.authorizationEndpoint, TokenURL: discovery.tokenEndpoint,
+		},
+		OnSession: func(_ context.Context, session litellmauth.PKCESession) error {
+			notifyAuth(interaction, ai.AuthURLEvent{URL: session.AuthorizeURL.String(), Instructions: "Open this URL in a browser to sign in with your identity provider."})
+			return nil
+		},
+		RedirectPorts: config.redirectPorts,
 	})
+	if err != nil {
+		return ai.Credential{}, loginError(ctx, err, "OIDC", baseURL)
+	}
+	credential := newOAuthCredential(token.Key, token.RefreshToken, oidcExpires(token.ExpiresAt), baseURL)
+	setExtra(&credential, "flow", oidcFlow)
+	setExtra(&credential, "issuer", token.Issuer)
+	setExtra(&credential, "clientId", token.ClientID)
+	setExtra(&credential, "tokenEndpoint", token.TokenEndpoint)
+	setExtra(&credential, "subject", token.Subject)
+	return credential, nil
 }
 
 // ---- CLI SSO and pasted token ---------------------------------------------------------------------------
 
-type cliSSOStart struct {
-	loginID, pollSecret, userCode string
-	expiresInSeconds              float64
-}
-
-func positiveNumber(value any) (float64, bool) {
-	number, ok := value.(float64)
-	return number, ok && !math.IsNaN(number) && !math.IsInf(number, 0) && number > 0
-}
-
-func startCliSSO(ctx context.Context, baseURL string, headers map[string]string) (*cliSSOStart, error) {
-	response, err := doAuthFollowing(ctx, http.MethodPost, baseURL+"/sso/cli/start", rawHeaders(headers), []byte{})
-	if err != nil {
-		if errors.Is(err, errAuthNetwork) {
-			return nil, errors.New("LiteLLM CLI SSO start failed (network error)")
-		}
-		return nil, err
-	}
-	if response.status == http.StatusNotFound || response.status == http.StatusMethodNotAllowed {
-		return nil, nil
-	}
-	if !response.ok() {
-		return nil, fmt.Errorf("LiteLLM CLI SSO start failed (HTTP %d)", response.status)
-	}
-	data := response.object()
-	loginID, _ := data["login_id"].(string)
-	pollSecret, _ := data["poll_secret"].(string)
-	userCode, _ := data["user_code"].(string)
-	if data == nil || loginID == "" || pollSecret == "" || userCode == "" {
-		return nil, errors.New("LiteLLM CLI SSO start returned an invalid response")
-	}
-	expiresIn, ok := positiveNumber(data["expires_in"])
-	if !ok {
-		expiresIn = cliSSOExpiresInSeconds
-	}
-	expiresIn = min(expiresIn, maxCliSSOExpiresInSeconds)
-	return &cliSSOStart{loginID: loginID, pollSecret: pollSecret, userCode: userCode, expiresInSeconds: expiresIn}, nil
-}
-
-func waitForNextCliSSOPoll(ctx context.Context) error {
-	timer := time.NewTimer(cliSSOPollInterval)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	}
-}
-
-type cliSSOResult struct {
-	access           string
-	expiresInSeconds float64 // 0 when the server named no lifetime
-}
-
-type cliSSOTeam struct{ id, label string }
-
-func cliSSOTeams(data map[string]any) []cliSSOTeam {
-	var teams []cliSSOTeam
-	details, _ := data["team_details"].([]any)
-	for _, item := range details {
-		record, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, isString := record["team_id"].(string)
-		if !isString {
-			id, isString = record["id"].(string)
-		}
-		if !isString || id == "" {
-			continue
-		}
-		label, _ := record["team_alias"].(string)
-		teams = append(teams, cliSSOTeam{id, firstNonEmpty(label, id)})
-	}
-	if len(teams) == 0 {
-		ids, _ := data["teams"].([]any)
-		for _, item := range ids {
-			if id, ok := item.(string); ok && id != "" {
-				teams = append(teams, cliSSOTeam{id, id})
-			}
-		}
-	}
-	return teams
-}
-
-func pollCliSSO(ctx context.Context, baseURL string, start *cliSSOStart, interaction ai.AuthInteraction, headers map[string]string) (cliSSOResult, error) {
-	deadline := now().Add(time.Duration(start.expiresInSeconds * float64(time.Second)))
-	pollURL := baseURL + "/sso/cli/poll/" + url.PathEscape(start.loginID)
-	var teamID string
-	for now().Before(deadline) {
-		endpoint := pollURL
-		if teamID != "" {
-			endpoint += "?" + url.Values{"team_id": {teamID}}.Encode()
-		}
-		header := rawHeaders(headers)
-		header.Set("x-litellm-cli-poll-secret", start.pollSecret)
-		response, err := doAuthFollowing(ctx, http.MethodGet, endpoint, header, nil)
-		if err != nil {
-			if !errors.Is(err, errAuthNetwork) {
-				return cliSSOResult{}, err
-			}
-			if err := waitForNextCliSSOPoll(ctx); err != nil {
-				return cliSSOResult{}, err
-			}
-			continue
-		}
-		if response.status == http.StatusTooManyRequests || response.status >= 500 {
-			if err := waitForNextCliSSOPoll(ctx); err != nil {
-				return cliSSOResult{}, err
-			}
-			continue
-		}
-		if response.status == http.StatusBadRequest {
-			return cliSSOResult{}, errors.New("LiteLLM CLI SSO login expired or is invalid")
-		}
-		if !response.ok() {
-			return cliSSOResult{}, fmt.Errorf("LiteLLM CLI SSO polling failed (HTTP %d)", response.status)
-		}
-		data := response.object()
-		if data == nil {
-			return cliSSOResult{}, errors.New("LiteLLM CLI SSO polling returned an invalid response")
-		}
-		status, _ := data["status"].(string)
-		if key, _ := data["key"].(string); status == "ready" && key != "" {
-			expiresIn, _ := positiveNumber(data["expires_in"])
-			return cliSSOResult{access: key, expiresInSeconds: expiresIn}, nil
-		}
-		if selection, _ := data["requires_team_selection"].(bool); status == "ready" && selection && teamID == "" {
-			teams := cliSSOTeams(data)
-			if len(teams) == 0 {
-				return cliSSOResult{}, errors.New("LiteLLM CLI SSO requested team selection without any teams")
-			}
+// loginCliSSO returns litellmauth.ErrUnsupportedProxy, before anything is shown, for a proxy without CLI SSO.
+// The library does not model the poll response's expires_in, so the lifetime comes from the key itself.
+func loginCliSSO(ctx context.Context, interaction ai.AuthInteraction, baseURL string, client *litellmauth.Client) (ai.Credential, error) {
+	token, err := client.Authenticate(ctx, litellmauth.AuthenticateOptions{
+		OnSession: func(_ context.Context, session litellmauth.Session) error {
+			expiresIn := session.ExpiresIn.Seconds()
+			notifyAuth(interaction, ai.AuthDeviceCodeEvent{
+				UserCode:         session.UserCode,
+				VerificationURI:  session.VerificationURL.String(),
+				ExpiresInSeconds: &expiresIn,
+			})
+			return nil
+		},
+		SelectTeam: func(ctx context.Context, teams []litellmauth.Team) (string, error) {
 			options := make([]ai.AuthSelectOption, len(teams))
 			for index, team := range teams {
-				options[index] = ai.AuthSelectOption{ID: team.id, Label: team.label}
+				options[index] = ai.AuthSelectOption{ID: team.ID, Label: firstNonEmpty(team.Alias, team.ID)}
 			}
-			selected, err := interaction.Prompt(ctx, ai.AuthSelectPrompt{Message: "Select a LiteLLM team:", Options: options})
-			if err != nil {
-				return cliSSOResult{}, err
-			}
-			valid := false
-			for _, team := range teams {
-				valid = valid || team.id == selected
-			}
-			if !valid {
-				return cliSSOResult{}, errors.New("Invalid LiteLLM team selection")
-			}
-			teamID = selected
-			continue
-		}
-		if status != "pending" {
-			return cliSSOResult{}, errors.New("LiteLLM CLI SSO polling returned an invalid response")
-		}
-		if err := waitForNextCliSSOPoll(ctx); err != nil {
-			return cliSSOResult{}, err
-		}
+			return interaction.Prompt(ctx, ai.AuthSelectPrompt{Message: "Select a LiteLLM team:", Options: options})
+		},
+	})
+	if err != nil {
+		return ai.Credential{}, loginError(ctx, err, "LiteLLM CLI SSO", baseURL)
 	}
-	return cliSSOResult{}, errors.New("LiteLLM CLI SSO login expired")
+	expires := float64(tokenExpiresAt(token.Key, configuredCLIJWTExpiresAt()))
+	return newOAuthCredential(token.Key, "", expires, baseURL), nil
 }
 
 // generateVirtualKey exchanges an SSO token for a virtual key. expiresAt is nil for a key that does not expire.
@@ -1150,8 +649,8 @@ func generateVirtualKey(ctx context.Context, baseURL, userToken string, headers 
 	}
 	if text, ok := data["expires"].(string); ok {
 		if parsed, parseErr := time.Parse(time.RFC3339Nano, text); parseErr == nil {
-			millis := parsed.UnixMilli()
-			expiresAt = &millis
+			expiry := parsed.UnixMilli()
+			expiresAt = &expiry
 		}
 	}
 	return key, expiresAt, nil
@@ -1216,38 +715,21 @@ func loginOAuth(ctx context.Context, interaction ai.AuthInteraction, definition 
 	// Direct OIDC sends nothing to the proxy. The IdP is never derived from it either: the proxy's own OAuth
 	// metadata describes LiteLLM's authorization server, not the IdP that signs the JWTs it accepts.
 	if oidc != nil {
-		return loginOidc(ctx, interaction, baseURL, *oidc)
+		return loginOidc(ctx, interaction, baseURL, *oidc, definition)
 	}
-	headers := resolveHeaders(definition)
-	discovery, err := discoverPkce(ctx, baseURL, headers)
+	client, err := newAuthClient(baseURL, definition, resolveHeaders(definition))
 	if err != nil {
 		return ai.Credential{}, err
 	}
-	if discovery != nil {
-		return loginPkce(ctx, interaction, baseURL, discovery, headers)
+	credential, err := loginPkce(ctx, interaction, baseURL, client)
+	if !errors.Is(err, litellmauth.ErrPKCEUnsupported) {
+		return credential, err
 	}
-	cliSSO, err := startCliSSO(ctx, baseURL, headers)
-	if err != nil {
-		return ai.Credential{}, err
+	credential, err = loginCliSSO(ctx, interaction, baseURL, client)
+	if !errors.Is(err, litellmauth.ErrUnsupportedProxy) {
+		return credential, err
 	}
-	if cliSSO == nil {
-		return loginWithPastedToken(ctx, interaction, baseURL, headers)
-	}
-	expiresIn := cliSSO.expiresInSeconds
-	notifyAuth(interaction, ai.AuthDeviceCodeEvent{
-		UserCode:         cliSSO.userCode,
-		VerificationURI:  baseURL + "/sso/key/generate?source=litellm-cli&key=" + url.QueryEscape(cliSSO.loginID),
-		ExpiresInSeconds: &expiresIn,
-	})
-	result, err := pollCliSSO(ctx, baseURL, cliSSO, interaction, headers)
-	if err != nil {
-		return ai.Credential{}, err
-	}
-	expires := float64(tokenExpiresAt(result.access, configuredCLIJWTExpiresAt()))
-	if result.expiresInSeconds > 0 {
-		expires = float64(now().UnixMilli()) + result.expiresInSeconds*1000
-	}
-	return newOAuthCredential(result.access, "", expires, baseURL), nil
+	return loginWithPastedToken(ctx, interaction, baseURL, resolveHeaders(definition))
 }
 
 // ---- refresh --------------------------------------------------------------------------------------------
@@ -1299,7 +781,7 @@ func refreshLiteLLM(ctx context.Context, credential ai.Credential, definition pr
 		return refreshPkce(ctx, credential, definition)
 	// Must precede the `!command` fallthrough below: an IdP refresh token is never executed.
 	case oidcFlow:
-		return refreshOidc(ctx, credential)
+		return refreshOidc(ctx, credential, definition)
 	}
 	if !strings.HasPrefix(credential.Refresh, "!") {
 		if credential.ExpiresMillis() < float64(permanentTokenExpiresAt) {
@@ -1317,6 +799,32 @@ func refreshLiteLLM(ctx context.Context, credential ai.Credential, definition pr
 	return refreshed, nil
 }
 
+// refreshFailure classifies a library refresh error. A cancelled ctx is returned as its cause. A rejected
+// refresh token or an invalid response can only be fixed by a new login; an unavailable proxy, a retryable or
+// 5xx status and every transport failure are transient.
+func refreshFailure(ctx context.Context, label string, err error) (*tokenFailure, error) {
+	if ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	prefix := label + " token exchange "
+	var httpErr *litellmauth.HTTPError
+	switch {
+	case errors.Is(err, litellmauth.ErrRefreshRejected):
+		return &tokenFailure{false, prefix + "rejected (invalid_grant)"}, nil
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF), errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, syscall.ECONNRESET), errors.As(err, new(net.Error)):
+		// a response body cut off, reset or timed out mid-read is a network failure, though the library wraps it as a protocol error
+		return &tokenFailure{true, prefix + "failed (network error)"}, nil
+	case errors.Is(err, litellmauth.ErrOriginMismatch), errors.Is(err, litellmauth.ErrProtocol):
+		return &tokenFailure{false, prefix + "returned an invalid response"}, nil
+	case errors.Is(err, litellmauth.ErrProxyUnavailable):
+		return &tokenFailure{true, prefix + "failed (HTTP 503)"}, nil
+	case errors.As(err, &httpErr):
+		return &tokenFailure{httpErr.Retryable || httpErr.StatusCode >= 500, fmt.Sprintf("%sfailed (HTTP %d)", prefix, httpErr.StatusCode)}, nil
+	}
+	return &tokenFailure{true, prefix + "failed (network error)"}, nil
+}
+
 func refreshPkce(ctx context.Context, credential ai.Credential, definition providerDefinition) (ai.Credential, error) {
 	baseURL, hasBaseURL := extraString(credential, "baseUrl")
 	clientID, _ := extraString(credential, "clientId")
@@ -1328,10 +836,10 @@ func refreshPkce(ctx context.Context, credential ai.Credential, definition provi
 		if err != nil {
 			return nil, nil, err
 		}
-		if _, err := canonicalIssuer(root); err != nil {
-			return nil, nil, err
+		issuer, err := url.Parse(root)
+		if err != nil || issuer.Host == "" {
+			return nil, nil, errors.New("LiteLLM CLI auth has invalid issuer")
 		}
-		issuer, _ := url.Parse(root)
 		storedEndpoint, _ := extraString(credential, "tokenEndpoint")
 		storedResource, _ := extraString(credential, "resource")
 		tokenEndpoint, err := sameOriginURL(storedEndpoint, issuer, "token endpoint")
@@ -1342,19 +850,22 @@ func refreshPkce(ctx context.Context, credential ai.Credential, definition provi
 		if err != nil {
 			return nil, nil, err
 		}
-		token, failure, err := requestPkceToken(ctx, tokenEndpoint, url.Values{
-			"grant_type":    {"refresh_token"},
-			"refresh_token": {credential.Refresh},
-			"client_id":     {clientID},
-			"resource":      {resource},
-		}, resolveHeaders(definition), credential.Refresh)
-		if err != nil || failure != nil {
-			return nil, failure, err
+		client, err := newAuthClient(root, definition, resolveHeaders(definition))
+		if err != nil {
+			return nil, nil, err
+		}
+		token, err := client.RefreshPKCE(ctx, litellmauth.Credential{
+			BaseURL: root, AuthMethod: litellmauth.AuthMethodPKCE, Key: credential.Access, RefreshToken: credential.Refresh,
+			ClientID: clientID, TokenEndpoint: tokenEndpoint, Resource: resource,
+		})
+		if err != nil {
+			failure, cancelled := refreshFailure(ctx, "LiteLLM", err)
+			return nil, failure, cancelled
 		}
 		return func(refreshed *ai.Credential) {
-			refreshed.Access, refreshed.Refresh = token.access, token.refresh
-			refreshed.SetExpiresMillis(float64(token.expires))
-			for name, value := range map[string]string{"userId": token.userID, "teamId": token.teamID} {
+			refreshed.Access, refreshed.Refresh = token.Key, token.RefreshToken
+			refreshed.SetExpiresMillis(millis(token.ExpiresAt))
+			for name, value := range map[string]string{"userId": token.UserID, "teamId": token.TeamID} {
 				if value == "" {
 					delete(refreshed.Extra, name)
 				} else {
@@ -1365,31 +876,39 @@ func refreshPkce(ctx context.Context, credential ai.Credential, definition provi
 	})
 }
 
-func refreshOidc(ctx context.Context, credential ai.Credential) (ai.Credential, error) {
+func refreshOidc(ctx context.Context, credential ai.Credential, definition providerDefinition) (ai.Credential, error) {
 	if !isAuthToken(credential.Refresh) {
 		return ai.Credential{}, errors.New("LiteLLM OIDC credential has no refresh token; run /login litellm again")
 	}
 	storedEndpoint, _ := extraString(credential, "tokenEndpoint")
 	tokenEndpoint, endpointOK := httpsURL(storedEndpoint, true)
 	issuer, hasIssuer := extraString(credential, "issuer")
+	_, issuerOK := httpsURL(issuer, false)
 	clientID, _ := extraString(credential, "clientId")
 	subject, _ := extraString(credential, "subject")
-	if !endpointOK || !hasIssuer || !isAuthToken(clientID) || subject == "" || !isSafeInteger(credential.ExpiresMillis()) {
+	if !endpointOK || !hasIssuer || !issuerOK || !isAuthToken(clientID) || subject == "" || !isSafeInteger(credential.ExpiresMillis()) {
 		return ai.Credential{}, errors.New("Invalid LiteLLM OIDC credential; run /login litellm again")
 	}
+	storedBase, _ := extraString(credential, "baseUrl")
 	return refreshWithBackoff(credential, func() (func(*ai.Credential), *tokenFailure, error) {
-		token, failure, err := requestOidcToken(ctx, tokenEndpoint, url.Values{
-			"grant_type":    {"refresh_token"},
-			"refresh_token": {credential.Refresh},
-			"client_id":     {clientID},
-		}, expectedIDToken{issuer: issuer, clientID: clientID, subject: &subject}, credential.Refresh)
-		if err != nil || failure != nil {
-			return nil, failure, err
+		client, err := newAuthClient(oidcClientBaseURL, definition, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		token, err := client.RefreshOIDC(ctx,
+			litellmauth.OIDCProvider{Issuer: issuer, ClientID: clientID, Scope: "openid", TokenURL: tokenEndpoint},
+			litellmauth.Credential{
+				BaseURL: storedBase, AuthMethod: litellmauth.AuthMethodOIDC, Key: credential.Access, RefreshToken: credential.Refresh,
+				Issuer: issuer, Subject: subject,
+			})
+		if err != nil {
+			failure, cancelled := refreshFailure(ctx, "OIDC", err)
+			return nil, failure, cancelled
 		}
 		return func(refreshed *ai.Credential) {
-			refreshed.Access, refreshed.Refresh = token.access, token.refresh
-			refreshed.SetExpiresMillis(float64(token.expires))
-			setExtra(refreshed, "subject", token.subject)
+			refreshed.Access, refreshed.Refresh = token.Key, token.RefreshToken
+			refreshed.SetExpiresMillis(oidcExpires(token.ExpiresAt))
+			setExtra(refreshed, "subject", token.Subject)
 		}, nil, nil
 	})
 }

@@ -48,6 +48,15 @@ The first build downloads the PiG source and needs a Go toolchain (`pig setup go
 validate host does not bind the native provider registry, and this extension registers one. Use
 `pig package validate ./pig` to validate the package, and a real load (`pig -e ...`) to prove the extension works.
 
+### Fused builds with third-party dependencies
+
+PiG 0.4.1's `pig piglet build` cannot fuse an extension that depends on a third-party Go module: it overlays
+Pig's own `go.mod` and compiles with `-mod=readonly`, so when `litellm-auth-go` requires a newer
+`golang.org/x/term` than Pig pins, the build stops with `go: updates to go.mod needed`. Loading the extension as
+a subprocess (`pig -e`, `pig install`) is unaffected. The PiG fork branch `fix/fused-member-requirements` fixes
+the builder (the build module becomes a `-modfile` pair that `go mod tidy` resolves before compiling); build the
+example Piglet with a `pig` built from that branch until a PiG release carries it.
+
 ### Reasoning models without an effort carrier crash model selection
 
 When discovery finds a reasoning model but no evidence of a transmissible effort level (for example a Claude route
@@ -68,6 +77,10 @@ go test -race ./...
 cd ../../tools/mockproxy && go test ./...
 pig package validate ./pig --json   # from the repository root
 ```
+
+The login protocols (CLI SSO, proxy PKCE, direct OIDC and their refreshes) come from the Go module
+`github.com/balcsida/litellm-auth-go`, pinned in `go.mod`. The first build or test needs network access to fetch it
+(`go mod download`); after that the module cache serves it offline.
 
 `tools/mockproxy` is a fake LiteLLM proxy for end-to-end checks without network:
 

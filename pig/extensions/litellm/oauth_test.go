@@ -2,10 +2,11 @@ package litellm
 
 // Ports the PKCE refresh, direct OIDC login, login base URL reuse and login startup cases of
 // tests/index.test.ts. The proxy and the IdP are httptest servers; the flows are driven directly with a
-// scripted ai.AuthInteraction.
+// scripted ai.AuthInteraction. The protocols themselves are github.com/balcsida/litellm-auth-go's and tested
+// there, so these cases prove the glue: flow choice, events, the auth.json shapes, refresh classification and
+// that a library rejection surfaces as an error.
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,11 +28,13 @@ import (
 	"time"
 
 	"github.com/MichaelKinsy/PiG/ai"
+	litellmauth "github.com/balcsida/litellm-auth-go"
 )
 
 const (
-	testNow     = int64(1_800_000_000_000)
-	testIssuerF = "https://idp.example.com"
+	testNow              = int64(1_800_000_000_000)
+	testIssuerF          = "https://idp.example.com"
+	cliAuthDiscoveryPath = "/.well-known/litellm-cli-auth"
 )
 
 // oauthTest isolates the environment and shortens every login timer.
@@ -300,6 +303,14 @@ func refreshOf(t *testing.T, credential ai.Credential) (ai.Credential, error) {
 
 var goodPkceToken = map[string]any{"access_token": "access-new", "refresh_token": "refresh-new", "token_type": "bearer", "expires_in": 3600}
 
+// assertExpiresAbout checks an expiry the library computed from the real clock against the window the call ran in.
+func assertExpiresAbout(t *testing.T, credential ai.Credential, started, ended time.Time, lifetime time.Duration) {
+	t.Helper()
+	if expires := int64(credential.ExpiresMillis()); expires < started.UnixMilli()+lifetime.Milliseconds() || expires > ended.UnixMilli()+lifetime.Milliseconds() {
+		t.Errorf("expires = %d, want within [%d, %d]", expires, started.UnixMilli()+lifetime.Milliseconds(), ended.UnixMilli()+lifetime.Milliseconds())
+	}
+}
+
 func TestPKCERefresh(t *testing.T) {
 	t.Run("rotates PKCE refresh credentials", func(t *testing.T) {
 		oauthTest(t)
@@ -308,13 +319,16 @@ func TestPKCERefresh(t *testing.T) {
 		proxy := newRecorder(t, false)
 		proxy.handle("/token", jsonHandler(200, goodPkceToken))
 		credential := pkceCredential(proxy)
+		started := time.Now()
 		refreshed, err := refreshOf(t, credential)
+		ended := time.Now()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if refreshed.Access != "access-new" || refreshed.Refresh != "refresh-new" || refreshed.ExpiresMillis() != float64(testNow+3_600_000) {
+		if refreshed.Access != "access-new" || refreshed.Refresh != "refresh-new" {
 			t.Errorf("refreshed = %+v", refreshed)
 		}
+		assertExpiresAbout(t, refreshed, started, ended, time.Hour)
 		if extra(t, refreshed, "clientId") != "llm_dcrc_client" || extra(t, refreshed, "baseUrl") != proxy.URL || extra(t, refreshed, "flow") != pkceFlow {
 			t.Errorf("metadata lost: %v", refreshed.Extra)
 		}
@@ -331,14 +345,37 @@ func TestPKCERefresh(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the existing refresh token when the server does not rotate it", func(t *testing.T) {
+	t.Run("rejects a refresh that does not rotate the refresh token", func(t *testing.T) {
 		oauthTest(t)
 		pinNow(testNow)
 		proxy := newRecorder(t, false)
 		proxy.handle("/token", jsonHandler(200, map[string]any{"access_token": "access-new", "token_type": "bearer", "expires_in": 3600}))
-		refreshed, err := refreshOf(t, pkceCredential(proxy))
-		if err != nil || refreshed.Access != "access-new" || refreshed.Refresh != "refresh-old" || refreshed.ExpiresMillis() != float64(testNow+3_600_000) {
-			t.Errorf("refreshed = %+v, %v", refreshed, err)
+		_, err := refreshOf(t, pkceCredential(proxy))
+		if err == nil || err.Error() != "LiteLLM token exchange returned an invalid response; run /login litellm again" {
+			t.Errorf("err = %v", err)
+		}
+	})
+
+	t.Run("sets userId and teamId the proxy names and deletes the ones it omits", func(t *testing.T) {
+		oauthTest(t)
+		pinNow(testNow)
+		proxy := newRecorder(t, false)
+		proxy.handle("/token", jsonHandler(200, merged(goodPkceToken, map[string]any{"user_id": "user@example.com", "team_id": "team-a"})))
+		credential := pkceCredential(proxy, func(c *ai.Credential) { setExtra(c, "userId", "stale-user") })
+		refreshed, err := refreshOf(t, credential)
+		if err != nil || extra(t, refreshed, "userId") != "user@example.com" || extra(t, refreshed, "teamId") != "team-a" {
+			t.Fatalf("refreshed = %+v, %v", refreshed.Extra, err)
+		}
+		proxy.handle("/token", jsonHandler(200, goodPkceToken))
+		refreshed, err = refreshOf(t, refreshed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, hasUser := refreshed.Extra["userId"]; hasUser {
+			t.Errorf("userId kept: %v", refreshed.Extra)
+		}
+		if _, hasTeam := refreshed.Extra["teamId"]; hasTeam {
+			t.Errorf("teamId kept: %v", refreshed.Extra)
 		}
 	})
 
@@ -355,6 +392,53 @@ func TestPKCERefresh(t *testing.T) {
 			refreshed, err := refreshOf(t, credential)
 			if err != nil || refreshed.Access != "access-old" || refreshed.Refresh != "refresh-old" {
 				t.Errorf("refreshed = %+v, %v", refreshed, err)
+			}
+		})
+	}
+
+	t.Run("keeps fresh PKCE credentials after a redirect and applies the backoff", func(t *testing.T) {
+		oauthTest(t)
+		pinNow(testNow)
+		proxy := newRecorder(t, false)
+		proxy.handle("/token", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/elsewhere", http.StatusFound) })
+		credential := pkceCredential(proxy)
+		for range 2 {
+			if refreshed, err := refreshOf(t, credential); err != nil || refreshed.Access != "access-old" {
+				t.Fatalf("refreshed = %+v, %v", refreshed, err)
+			}
+		}
+		if proxy.count("/token") != 1 {
+			t.Errorf("token requests = %d, want 1", proxy.count("/token"))
+		}
+	})
+
+	for name, handler := range map[string]http.HandlerFunc{
+		"a stalled body": func(w http.ResponseWriter, r *http.Request) {
+			conn, buf, _ := w.(http.Hijacker).Hijack()
+			_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+			_ = buf.Flush()
+			<-r.Context().Done()
+			_ = conn.Close()
+		},
+		"a reset mid-body": func(w http.ResponseWriter, _ *http.Request) {
+			conn, buf, _ := w.(http.Hijacker).Hijack()
+			_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+			_ = buf.Flush()
+			_ = conn.(*net.TCPConn).SetLinger(0)
+			_ = conn.Close()
+		},
+	} {
+		t.Run("classifies "+name+" as a transient network error", func(t *testing.T) {
+			oauthTest(t)
+			pinNow(testNow)
+			loginTimeout = 50 * time.Millisecond
+			proxy := newRecorder(t, false)
+			proxy.handle("/token", handler)
+			// An expired credential surfaces the classification instead of keeping the old one.
+			credential := pkceCredential(proxy, func(c *ai.Credential) { c.SetExpiresMillis(float64(testNow - 1)) })
+			_, err := refreshOf(t, credential)
+			if err == nil || !strings.Contains(err.Error(), "(network error)") || strings.Contains(err.Error(), "run /login") {
+				t.Errorf("err = %v", err)
 			}
 		})
 	}
@@ -489,6 +573,8 @@ type pkceProxy struct {
 	callbackResponses chan *http.Response
 }
 
+// newPKCEProxy serves the proxy's native CLI auth contract the way litellm-auth-go validates it: every endpoint
+// on the proxy origin, the issuer equal to the proxy URL, registration answering with a client_id.
 func newPKCEProxy(t *testing.T, override map[string]any) *pkceProxy {
 	t.Helper()
 	p := &pkceProxy{recorder: newRecorder(t, false), callbackResponses: make(chan *http.Response, 8)}
@@ -496,8 +582,8 @@ func newPKCEProxy(t *testing.T, override map[string]any) *pkceProxy {
 	p.handle(cliAuthDiscoveryPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, merged(map[string]any{
 			"contract_version": 1, "issuer": p.URL, "authorization_endpoint": p.URL + "/authorize?tenant=alpha&client_id=wrong",
-			"token_endpoint": p.URL + "/token", "registration_endpoint": p.URL + "/register", "resource": p.URL,
-			"code_challenge_methods_supported": []string{"S256"},
+			"token_endpoint": p.URL + "/token", "registration_endpoint": p.URL + "/register", "revocation_endpoint": p.URL + "/revoke",
+			"resource": p.URL, "code_challenge_methods_supported": []string{"S256"},
 		}, override))
 	})
 	p.handle("/register", func(w http.ResponseWriter, r *http.Request) {
@@ -553,16 +639,17 @@ func assertListenerClosed(t *testing.T, redirectURI string) {
 func TestNativePKCELogin(t *testing.T) {
 	t.Run("completes native PKCE login", func(t *testing.T) {
 		oauthTest(t)
+		t.Setenv(envHeaders, `{"x-tenant":"tenant-a"}`)
 		proxy := newPKCEProxy(t, nil)
 		script := &scriptedAuth{answer: answers(proxy.URL, "", ""), onEvent: followCallback(proxy.callbackResponses, okQuery)}
-		started := time.Now().UnixMilli()
+		started := time.Now()
 		credential, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
-		ended := time.Now().UnixMilli()
+		ended := time.Now()
 		if err != nil {
 			t.Fatal(err)
 		}
 		events := script.eventsOf("auth_url")
-		if len(events) != 1 {
+		if len(events) != 1 || events[0].(ai.AuthURLEvent).Instructions != "Open this URL in a browser to sign in with LiteLLM." {
 			t.Fatalf("events = %v", script.events)
 		}
 		authURL, _ := url.Parse(events[0].(ai.AuthURLEvent).URL)
@@ -574,7 +661,7 @@ func TestNativePKCELogin(t *testing.T) {
 		if query.Get("resource") != proxy.URL || query.Get("tenant") != "alpha" || len(query["client_id"]) != 1 || query.Get("client_id") != "llm_dcrc_client" {
 			t.Errorf("authorization query = %v", query)
 		}
-		if registration := proxy.registrationBody; registration["client_name"] != "pi-provider-litellm" || registration["token_endpoint_auth_method"] != "none" ||
+		if registration := proxy.registrationBody; registration["token_endpoint_auth_method"] != "none" ||
 			fmt.Sprint(registration["redirect_uris"]) != "["+redirect+"]" || fmt.Sprint(registration["grant_types"]) != "[authorization_code refresh_token]" {
 			t.Errorf("registration = %v", registration)
 		}
@@ -582,6 +669,9 @@ func TestNativePKCELogin(t *testing.T) {
 		for _, request := range proxy.log() {
 			if request.path == "/token" {
 				token = request
+			}
+			if request.header.Get("x-tenant") != "tenant-a" {
+				t.Errorf("%s did not carry the custom header: %v", request.path, request.header)
 			}
 		}
 		form := queryOf(t, token.body)
@@ -606,53 +696,44 @@ func TestNativePKCELogin(t *testing.T) {
 				t.Errorf("%s = %q, want %q", name, got, want)
 			}
 		}
-		if expires := int64(credential.ExpiresMillis()); expires < started+3_600_000 || expires > ended+3_600_000 {
-			t.Errorf("expires = %d", expires)
-		}
+		assertExpiresAbout(t, credential, started, ended, time.Hour)
 		if proxy.count("/sso/cli/start") != 0 {
 			t.Error("CLI SSO was started")
 		}
 		assertListenerClosed(t, redirect)
 	})
 
-	discoveryCases := map[string]map[string]any{
-		"an unsupported contract version":       {"contract_version": 2},
-		"no S256 support":                       {"code_challenge_methods_supported": []string{"plain"}},
-		"a different issuer":                    {"issuer": "https://other.example.com"},
-		"an issuer query":                       {"issuer": "QUERY"},
-		"token endpoint credentials":            {"token_endpoint": "CREDS"},
-		"a token endpoint fragment":             {"token_endpoint": "FRAGMENT"},
-		"a cross-origin authorization endpoint": {"authorization_endpoint": "https://other.example.com/authorize"},
-		"a cross-origin token endpoint":         {"token_endpoint": "https://other.example.com/token"},
-		"a cross-origin registration endpoint":  {"registration_endpoint": "https://other.example.com/register"},
-		"a cross-origin resource":               {"resource": "https://other.example.com"},
-	}
-	for name, override := range discoveryCases {
-		t.Run("rejects native PKCE discovery with "+name, func(t *testing.T) {
-			oauthTest(t)
-			proxy := newPKCEProxy(t, nil)
-			resolved := map[string]any{}
-			for key, value := range override {
-				switch value {
-				case "QUERY":
-					value = proxy.URL + "?tenant=other"
-				case "CREDS":
-					value = strings.Replace(proxy.URL, "http://", "http://secret@", 1) + "/token"
-				case "FRAGMENT":
-					value = proxy.URL + "/token#other"
-				}
-				resolved[key] = value
-			}
-			proxy = newPKCEProxy(t, resolved)
-			script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
-			if _, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t)); err == nil {
-				t.Error("login succeeded")
-			}
-			if proxy.count("/register") != 0 {
-				t.Error("registration was attempted")
-			}
-		})
-	}
+	t.Run("omits userId and teamId the proxy does not name", func(t *testing.T) {
+		oauthTest(t)
+		proxy := newPKCEProxy(t, nil)
+		proxy.handle("/token", jsonHandler(200, goodPkceToken))
+		script := &scriptedAuth{answer: answers(proxy.URL, "", ""), onEvent: followCallback(proxy.callbackResponses, okQuery)}
+		credential, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, hasUser := credential.Extra["userId"]; hasUser {
+			t.Errorf("extra = %v", credential.Extra)
+		}
+		if _, hasTeam := credential.Extra["teamId"]; hasTeam {
+			t.Errorf("extra = %v", credential.Extra)
+		}
+	})
+
+	// The library validates the discovery document; one foreign-origin case proves its rejection surfaces here
+	// and stops the login before registration.
+	t.Run("rejects native PKCE discovery with a cross-origin token endpoint", func(t *testing.T) {
+		oauthTest(t)
+		proxy := newPKCEProxy(t, map[string]any{"token_endpoint": "https://other.example.com/token"})
+		script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
+		_, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
+		if !errors.Is(err, litellmauth.ErrProtocol) || errors.Is(err, litellmauth.ErrPKCEUnsupported) {
+			t.Errorf("err = %v", err)
+		}
+		if proxy.count("/register") != 0 || proxy.count("/sso/cli/start") != 0 {
+			t.Error("login went on after a rejected contract")
+		}
+	})
 
 	for _, baseURL := range []string{"http://secret@127.0.0.1:9", "http://127.0.0.1:9?tenant=other", "http://127.0.0.1:9#fragment"} {
 		t.Run("rejects an invalid PKCE proxy URL before discovery: "+baseURL, func(t *testing.T) {
@@ -663,106 +744,6 @@ func TestNativePKCELogin(t *testing.T) {
 			}
 		})
 	}
-
-	for _, status := range []int{302, 200} {
-		t.Run(fmt.Sprintf("rejects invalid PKCE discovery responses (HTTP %d)", status), func(t *testing.T) {
-			oauthTest(t)
-			proxy := newRecorder(t, false)
-			proxy.handle(cliAuthDiscoveryPath, func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Location", "https://other.example.com/.well-known/litellm-cli-auth")
-				w.WriteHeader(status)
-				_, _ = w.Write([]byte("untrusted-secret"))
-			})
-			script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
-			_, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
-			want := "LiteLLM CLI auth discovery failed (HTTP 302)"
-			if status == 200 {
-				want = "LiteLLM CLI auth discovery returned invalid JSON"
-			}
-			if err == nil || err.Error() != want {
-				t.Errorf("err = %v, want %s", err, want)
-			}
-		})
-	}
-
-	t.Run("rejects non-GET and malformed native PKCE callbacks", func(t *testing.T) {
-		oauthTest(t)
-		proxy := newPKCEProxy(t, nil)
-		ctx, cancel := context.WithCancelCause(context.Background())
-		reason := errors.New("caller cancelled login")
-		statuses := make(chan int, 2)
-		script := &scriptedAuth{answer: answers(proxy.URL, "", ""), onEvent: func(event ai.AuthEvent) {
-			if _, ok := event.(ai.AuthURLEvent); !ok {
-				return
-			}
-			redirect, _ := url.Parse(callbackURLOf(event))
-			authState := func() string {
-				parsed, _ := url.Parse(event.(ai.AuthURLEvent).URL)
-				return parsed.Query().Get("state")
-			}()
-			go func() {
-				response, err := http.Post(redirect.String()+"?state="+authState+"&code=authorization-code", "text/plain", nil)
-				if err == nil {
-					response.Body.Close()
-					statuses <- response.StatusCode
-				}
-				conn, err := net.Dial("tcp", redirect.Host)
-				if err != nil {
-					return
-				}
-				defer conn.Close()
-				_, _ = conn.Write([]byte("GET http://[ HTTP/1.1\r\nHost: x\r\n\r\n"))
-				line, _ := bufio.NewReader(conn).ReadString('\n')
-				var code int
-				fmt.Sscanf(line, "HTTP/1.1 %d", &code)
-				statuses <- code
-			}()
-		}}
-		done := make(chan error, 1)
-		go func() {
-			_, err := loginOAuth(ctx, script.interaction(), defaultDefinition(t))
-			done <- err
-		}()
-		if got := <-statuses; got != 405 {
-			t.Errorf("POST status = %d", got)
-		}
-		if got := <-statuses; got != 400 {
-			t.Errorf("malformed status = %d", got)
-		}
-		cancel(reason)
-		if err := <-done; !errors.Is(err, reason) {
-			t.Errorf("err = %v", err)
-		}
-	})
-
-	t.Run("keeps waiting after a native PKCE callback with the wrong state", func(t *testing.T) {
-		oauthTest(t)
-		proxy := newPKCEProxy(t, nil)
-		wrong := make(chan int, 1)
-		script := &scriptedAuth{answer: answers(proxy.URL, "", ""), onEvent: func(event ai.AuthEvent) {
-			if _, ok := event.(ai.AuthURLEvent); !ok {
-				return
-			}
-			redirect := callbackURLOf(event)
-			parsed, _ := url.Parse(event.(ai.AuthURLEvent).URL)
-			go func() {
-				if response, err := http.Get(redirect + "?state=wrong&code=wrong-code"); err == nil {
-					response.Body.Close()
-					wrong <- response.StatusCode
-				}
-				if response, err := http.Get(redirect + "?state=" + parsed.Query().Get("state") + "&code=authorization-code"); err == nil {
-					response.Body.Close()
-				}
-			}()
-		}}
-		credential, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
-		if err != nil || credential.Access != "access-new" {
-			t.Fatalf("credential = %+v, %v", credential, err)
-		}
-		if status := <-wrong; status != 400 {
-			t.Errorf("wrong-state status = %d", status)
-		}
-	})
 
 	t.Run("closes the native PKCE callback listener when login is aborted", func(t *testing.T) {
 		oauthTest(t)
@@ -793,20 +774,46 @@ func TestNativePKCELogin(t *testing.T) {
 		callbackTimeout = 30 * time.Millisecond
 		proxy := newPKCEProxy(t, nil)
 		script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
-		if _, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t)); err == nil || err.Error() != "LiteLLM PKCE login timed out" {
+		var timeout litellmauth.LoginTimeoutError
+		_, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
+		if !errors.As(err, &timeout) || err.Error() != "LiteLLM PKCE login timed out" {
 			t.Errorf("err = %v", err)
 		}
 	})
 
-	outcomes := []struct{ name, wantErr string }{
-		{"success", ""},
-		{"OAuth denial", "LiteLLM PKCE login was denied (access_denied)"},
-		{"registration failure", "LiteLLM PKCE client registration failed (HTTP 500)"},
-		{"token failure", "LiteLLM token exchange failed (HTTP 500)"},
-		{"token network failure", "LiteLLM token exchange failed (network error)"},
-		{"registration redirect", "LiteLLM PKCE client registration failed (HTTP 302)"},
-		{"token redirect", "LiteLLM token exchange failed (HTTP 302)"},
-		{"registration invalid JSON", "LiteLLM CLI auth registration returned invalid JSON"},
+	for name, override := range map[string]map[string]any{
+		"contract_version 2":       {"contract_version": 2},
+		"no S256 challenge method": {"code_challenge_methods_supported": []string{"plain"}},
+	} {
+		t.Run("falls through to CLI SSO for discovery with "+name, func(t *testing.T) {
+			oauthTest(t)
+			proxy := newPKCEProxy(t, override)
+			proxy.handle("/sso/cli/start", jsonHandler(404, map[string]any{}))
+			proxy.handle("/sso/key/generate", jsonHandler(200, map[string]any{}))
+			script := &scriptedAuth{answer: answers(proxy.URL, "token", "")}
+			_, _ = loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
+			if proxy.count("/sso/cli/start") != 1 || proxy.count("/register") != 0 {
+				t.Errorf("start = %d, register = %d", proxy.count("/sso/cli/start"), proxy.count("/register"))
+			}
+		})
+	}
+
+	outcomes := []struct {
+		name    string
+		wantErr func(error) bool
+	}{
+		{"success", nil},
+		{"OAuth denial", func(err error) bool { return errors.Is(err, litellmauth.ErrPKCEDenied) }},
+		{"registration failure", func(err error) bool {
+			var httpErr *litellmauth.HTTPError
+			return errors.As(err, &httpErr) && httpErr.Op == "register" && httpErr.StatusCode == 500
+		}},
+		{"token failure", func(err error) bool {
+			var httpErr *litellmauth.HTTPError
+			return errors.As(err, &httpErr) && httpErr.Op == "token" && httpErr.StatusCode == 500
+		}},
+		{"token network failure", func(err error) bool { return err != nil && strings.Contains(err.Error(), "request failed") }},
+		{"registration invalid JSON", func(err error) bool { return errors.Is(err, litellmauth.ErrProtocol) }},
 	}
 	for _, outcome := range outcomes {
 		t.Run("closes the native PKCE callback listener after "+outcome.name, func(t *testing.T) {
@@ -815,22 +822,12 @@ func TestNativePKCELogin(t *testing.T) {
 			switch outcome.name {
 			case "registration failure":
 				proxy.handle("/register", jsonHandler(500, map[string]any{}))
-			case "registration redirect":
-				proxy.handle("/register", func(w http.ResponseWriter, _ *http.Request) {
-					w.Header().Set("Location", "/register-next")
-					w.WriteHeader(302)
-				})
 			case "registration invalid JSON":
 				proxy.handle("/register", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("untrusted-secret")) })
 			case "token failure":
 				proxy.handle("/token", jsonHandler(500, map[string]any{}))
 			case "token network failure":
 				proxy.handle("/token", dropConnection)
-			case "token redirect":
-				proxy.handle("/token", func(w http.ResponseWriter, _ *http.Request) {
-					w.Header().Set("Location", "/token-next")
-					w.WriteHeader(302)
-				})
 			}
 			query := okQuery
 			if outcome.name == "OAuth denial" {
@@ -841,12 +838,12 @@ func TestNativePKCELogin(t *testing.T) {
 			script := &scriptedAuth{answer: answers(proxy.URL, "", ""), onEvent: followCallback(proxy.callbackResponses, query)}
 			_, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
 			redirect := registeredRedirect(proxy.recorder)
-			if outcome.wantErr == "" {
+			if outcome.wantErr == nil {
 				if err != nil {
 					t.Fatalf("err = %v", err)
 				}
-			} else if err == nil || err.Error() != outcome.wantErr {
-				t.Errorf("err = %v, want %s", err, outcome.wantErr)
+			} else if err == nil || !outcome.wantErr(err) {
+				t.Errorf("err = %v", err)
 			}
 			assertListenerClosed(t, redirect)
 		})
@@ -874,19 +871,20 @@ func registeredRedirect(proxy *recorder) string {
 func TestCliSSOLogin(t *testing.T) {
 	startOK := jsonHandler(200, map[string]any{"login_id": "cli-login", "poll_secret": "poll-secret", "user_code": "ABCD-EFGH", "expires_in": 600})
 
-	t.Run("completes CLI SSO with the server lifetime and selected team", func(t *testing.T) {
+	t.Run("completes CLI SSO with the selected team and the key's own lifetime", func(t *testing.T) {
 		oauthTest(t)
 		proxy := newRecorder(t, false)
 		proxy.handle(cliAuthDiscoveryPath, nil)
 		proxy.handle("/sso/cli/start", startOK)
 		proxy.handle("/sso/cli/poll/cli-login", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("team_id") == "team-b" {
-				writeJSON(w, 200, map[string]any{"status": "ready", "key": "opaque-cli-token", "expires_in": 7200})
+				writeJSON(w, 200, map[string]any{"status": "ready", "key": "opaque-cli-token", "expires_in": 7200, "team_id": "team-b", "team_details": []any{map[string]any{"id": "team-b", "team_alias": "Beta"}}})
 				return
 			}
 			writeJSON(w, 200, map[string]any{"status": "ready", "requires_team_selection": true, "team_details": []any{map[string]any{"id": "team-b", "team_alias": "Beta"}}})
 		})
 		script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
+		t.Setenv(envHeaders, `{"x-tenant":"tenant-a"}`)
 		started := time.Now().UnixMilli()
 		credential, err := loginOAuth(context.Background(), script.interaction(), defaultDefinition(t))
 		if err != nil {
@@ -897,10 +895,10 @@ func TestCliSSOLogin(t *testing.T) {
 			t.Fatalf("events = %v", script.events)
 		}
 		device := events[0].(ai.AuthDeviceCodeEvent)
-		if device.UserCode != "ABCD-EFGH" || device.VerificationURI != proxy.URL+"/sso/key/generate?source=litellm-cli&key=cli-login" || device.ExpiresInSeconds == nil || *device.ExpiresInSeconds != 600 {
+		if device.UserCode != "ABCD-EFGH" || device.VerificationURI != proxy.URL+"/sso/key/generate?key=cli-login&source=litellm-cli" || device.ExpiresInSeconds == nil || *device.ExpiresInSeconds != 600 {
 			t.Errorf("device event = %+v", device)
 		}
-		if credential.Access != "opaque-cli-token" || credential.Refresh != "" || extra(t, credential, "baseUrl") != proxy.URL || int64(credential.ExpiresMillis()) < started+7200*1000 {
+		if credential.Access != "opaque-cli-token" || credential.Refresh != "" || extra(t, credential, "baseUrl") != proxy.URL || int64(credential.ExpiresMillis()) < started+24*3600*1000 {
 			t.Errorf("credential = %+v", credential)
 		}
 		var polls []string
@@ -908,7 +906,7 @@ func TestCliSSOLogin(t *testing.T) {
 			if strings.HasPrefix(request.path, "/sso/cli/poll/") {
 				polls = append(polls, request.path+"?"+request.rawQuery+"|"+request.header.Get("x-litellm-cli-poll-secret"))
 			}
-			if request.path == "/sso/cli/start" && (request.method != "POST" || request.header.Get("x-litellm-cli-poll-secret") != "") {
+			if request.path == "/sso/cli/start" && (request.method != "POST" || request.header.Get("x-litellm-cli-poll-secret") != "" || request.header.Get("x-tenant") != "tenant-a") {
 				t.Errorf("start request = %+v", request)
 			}
 		}
@@ -988,7 +986,7 @@ func TestCliSSOLogin(t *testing.T) {
 			}
 		}
 		status.Store(500)
-		if _, err := login(); err == nil || err.Error() != "LiteLLM CLI SSO start failed (HTTP 500)" {
+		if _, err := login(); err == nil || err.Error() != "LiteLLM CLI SSO start: HTTP 500" {
 			t.Errorf("err = %v", err)
 		}
 	})
@@ -1379,7 +1377,7 @@ func TestDirectOIDCLogin(t *testing.T) {
 	t.Run("accepts an audience array that contains the client ID and a configured scope", func(t *testing.T) {
 		run := runOidcLogin(t, oidcOptions{
 			hasOIDC: true, oidc: map[string]any{"issuer": "ISSUER", "clientId": "example-client-id", "scope": "openid offline_access"},
-			claims: map[string]any{"aud": []any{"other-client", "example-client-id"}},
+			claims: map[string]any{"aud": []any{"other-client", "example-client-id"}, "azp": "example-client-id"},
 		})
 		if run.err != nil || run.authURL.Query().Get("scope") != "openid offline_access" {
 			t.Errorf("err = %v, scope %q", run.err, run.authURL.Query().Get("scope"))
@@ -1390,38 +1388,17 @@ func TestDirectOIDCLogin(t *testing.T) {
 		w.Header().Set("Location", "https://other.example.com/next")
 		w.WriteHeader(302)
 	}
+	// Discovery is this package's; the id_token, token endpoint and callback checks are the library's.
 	rejections := []struct {
 		name    string
 		options oidcOptions
 		message string
 	}{
-		{"a wrong nonce", oidcOptions{claims: map[string]any{"nonce": "other-nonce"}}, "OIDC id_token has invalid nonce"},
-		{"a wrong issuer", oidcOptions{claims: map[string]any{"iss": "https://other.example.com"}}, "OIDC id_token has invalid iss"},
-		{"a non-exact issuer", oidcOptions{claims: map[string]any{"iss": "SLASH"}}, "OIDC id_token has invalid iss"},
-		{"an audience mismatch", oidcOptions{claims: map[string]any{"aud": "other-client"}}, "OIDC id_token has invalid aud"},
-		{"an audience array mismatch", oidcOptions{claims: map[string]any{"aud": []any{"other-client"}}}, "OIDC id_token has invalid aud"},
-		{"an authorized party for another client", oidcOptions{claims: map[string]any{"aud": []any{"example-client-id", "other-client"}, "azp": "other-client"}}, "OIDC id_token has invalid azp"},
-		{"an expired token", oidcOptions{claims: map[string]any{"exp": time.Now().Unix() - 60}}, "OIDC id_token has invalid exp"},
-		{"a non-numeric expiry", oidcOptions{claims: map[string]any{"exp": "4102444800"}}, "OIDC id_token has invalid exp"},
-		{"a missing subject", oidcOptions{claims: map[string]any{"sub": nil}}, "OIDC id_token has invalid sub"},
-		{"an empty subject", oidcOptions{claims: map[string]any{"sub": ""}}, "OIDC id_token has invalid sub"},
-		{"a missing id_token", oidcOptions{tokenBody: map[string]any{"id_token": nil}}, "OIDC token response has no valid id_token"},
-		{"a two-segment id_token", oidcOptions{tokenBody: map[string]any{"id_token": "e30.e30"}}, "OIDC token response has no valid id_token"},
-		{"a non-JSON payload", oidcOptions{tokenBody: map[string]any{"id_token": "e30.bm90LWpzb24.sig"}}, "OIDC token response has no valid id_token"},
-		{"a non-object payload", oidcOptions{tokenBody: map[string]any{"id_token": "e30.MTIz.sig"}}, "OIDC token response has no valid id_token"},
-		{"a non-base64url payload", oidcOptions{tokenBody: map[string]any{"id_token": "e30.e30+.sig"}}, "OIDC token response has no valid id_token"},
 		{"a discovery issuer mismatch", oidcOptions{discovery: map[string]any{"issuer": "https://other.example.com"}}, "OIDC discovery issuer does not match the configured issuer"},
 		{"a non-https authorization endpoint", oidcOptions{discovery: map[string]any{"authorization_endpoint": "http://idp.example.com/authorize"}}, "OIDC discovery has invalid authorization_endpoint"},
 		{"a non-https token endpoint", oidcOptions{discovery: map[string]any{"token_endpoint": "http://idp.example.com/token"}}, "OIDC discovery has invalid token_endpoint"},
 		{"no S256 support", oidcOptions{discovery: map[string]any{"code_challenge_methods_supported": []string{"plain"}}}, "OIDC discovery does not support S256"},
 		{"a discovery redirect", oidcOptions{discoveryFunc: redirect302}, "OIDC discovery failed (HTTP 302)"},
-		{"a token redirect", oidcOptions{token: redirect302}, "OIDC token exchange failed (HTTP 302)"},
-		{"a callback error with a description", oidcOptions{callbackQuery: func(state string) string {
-			return "state=" + state + "&error=access_denied&error_description=secret-description"
-		}}, "OIDC login was denied (access_denied)"},
-		{"a callback error with an unsafe code", oidcOptions{callbackQuery: func(state string) string { return "state=" + state + "&error=Secret%20Code" }}, "OIDC login was denied"},
-		{"a token error with a description", oidcOptions{token: jsonHandler(400, map[string]any{"error": "invalid_grant", "error_description": "secret-description authorization-code"})}, "OIDC token exchange rejected (invalid_grant)"},
-		{"a token error with an unsafe code", oidcOptions{token: jsonHandler(401, map[string]any{"error": "Secret\nCode", "error_description": "secret-description"})}, "OIDC token exchange failed (HTTP 401)"},
 	}
 	for _, c := range rejections {
 		t.Run("rejects "+c.name, func(t *testing.T) {
@@ -1434,6 +1411,16 @@ func TestDirectOIDCLogin(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("rejects an id_token with the wrong nonce", func(t *testing.T) {
+		run := runOidcLogin(t, oidcOptions{claims: map[string]any{"nonce": "other-nonce"}})
+		if !errors.Is(run.err, litellmauth.ErrProtocol) || !strings.Contains(run.err.Error(), "nonce") {
+			t.Errorf("err = %v", run.err)
+		}
+		if run.credential.Access != "" {
+			t.Error("a credential was returned")
+		}
+	})
 
 	invalidConfig := []struct {
 		name  string
@@ -1555,22 +1542,16 @@ func TestOIDCRefresh(t *testing.T) {
 	}{
 		{"a changed subject", func(i string) http.HandlerFunc {
 			return jsonHandler(200, map[string]any{"id_token": fresh(i, "user-456", 3600)})
-		}, "invalid sub"},
+		}, "returned an invalid response"},
 		{"a missing id_token", func(string) http.HandlerFunc {
 			return jsonHandler(200, map[string]any{"access_token": "idp-access-token"})
-		}, "no valid id_token"},
+		}, "returned an invalid response"},
 		{"an id_token for another client", func(i string) http.HandlerFunc {
 			return jsonHandler(200, map[string]any{"id_token": idToken(map[string]any{"iss": i, "aud": "other-client", "sub": "user-123", "exp": exp})})
-		}, "invalid aud"},
+		}, "returned an invalid response"},
 		{"invalid_grant", func(string) http.HandlerFunc {
 			return jsonHandler(400, map[string]any{"error": "invalid_grant", "error_description": "refresh-old secret-description"})
 		}, "OIDC token exchange rejected (invalid_grant)"},
-		{"a redirect", func(string) http.HandlerFunc {
-			return func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Location", "/next")
-				w.WriteHeader(302)
-			}
-		}, "(HTTP 302)"},
 	}
 	for _, c := range renewCases {
 		t.Run("requires a new login after "+c.name, func(t *testing.T) {
@@ -1841,39 +1822,11 @@ func TestLoginStartup(t *testing.T) {
 		if credential.ExpiresMillis() != float64(permanentTokenExpiresAt) {
 			t.Errorf("expires = %v", credential.ExpiresMillis())
 		}
-		proxy.handle("/sso/cli/start", jsonHandler(200, map[string]any{"login_id": "l", "poll_secret": "s", "user_code": "U"}))
-		proxy.handle("/sso/cli/poll/l", jsonHandler(200, map[string]any{"status": "ready", "key": "opaque-cli-token"}))
+		proxy.handle("/sso/cli/start", jsonHandler(200, map[string]any{"login_id": "login-1", "poll_secret": "poll-secret", "user_code": "ABCD-EFGH"}))
+		proxy.handle("/sso/cli/poll/login-1", jsonHandler(200, map[string]any{"status": "ready", "key": "opaque-cli-token"}))
 		cli, err := loginOAuth(context.Background(), (&scriptedAuth{answer: answers(proxy.URL, "", "")}).interaction(), defaultDefinition(t))
 		if want := float64(loginTime + 24*60*60*1000); err != nil || cli.ExpiresMillis() != want {
 			t.Errorf("cli expires = %v, want %v (%v)", cli.ExpiresMillis(), want, err)
-		}
-	})
-}
-
-func TestOAuthHelpers(t *testing.T) {
-	t.Run("oauthErrorCode only accepts plain codes", func(t *testing.T) {
-		for value, want := range map[any]string{"invalid_grant": "invalid_grant", "Secret Code": "", "Secret\nCode": "", "": "", strings.Repeat("a", 65): "", 7: ""} {
-			if got := oauthErrorCode(value); got != want {
-				t.Errorf("oauthErrorCode(%v) = %q", value, got)
-			}
-		}
-	})
-	t.Run("constantTimeEqual", func(t *testing.T) {
-		if !constantTimeEqual("abc", "abc") || constantTimeEqual("abc", "abd") || constantTimeEqual("ab", "abc") || constantTimeEqual(nil, "abc") {
-			t.Error("constantTimeEqual misjudged")
-		}
-	})
-	t.Run("canonicalIssuer", func(t *testing.T) {
-		if got, err := canonicalIssuer("https://Example.com:443/a//"); err != nil || got != "https://example.com/a" {
-			t.Errorf("got %q, %v", got, err)
-		}
-		if got, _ := canonicalIssuer("https://example.com"); got != "https://example.com/" {
-			t.Errorf("got %q", got)
-		}
-		for _, bad := range []string{"https://u@example.com", "https://example.com?x=1", "https://example.com#f", "::"} {
-			if _, err := canonicalIssuer(bad); err == nil {
-				t.Errorf("canonicalIssuer(%q) accepted", bad)
-			}
 		}
 	})
 }
@@ -1887,16 +1840,6 @@ func TestOidcNullSettingMessage(t *testing.T) {
 	_, err := loginOAuth(context.Background(), (&scriptedAuth{}).interaction(), definition)
 	if err == nil || err.Error() != "Invalid LiteLLM oidc setting: expected an object" {
 		t.Errorf("err = %v", err)
-	}
-}
-
-func TestCliSSOStartClampsExpiresIn(t *testing.T) {
-	oauthTest(t)
-	proxy := newRecorder(t, false)
-	proxy.handle("/sso/cli/start", jsonHandler(200, map[string]any{"login_id": "l", "poll_secret": "p", "user_code": "u", "expires_in": 1e300}))
-	start, err := startCliSSO(context.Background(), proxy.URL, nil)
-	if err != nil || start == nil || start.expiresInSeconds != maxCliSSOExpiresInSeconds {
-		t.Errorf("start = %+v, %v", start, err)
 	}
 }
 
@@ -1950,16 +1893,6 @@ func TestAuthRedirects(t *testing.T) {
 	}
 }
 
-func TestOidcTokenRequiresIssuerClaim(t *testing.T) {
-	oauthTest(t)
-	idp := newRecorder(t, false)
-	idp.handle("/token", jsonHandler(200, map[string]any{"id_token": idToken(map[string]any{"aud": "c", "sub": "s", "exp": time.Now().Unix() + 3600})}))
-	_, failure, err := requestOidcToken(context.Background(), idp.URL+"/token", url.Values{}, expectedIDToken{issuer: "", clientID: "c"}, "")
-	if err != nil || failure == nil || failure.message != "OIDC id_token has invalid iss" {
-		t.Errorf("failure = %+v, %v", failure, err)
-	}
-}
-
 func TestPkceRefreshRejectsEmptyBaseURL(t *testing.T) {
 	oauthTest(t)
 	pinNow(testNow)
@@ -1980,4 +1913,53 @@ func TestSameOriginURLTrimsBeforeParsing(t *testing.T) {
 	if err != nil || got != "https://proxy.example.com/token" {
 		t.Errorf("got %q, %v", got, err)
 	}
+}
+
+func TestHeaderTransportKeepsRequestHeaders(t *testing.T) {
+	oauthTest(t)
+	proxy := newRecorder(t, false)
+	client := &http.Client{Transport: headerTransport{headers: map[string]string{"x-tenant": "tenant-a", "x-other": "other-a"}}}
+	request, _ := http.NewRequest(http.MethodGet, proxy.URL+"/probe", nil)
+	request.Header.Set("X-Tenant", "set-by-request")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	header := proxy.log()[0].header
+	if header.Get("x-tenant") != "set-by-request" || header.Get("x-other") != "other-a" {
+		t.Errorf("header = %v", header)
+	}
+	if request.Header.Get("x-other") != "" {
+		t.Error("the caller's request was mutated")
+	}
+}
+
+func TestLoginErrorLabelsAndRedaction(t *testing.T) {
+	for _, flow := range []string{"LiteLLM PKCE", "OIDC", "LiteLLM CLI SSO"} {
+		err := loginError(context.Background(), litellmauth.LoginTimeoutError{}, flow, "https://proxy.example.com")
+		if err.Error() != flow+" login timed out" || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s: err = %v", flow, err)
+		}
+	}
+
+	t.Run("names the proxy instead of its URL when CLI SSO start fails at the transport", func(t *testing.T) {
+		oauthTest(t)
+		proxy := newRecorder(t, false)
+		proxy.handle("/sso/cli/start", dropConnection)
+		script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
+		_, err := loginCliSSO(context.Background(), script.interaction(), proxy.URL, mustAuthClient(t, proxy.URL))
+		if err == nil || strings.Contains(err.Error(), proxy.URL) || !strings.Contains(err.Error(), "the proxy") {
+			t.Errorf("err = %v", err)
+		}
+	})
+}
+
+func mustAuthClient(t *testing.T, baseURL string) *litellmauth.Client {
+	t.Helper()
+	client, err := newAuthClient(baseURL, defaultDefinition(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
