@@ -267,6 +267,39 @@ describe("budget footer", () => {
     expect(keyPolls).toEqual(["proxy.example.com", "team.example.com"]);
   });
 
+  it("still polls after a turn when its provider is selected again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    providers = [
+      { name: "litellm", displayName: "LiteLLM" },
+      { name: "team", displayName: "Team GW" },
+    ];
+    auths = { litellm: AUTH, team: { ...AUTH, baseUrl: "https://team.example.com" } };
+    const keyPolls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname !== "/key/info") return new Response("{}", { status: 404 });
+      keyPolls.push(`${url.host} ${Date.now()}`);
+      return ok(fixture("key-info-personal"));
+    });
+    setup();
+    const ctx = makeCtx();
+    const t0 = Date.now();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(1000);
+    await emit(pi, "turn_end", {}, ctx);
+    await vi.advanceTimersByTimeAsync(9000);
+    await emit(pi, "model_select", { model: { provider: "team", id: "m" } }, ctx);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // Back within a minute of its last poll: litellm's turn still gets its poll, when it was due.
+    await emit(pi, "model_select", { model: { provider: "litellm", id: "m" } }, ctx);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(keyPolls).toEqual([
+      `proxy.example.com ${t0}`,
+      `team.example.com ${t0 + 10_000}`,
+      `proxy.example.com ${t0 + 60_000}`,
+    ]);
+  });
+
   it("keeps each provider's budgets under its own name", async () => {
     providers = [
       { name: "litellm", displayName: "LiteLLM" },

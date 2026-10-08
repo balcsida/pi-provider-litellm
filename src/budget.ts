@@ -320,6 +320,7 @@ interface ProviderState {
   denied: Map<BudgetEndpoint, number>;
   keyPolled: boolean;
   lastPollAt?: number;
+  lastTurnAt?: number;
   inFlight?: Promise<PollOutcome>;
 }
 
@@ -332,7 +333,6 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   let activeProvider: string | undefined;
   let latestCtx: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let lastTurnAt: number | undefined;
   let generation = 0;
   let warned = false;
 
@@ -423,15 +423,16 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   }
 
   function schedulePoll(name: string): void {
+    const state = stateFor(name);
     const now = Date.now();
-    const at = Math.max(lastTurnAt! + POLL_SETTLE_DELAY_MS, (stateFor(name).lastPollAt ?? 0) + POLL_MIN_INTERVAL_MS);
+    const at = Math.max(state.lastTurnAt! + POLL_SETTLE_DELAY_MS, (state.lastPollAt ?? 0) + POLL_MIN_INTERVAL_MS);
     timer = setTimeout(() => {
       timer = undefined;
-      if (latestCtx && activeProvider && !gated()) {
-        poll(latestCtx, activeProvider).catch(() => {});
+      if (latestCtx && activeProvider === name && !gated()) {
+        poll(latestCtx, name).catch(() => {});
         // A turn that ended within the settle delay may not have its spend written yet: poll once more. Compared
         // with the planned time, not Date.now(), because a timer can fire a few milliseconds early.
-        if (lastTurnAt! + POLL_SETTLE_DELAY_MS > at) schedulePoll(activeProvider);
+        if (state.lastTurnAt! + POLL_SETTLE_DELAY_MS > at) schedulePoll(name);
       }
     }, at - now);
     timer.unref();
@@ -461,17 +462,19 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
       return;
     }
     render(ctx, name);
-    const { lastPollAt } = stateFor(name);
-    if (!gated() && (lastPollAt === undefined || Date.now() - lastPollAt >= POLL_MIN_INTERVAL_MS)) {
-      void poll(ctx, name);
-    }
+    const state = stateFor(name);
+    if (gated()) return;
+    if (state.lastPollAt === undefined || Date.now() - state.lastPollAt >= POLL_MIN_INTERVAL_MS) void poll(ctx, name);
+    // A turn whose poll was dropped when this provider was switched away from still needs one.
+    const missed = state.lastTurnAt !== undefined && state.lastTurnAt + POLL_SETTLE_DELAY_MS > (state.lastPollAt ?? 0);
+    if (missed && !timer) schedulePoll(name);
   });
 
   pi.on("turn_end", (_event, ctx) => {
     if (!ctx.hasUI) return;
     const name = track(ctx, ctx.model?.provider);
     if (!name || gated()) return;
-    lastTurnAt = Date.now();
+    stateFor(name).lastTurnAt = Date.now();
     if (!timer) schedulePoll(name);
   });
 
@@ -489,7 +492,6 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
   pi.on("session_shutdown", (_event, ctx) => {
     clearTimeout(timer);
     timer = undefined;
-    lastTurnAt = undefined;
     generation++;
     if (shownText !== undefined && ctx?.hasUI) ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
     shownText = undefined;
