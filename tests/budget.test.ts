@@ -228,6 +228,36 @@ describe("pollBudget", () => {
     expect(seen).not.toContain("/organization/list");
   });
 
+  it("keeps the team's org budget when /team/info fails temporarily", async () => {
+    const team = fixture("team-info");
+    const withOrg = { ...team, team_info: { ...team.team_info, organization_id: "O" } };
+    const routes = {
+      "/key/info": () => ok(fixture("key-info-team-user")),
+      "/v2/user/info": () => ok(fixture("user-info-v2")),
+      "/organization/list": () => ok(fixture("organization-list")),
+    };
+    mockProxy({ ...routes, "/team/info?team_id=T": () => ok(withOrg) });
+    const first = await poll();
+    const previous = first.ok ? first.levels : {};
+    expect(previous.org).toEqual({ spend: 9210, maxBudget: 50000 });
+    vi.restoreAllMocks();
+
+    mockProxy({ ...routes, "/team/info?team_id=T": () => status(503) });
+    const second = await poll(new Map(), previous);
+    expect(second.ok && second.levels).toEqual(previous);
+    vi.restoreAllMocks();
+
+    // The key names its own org, and that org is now denied: nothing stale is kept.
+    mockProxy({
+      ...routes,
+      "/key/info": () => ok(keyWith("key-info-team-user", { organization_id: "O" })),
+      "/team/info?team_id=T": () => status(503),
+      "/organization/list": () => status(403),
+    });
+    const third = await poll(new Map(), previous);
+    expect(third.ok && third.levels.org).toBeUndefined();
+  });
+
   it("treats missing, null, zero and non-numeric limits as unset", async () => {
     for (const max_budget of [0, "10", null]) {
       mockProxy({ "/key/info": () => ok(keyWith("key-info-personal", { max_budget, user_id: null })) });

@@ -241,6 +241,32 @@ describe("budget footer", () => {
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, undefined);
   });
 
+  it("drops a pending turn poll when another provider is selected", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    providers = [
+      { name: "litellm", displayName: "LiteLLM" },
+      { name: "team", displayName: "Team GW" },
+    ];
+    auths = { litellm: AUTH, team: { ...AUTH, baseUrl: "https://team.example.com" } };
+    const keyPolls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname !== "/key/info") return new Response("{}", { status: 404 });
+      keyPolls.push(url.host);
+      return ok(fixture("key-info-personal"));
+    });
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(1000);
+    await emit(pi, "turn_end", {}, ctx);
+    await vi.advanceTimersByTimeAsync(54_000);
+    // The turn's poll was due at +60 s for litellm; selecting team polls team now instead.
+    await emit(pi, "model_select", { model: { provider: "team", id: "m" } }, ctx);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(keyPolls).toEqual(["proxy.example.com", "team.example.com"]);
+  });
+
   it("keeps each provider's budgets under its own name", async () => {
     providers = [
       { name: "litellm", displayName: "LiteLLM" },
@@ -306,6 +332,23 @@ describe("budget footer", () => {
     vi.setSystemTime(Date.now() + 61_000);
     await emit(pi, "model_select", select, ctx);
     await vi.waitFor(() => expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, undefined));
+  });
+
+  it("treats changed custom headers as a new credential", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const routes = { "/key/info": TEAM_KEY, "/v2/user/info": USER_INFO };
+    mockProxy({ ...routes, "/team/info?team_id=T": () => status(403) });
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.waitFor(() => expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, "LiteLLM user $0.34/$100"));
+
+    // Same key, new gateway token in the custom headers: the old token's 403 must not hide the team.
+    const seen = mockProxy({ ...routes, "/team/info?team_id=T": TEAM_INFO }, { token: "sk-test", gateway: "g2" });
+    auths.litellm = { ...AUTH, headers: { "x-gateway": "g2" } };
+    vi.setSystemTime(Date.now() + 61_000);
+    await emit(pi, "model_select", { model: { provider: "litellm", id: "m" } }, ctx);
+    await vi.waitFor(() => expect(seen).toContain("/team/info?team_id=T"));
   });
 
   it("never shows proxy-supplied text", async () => {

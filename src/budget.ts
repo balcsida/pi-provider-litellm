@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fetchJson, normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMRuntimeAuth } from "./types.js";
@@ -97,6 +97,8 @@ async function pollUser(
   return user ? { user } : {};
 }
 
+type TeamPoll = { levels: BudgetLevels; organizationId?: string; transient?: true };
+
 async function pollTeam(
   auth: LiteLLMRuntimeAuth,
   teamId: string,
@@ -104,13 +106,13 @@ async function pollTeam(
   denied: Map<BudgetEndpoint, number>,
   previous: BudgetLevels,
   timeoutMs: number,
-): Promise<{ levels: BudgetLevels; organizationId?: string }> {
+): Promise<TeamPoll> {
   const path = `/team/info?team_id=${encodeURIComponent(teamId)}`;
   const fetched = await get(auth, path, "team", denied, timeoutMs);
   if (fetched.status === "denied") return { levels: {} };
   const body = fetched.status === "ok" ? obj(fetched.data) : undefined;
   const info = obj(body?.team_info);
-  if (!info) return { levels: keep(previous, ["team", "member"]) };
+  if (!info) return { levels: keep(previous, ["team", "member"]), transient: true };
 
   const levels: BudgetLevels = {};
   const team = level(info.spend, info.max_budget, info.budget_reset_at);
@@ -172,12 +174,14 @@ export async function pollBudget(
     userId || !keyKnown ? pollUser(auth, denied, previous, timeoutMs) : {},
     teamId && !denied.has("team")
       ? pollTeam(auth, teamId, userId, denied, previous, timeoutMs)
-      : { levels: {} as BudgetLevels, organizationId: undefined },
+      : ({ levels: {} } as TeamPoll),
   ]);
   Object.assign(levels, user, team.levels);
 
   const org = organizationId ?? team.organizationId;
   if (org && userId && !denied.has("org")) Object.assign(levels, await pollOrg(auth, org, denied, previous, timeoutMs));
+  // The team was the only source of the org id, so a temporary team failure keeps the last org figure too.
+  else if (!org && team.transient) Object.assign(levels, keep(previous, ["org"]));
   return { ok: true, levels, keyPolled: keyKnown };
 }
 
@@ -322,6 +326,8 @@ interface ProviderState {
 export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): void {
   const displayNames = new Map(options.providers.map(({ name, displayName }) => [name, displayName]));
   const states = new Map<string, ProviderState>();
+  // Keyed like the MCP registration identity in index.ts, because custom headers can carry gateway credentials.
+  const identityKey = randomBytes(32);
   let shownText: string | undefined;
   let activeProvider: string | undefined;
   let latestCtx: ExtensionContext | undefined;
@@ -376,7 +382,9 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
       if (started === generation) render(ctx, name);
       return "no-auth";
     }
-    const digest = createHash("sha256").update(`${auth.baseUrl}\0${auth.apiKey}`).digest("hex");
+    const headers = Object.entries(auth.headers ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
+    const identity = JSON.stringify([auth.baseUrl, auth.apiKey, headers]);
+    const digest = createHmac("sha256", identityKey).update(identity).digest("hex");
     if (state.digest !== undefined && state.digest !== digest) {
       forget(state);
       if (started === generation) render(ctx, name);
@@ -438,7 +446,13 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
 
   pi.on("model_select", (event, ctx) => {
     if (!ctx.hasUI) return;
+    const previous = activeProvider;
     const name = track(ctx, event.model.provider);
+    // A pending turn poll belongs to the provider its turns ran on; a newly selected one is polled below if stale.
+    if (name !== previous) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
     if (!name) {
       if (shownText !== undefined) {
         ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
