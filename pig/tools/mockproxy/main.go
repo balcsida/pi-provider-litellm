@@ -78,7 +78,7 @@ var defaultModels = []ModelInfo{
 
 func auth(w http.ResponseWriter, r *http.Request, checkKey string) bool {
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != checkKey {
+	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != checkKey && !isIssued(strings.TrimPrefix(auth, "Bearer ")) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"message": "invalid key"}})
@@ -379,6 +379,8 @@ func main() {
 	mux.HandleFunc("POST /v1/chat/completions", makeHandleChatCompletions(*key))
 	mux.HandleFunc("POST /v1/responses", makeHandleResponses(*key))
 	mux.HandleFunc("POST /v1/messages", makeHandleMessages(*key))
+
+	registerSSO(mux, *ssoMode, *ssoPendingPolls, *ssoTeams, *ssoDeny)
 
 	var handler http.Handler = mux
 	if *dump {
