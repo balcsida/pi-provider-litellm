@@ -12,6 +12,7 @@ Flags:
 - `-addr` (default `127.0.0.1:0`) – listen address; port 0 picks an ephemeral port
 - `-key` (required) – bearer token for authorization
 - `-models` (optional) – path to JSON file with custom model definitions
+- `-dump` (optional) – detailed request/response logging to stderr: method, path, auth presence, headers, and POST body (pretty-printed JSON)
 
 The server prints the listening address to stdout and logs requests to stderr.
 

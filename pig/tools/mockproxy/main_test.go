@@ -7,8 +7,21 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 )
+
+func captureStderr(fn func()) string {
+	r, w, _ := os.Pipe()
+	old := os.Stderr
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
 
 func startServer(t *testing.T) (string, string) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -133,5 +146,100 @@ func TestChatCompletionsStream(t *testing.T) {
 
 	if !bytes.Contains(body_, []byte("[DONE]")) {
 		t.Errorf("response missing [DONE]. got: %s", responseText)
+	}
+}
+
+func TestTextPartExtractionArray(t *testing.T) {
+	tests := []struct {
+		name    string
+		content interface{}
+		expect  string
+	}{
+		{"string", "hello world", "hello world"},
+		{
+			"chat array",
+			[]interface{}{
+				map[string]interface{}{"type": "text", "text": "hello"},
+				map[string]interface{}{"type": "text", "text": " world"},
+			},
+			"hello world",
+		},
+		{
+			"responses array",
+			[]interface{}{
+				map[string]interface{}{"type": "input_text", "text": "test"},
+			},
+			"test",
+		},
+		{"empty", nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractTextFromContent(tt.content)
+			if result != tt.expect {
+				t.Errorf("expected %q, got %q", tt.expect, result)
+			}
+		})
+	}
+}
+
+func TestResponseHeaders(t *testing.T) {
+	baseURL, testKey := startServer(t)
+
+	tests := []struct {
+		name            string
+		endpoint        string
+		body            map[string]interface{}
+		expectEffort    string
+		expectToolCount string
+	}{
+		{
+			"chat with reasoning",
+			"/v1/chat/completions",
+			map[string]interface{}{
+				"model":            "mock-chat",
+				"reasoning_effort": "medium",
+				"stream":           false,
+				"messages":         []map[string]string{{"role": "user", "content": "test"}},
+				"tools":            []map[string]string{{"type": "function"}, {"type": "function"}},
+			},
+			"medium",
+			"2",
+		},
+		{
+			"responses with reasoning",
+			"/v1/responses",
+			map[string]interface{}{
+				"model":     "mock-responses",
+				"stream":    true,
+				"messages":  []map[string]string{{"role": "user", "content": "test"}},
+				"reasoning": map[string]interface{}{"effort": "high"},
+			},
+			"high",
+			"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, _ := json.Marshal(tt.body)
+			req, _ := http.NewRequest("POST", baseURL+tt.endpoint, bytes.NewReader(bodyBytes))
+			req.Header.Set("Authorization", "Bearer "+testKey)
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if tt.expectEffort != "" && resp.Header.Get("x-mock-reasoning-effort") != tt.expectEffort {
+				t.Errorf("expected reasoning effort %s, got %s", tt.expectEffort, resp.Header.Get("x-mock-reasoning-effort"))
+			}
+			if tt.expectToolCount != "" && resp.Header.Get("x-mock-tool-count") != tt.expectToolCount {
+				t.Errorf("expected tool count %s, got %s", tt.expectToolCount, resp.Header.Get("x-mock-tool-count"))
+			}
+		})
 	}
 }

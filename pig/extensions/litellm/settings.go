@@ -367,6 +367,12 @@ var (
 	warnedUnresolvedAPIKeys   = map[string]bool{}
 )
 
+func resetWarnedUnresolvedAPIKeys() {
+	warnedUnresolvedAPIKeysMu.Lock()
+	warnedUnresolvedAPIKeys = map[string]bool{}
+	warnedUnresolvedAPIKeysMu.Unlock()
+}
+
 func warnUnresolvedAPIKeyConfig(name, config string) {
 	key := name + " " + config
 	warnedUnresolvedAPIKeysMu.Lock()

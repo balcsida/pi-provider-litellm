@@ -92,6 +92,72 @@ func (o Options) get(parent context.Context, rawURL, apiKey string) (*http.Respo
 	return response, cancel, nil
 }
 
+// maxJSONDepth bounds nesting before decoding; encoding/json refuses beyond 10,000 and would fail the
+// whole response for one pathological value.
+const maxJSONDepth = 256
+
+// capJSONDepth replaces every subtree nested deeper than limit with null. It is a single string-aware
+// pass and returns body itself, unallocated, when nothing is replaced.
+func capJSONDepth(body []byte, limit int) []byte {
+	var out []byte
+	copied := 0 // body[:copied] is already in out
+	depth := 0
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '"':
+			for i++; i < len(body) && body[i] != '"'; i++ {
+				if body[i] == '\\' {
+					i++
+				}
+			}
+		case '{', '[':
+			if depth < limit {
+				depth++
+				continue
+			}
+			end := matchingClose(body, i)
+			if end < 0 {
+				return body
+			}
+			if out == nil {
+				out = make([]byte, 0, len(body))
+			}
+			out = append(append(out, body[copied:i]...), "null"...)
+			copied = end + 1
+			i = end
+		case '}', ']':
+			depth--
+		}
+	}
+	if out == nil {
+		return body
+	}
+	return append(out, body[copied:]...)
+}
+
+// matchingClose returns the index of the bracket closing the one at start, or -1 when unterminated.
+func matchingClose(body []byte, start int) int {
+	depth := 0
+	for i := start; i < len(body); i++ {
+		switch body[i] {
+		case '"':
+			for i++; i < len(body) && body[i] != '"'; i++ {
+				if body[i] == '\\' {
+					i++
+				}
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // FetchResult is `{ ok: true; data } | { ok: false; status }`.
 type FetchResult[T any] struct {
 	OK     bool
@@ -116,8 +182,15 @@ func FetchJSON[T any](ctx context.Context, rawURL, apiKey string, options Option
 	if err != nil {
 		return result, err
 	}
+	body = capJSONDepth(body, maxJSONDepth)
 	if err := json.Unmarshal(body, &result.Data); err != nil {
-		return result, errors.New("LiteLLM response is not valid JSON")
+		// Like response.json() followed by `data.data ?? []`: only a body that is not JSON at all fails;
+		// valid JSON of another shape yields no data.
+		if !json.Valid(body) {
+			return result, errors.New("LiteLLM response is not valid JSON")
+		}
+		var zero T
+		result.Data = zero
 	}
 	result.OK = true
 	return result, nil

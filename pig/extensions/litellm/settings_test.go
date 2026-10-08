@@ -511,6 +511,8 @@ func TestResolveCredentials(t *testing.T) {
 
 	t.Run("an unresolved configured key warns once", func(t *testing.T) {
 		hermeticAgentDir(t)
+		resetWarnedUnresolvedAPIKeys()
+		t.Cleanup(resetWarnedUnresolvedAPIKeys)
 		diagnostics := captureDiagnostics(t)
 		definition := providerDefinition{Name: "warn-once-provider", APIKeyConfig: "$DEFINITELY_UNSET_KEY_VAR"}
 		for range 2 {

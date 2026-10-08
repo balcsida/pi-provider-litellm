@@ -652,5 +652,7 @@ func Extension() *sdk.Extension {
 	setupRefreshCommand(e, state)
 	setupSessionHeader(e, state)
 	setupFallbackWarning(e, state)
+	setupCostTracking(e, state) // before any budget handler: its after_provider_response handler must run first
+	setupRequestPolicy(e, state)
 	return e
 }

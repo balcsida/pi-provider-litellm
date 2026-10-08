@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +19,7 @@ var (
 	addr   = flag.String("addr", "127.0.0.1:0", "listen address")
 	key    = flag.String("key", "", "required bearer token")
 	models = flag.String("models", "", "path to JSON models file (default built-in)")
+	dump   = flag.Bool("dump", false, "detailed request/response logging")
 )
 
 type ModelInfo struct {
@@ -140,21 +143,39 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("I'm alive!"))
 }
 
+func extractTextFromContent(content interface{}) string {
+	if str, ok := content.(string); ok {
+		return str
+	}
+	if arr, ok := content.([]interface{}); ok {
+		var parts []string
+		for _, part := range arr {
+			if obj, ok := part.(map[string]interface{}); ok {
+				if t, ok := obj["type"].(string); ok && (t == "text" || t == "input_text") {
+					if text, ok := obj["text"].(string); ok {
+						parts = append(parts, text)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return ""
+}
+
 func getLastUserMessage(msgs interface{}) string {
 	if arr, ok := msgs.([]interface{}); ok {
 		for i := len(arr) - 1; i >= 0; i-- {
 			if msg, ok := arr[i].(map[string]interface{}); ok {
 				if role, ok := msg["role"].(string); ok && role == "user" {
 					if content, ok := msg["content"].(interface{}); ok {
-						if str, ok := content.(string); ok {
-							return str
-						}
+						return extractTextFromContent(content)
 					}
 				}
 			}
 		}
 	}
-	return "hello"
+	return ""
 }
 
 func makeHandleChatCompletions(checkKey string) http.HandlerFunc {
@@ -167,6 +188,12 @@ func makeHandleChatCompletions(checkKey string) http.HandlerFunc {
 
 		header(w)
 		w.Header().Set("x-litellm-response-cost", "0.000123")
+		if v, ok := req["reasoning_effort"].(string); ok && v != "" {
+			w.Header().Set("x-mock-reasoning-effort", v)
+		}
+		if tools, ok := req["tools"].([]interface{}); ok {
+			w.Header().Set("x-mock-tool-count", fmt.Sprintf("%d", len(tools)))
+		}
 
 		stream, _ := req["stream"].(bool)
 		lastMsg := getLastUserMessage(req["messages"])
@@ -217,6 +244,14 @@ func makeHandleResponses(checkKey string) http.HandlerFunc {
 		header(w)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
+		if reasoning, ok := req["reasoning"].(map[string]interface{}); ok {
+			if v, ok := reasoning["effort"].(string); ok && v != "" {
+				w.Header().Set("x-mock-reasoning-effort", v)
+			}
+		}
+		if tools, ok := req["tools"].([]interface{}); ok {
+			w.Header().Set("x-mock-tool-count", fmt.Sprintf("%d", len(tools)))
+		}
 
 		lastMsg := getLastUserMessage(req["messages"])
 		replyText := "mock reply to: " + lastMsg
@@ -251,6 +286,12 @@ func makeHandleMessages(checkKey string) http.HandlerFunc {
 		header(w)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
+		if v, ok := req["reasoning_effort"].(string); ok && v != "" {
+			w.Header().Set("x-mock-reasoning-effort", v)
+		}
+		if tools, ok := req["tools"].([]interface{}); ok {
+			w.Header().Set("x-mock-tool-count", fmt.Sprintf("%d", len(tools)))
+		}
 
 		lastMsg := getLastUserMessage(req["messages"])
 		replyText := "mock reply to: " + lastMsg
@@ -272,6 +313,43 @@ func makeHandleMessages(checkKey string) http.HandlerFunc {
 	}
 }
 
+func logRequest(r *http.Request, body []byte) {
+	if !*dump {
+		return
+	}
+	auth := "absent"
+	if r.Header.Get("Authorization") != "" {
+		auth = "present"
+	}
+	fmt.Fprintf(os.Stderr, "[DUMP] %s %s\n", r.Method, r.RequestURI)
+	fmt.Fprintf(os.Stderr, "  Authorization: %s\n", auth)
+	fmt.Fprintf(os.Stderr, "  x-litellm-session-id: %s\n", r.Header.Get("x-litellm-session-id"))
+	fmt.Fprintf(os.Stderr, "  content-type: %s\n", r.Header.Get("content-type"))
+	if r.Method == "POST" && len(body) > 0 {
+		var pretty interface{}
+		if err := json.Unmarshal(body, &pretty); err == nil {
+			if b, err := json.MarshalIndent(pretty, "  ", "  "); err == nil {
+				fmt.Fprintf(os.Stderr, "  body:\n%s\n", string(b))
+			}
+		}
+	}
+}
+
+type dumpMiddleware struct {
+	handler http.Handler
+}
+
+func (m *dumpMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if *dump && r.Method == "POST" {
+		body, _ := io.ReadAll(r.Body)
+		logRequest(r, body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	} else if *dump {
+		logRequest(r, nil)
+	}
+	m.handler.ServeHTTP(w, r)
+}
+
 func main() {
 	flag.Parse()
 
@@ -287,6 +365,11 @@ func main() {
 	mux.HandleFunc("POST /v1/responses", makeHandleResponses(*key))
 	mux.HandleFunc("POST /v1/messages", makeHandleMessages(*key))
 
+	var handler http.Handler = mux
+	if *dump {
+		handler = &dumpMiddleware{handler: mux}
+	}
+
 	listener, err := net.Listen("tcp", *addr)
 	if err != nil {
 		os.Exit(1)
@@ -295,7 +378,7 @@ func main() {
 	fmt.Printf("listening on http://%s\n", actualAddr)
 
 	server := &http.Server{
-		Handler:     mux,
+		Handler:     handler,
 		IdleTimeout: 5 * time.Second,
 	}
 
@@ -306,8 +389,12 @@ func main() {
 		server.Close()
 	}()
 
-	wrappedListener := &logListener{Listener: listener}
-	server.Serve(wrappedListener)
+	if !*dump {
+		wrappedListener := &logListener{Listener: listener}
+		server.Serve(wrappedListener)
+	} else {
+		server.Serve(listener)
+	}
 }
 
 type logListener struct {
