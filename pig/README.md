@@ -40,11 +40,22 @@ pig piglet build pig/litellm-example.yaml --format binary --out ./pig-litellm
 
 The first build downloads the PiG source and needs a Go toolchain (`pig setup go`).
 
-## Limitation: `--validate-only`
+## Known PiG 0.4.1 issues
+
+### `--validate-only`
 
 `pig install --validate-only` fails with `native provider registry is not bound` for this extension. PiG 0.4.1's
 validate host does not bind the native provider registry, and this extension registers one. Use
 `pig package validate ./pig` to validate the package, and a real load (`pig -e ...`) to prove the extension works.
+
+### Reasoning models without an effort carrier crash model selection
+
+When discovery finds a reasoning model but no evidence of a transmissible effort level (for example a Claude route
+served over Chat Completions without `reasoning_effort_levels`), it emits a thinking-level map that denies every
+level, exactly as the TypeScript extension does. PiG 0.4.1 then panics while selecting that model
+(`coding/model.go:173`, `thinkingMaxLevelForEntry` indexes the last element of an empty list), whether through
+`--model` or `/model`. Pi tolerates the same model. Until PiG guards the empty list, pick a route that declares its
+effort levels, or route the model through the Messages API.
 
 ## Development
 

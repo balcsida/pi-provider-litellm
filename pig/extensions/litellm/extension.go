@@ -665,6 +665,7 @@ func Extension() *sdk.Extension {
 	setupSessionHeader(e, state)
 	setupFallbackWarning(e, state)
 	setupCostTracking(e, state) // before any budget handler: its after_provider_response handler must run first
+	setupBudget(e, state)       // after setupCostTracking: its after_provider_response handler must run second
 	setupRequestPolicy(e, state)
 	setupSkills(e, state) // its before_agent_start handler runs before the MCP sync, as in the TypeScript
 	setupMCP(e, state)
