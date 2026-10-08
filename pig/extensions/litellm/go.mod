@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	github.com/MichaelKinsy/PiG v0.4.1
 	github.com/MichaelKinsy/PiG/extensions/sdk v0.4.1
-	github.com/balcsida/litellm-auth-go v0.0.0-20261008183543-c97dd5fce5b1
 )
 
 require (
@@ -30,6 +29,6 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )

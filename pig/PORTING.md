@@ -52,21 +52,14 @@ aliases come from settings as in the TypeScript version.
   them up there instead of reading them off `ctx.Model`.
 - **Streaming belongs to PiG.** No protocol code is written here. `ai.StreamSimple`/the drivers in PiG `ai`
   do Chat Completions, Responses and Messages.
-- **Login protocols come from a library.** `oauth.go` is glue over `github.com/balcsida/litellm-auth-go`
-  (package `litellmauth`): CLI SSO, proxy PKCE with its loopback callback, direct OIDC against the IdP, and both
-  refreshes. The glue picks the flow, shows the events, builds the library clients, maps results to the
-  `auth.json` shapes the TypeScript writes and classifies refresh errors for the transient backoff. OIDC discovery
-  (the library has none), the pasted token and virtual key generation stay local. Proxy flows use a client whose
-  transport adds the resolved custom headers; the IdP client has none, so `LITELLM_HEADERS` never reach the IdP.
-  The tests cover the glue; protocol edge cases belong to the library's suite.
 - **Everything else is a 1:1 port.** Discovery, deployment-group reduction, backend identity, thinking levels,
   proxy version gates, request/response policies, budget, cost, skills, MCP registration, credentials and the
   three login flows keep the TypeScript behavior and its tests.
 
 ## Conventions
 
-- Go 1.26, standard library plus the two PiG modules and `github.com/balcsida/litellm-auth-go` already in `go.mod`.
-  Do not add other dependencies or edit `go.mod`/`go.sum` by hand; report a need instead.
+- Go 1.26, standard library plus the two PiG modules already in `go.mod`. Do not add dependencies or edit
+  `go.mod`/`go.sum`; report a need instead.
 - Fuse-compatible code only: no `fmt.Print*`, `os.Stdout`, `os.Exit`, `os.Chdir`, `log.Fatal*`. Report through
   `sdk.Context` (`Notify`, `SetStatus`) or returned errors. Diagnostics the TypeScript version writes to stderr
   go to `os.Stderr` only through one helper in the root package, never `os.Stdout`.
@@ -132,30 +125,11 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 - `ctx.ui.setStatus(undefined)` has no SDK equivalent; an empty string clears the budget status.
 - A JSON `null` under `litellm.oidc` is treated as unset rather than rejected, because the decoded settings map
   cannot distinguish null from absent.
-- Login protocol details that follow `litellm-auth-go` rather than the TypeScript:
-  - the PKCE `client_name` is the library's `litellm-auth-go`;
-  - the CLI SSO verification URL honours a same-origin `verification_uri_complete` and orders its query parameters
-    alphabetically (`key=...&source=litellm-cli`);
-  - the CLI SSO poll response's `expires_in` is not read; the credential lifetime comes from the key itself
-    (JWT `exp`, else `LITELLM_CLI_JWT_EXPIRATION_HOURS` or the 24 h default);
-  - a PKCE refresh must rotate the refresh token (a response without one is an invalid response), and the library
-    refuses redirects on CLI SSO polls;
-  - a loopback callback with a wrong `state` ends the login instead of being ignored, and a multi-audience
-    `id_token` needs an `azp` claim;
-  - a PKCE contract with an unsupported version or without S256 falls back to CLI SSO like a missing one;
-  - refresh error messages name `invalid_grant` for every rejected refresh token, and a redirect from a token
-    endpoint counts as a network error.
 - Diagnostics the TypeScript writes to stderr go through one reporter; in a fused binary they still reach stderr.
 
 ## Known PiG 0.4.1 issues
 
 - `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
-- `pig piglet build` cannot fuse an extension that depends on a third-party module (here `litellm-auth-go`): the
-  fused builder overlays Pig's own `go.mod` and compiles with `-mod=readonly`, so a dependency that raises a
-  version Pig pins (`golang.org/x/term`) stops the build with `go: updates to go.mod needed`. The subprocess
-  path (`pig -e`, `pig install`) is unaffected. Fixed in the PiG fork branch `fix/fused-member-requirements`
-  (the build module becomes a `-modfile` pair that `go mod tidy` resolves before compiling); until PiG ships it,
-  build the Piglet binary with a `pig` built from that branch.
 - A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted
   when no effort carrier is evidenced, for example a Claude route on Chat Completions without
   `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:173` (`thinkingMaxLevelForEntry`) indexes
