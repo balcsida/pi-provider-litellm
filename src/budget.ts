@@ -211,8 +211,12 @@ export function mergeKeyHeaders(
   return maxBudget === undefined ? undefined : { spend, maxBudget };
 }
 
+// Locale formatting rounds the decimal value (1.815 to 1.82), where toFixed rounds the binary one (to 1.81).
+const money = (value: number, decimals: number): string =>
+  `$${value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: 2 })}`;
+
 export function formatCompactAmount(value: number): string {
-  if (value < 100) return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
+  if (value < 100) return money(value, Number.isInteger(value) ? 0 : 2);
   if (value < 1000) return `$${Math.round(value)}`;
   const [scaled, suffix] = value >= 1_000_000 ? [value / 1_000_000, "M"] : [value / 1000, "k"];
   return `$${scaled < 10 ? scaled.toFixed(1).replace(/\.0$/, "") : Math.round(scaled)}${suffix}`;
@@ -259,9 +263,6 @@ export function formatBudgetStatus(
     (reset ? theme.fg("dim", ` · resets ${reset}`) : "")
   );
 }
-
-const money = (value: number, decimals: number): string =>
-  `$${value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: 2 })}`;
 
 export function formatBudgetDetails(
   providerName: string,

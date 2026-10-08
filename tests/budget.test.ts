@@ -348,6 +348,10 @@ describe("budget formatting", () => {
       "$1.2M",
     ]);
   });
+  it("rounds cents in the footer like the breakdown", () => {
+    expect(formatCompactAmount(1.815)).toBe("$1.82");
+    expect(formatBudgetDetails("litellm", { key: { spend: 1.815, maxBudget: 10 } }, new Map(), NOW)).toContain("$1.82");
+  });
   it("formats relative reset times", () => {
     expect(formatRelativeReset(NOW + 12.5 * DAY, NOW)).toBe("12d");
     expect(formatRelativeReset(NOW + 5.5 * 3_600_000, NOW)).toBe("5h");
