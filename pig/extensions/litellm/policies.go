@@ -34,13 +34,18 @@ type policyStore struct {
 	path   string
 	mu     sync.Mutex
 	models map[string]modelPolicy
+	// seedVersions holds, per provider seeded at activation, the entry versions stored before the seed
+	// overwrote them; refreshModels judges staleness against these, not against the seed's own entries.
+	seedVersions map[string]map[string]int
+	// flushMu serializes marshal and rename so the last write is the latest snapshot.
+	flushMu sync.Mutex
 }
 
 func policyKey(provider, modelID string) string { return provider + "\x00" + modelID }
 
 // newPolicyStore loads path; a missing or unreadable file starts empty.
 func newPolicyStore(path string) *policyStore {
-	store := &policyStore{path: path, models: map[string]modelPolicy{}}
+	store := &policyStore{path: path, models: map[string]modelPolicy{}, seedVersions: map[string]map[string]int{}}
 	if path == "" {
 		return store
 	}
@@ -90,12 +95,41 @@ func (s *policyStore) entry(provider, modelID string) (modelPolicy, bool) {
 
 // replace swaps every entry of provider for the discovered models, then persists.
 func (s *policyStore) replace(provider string, models []types.DiscoveredModel) error {
+	return s.swap(provider, models, false)
+}
+
+// replaceSeed is replace for startup discovery: it first snapshots the versions already stored for provider.
+func (s *policyStore) replaceSeed(provider string, models []types.DiscoveredModel) error {
+	return s.swap(provider, models, true)
+}
+
+// storedVersion is the discovery version a stored model carried before the provider's seed was written
+// (known false when it had none); without a seed it is the current entry.
+func (s *policyStore) storedVersion(provider, modelID string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if before, seeded := s.seedVersions[provider]; seeded {
+		version, known := before[modelID]
+		return version, known
+	}
+	entry, known := s.models[policyKey(provider, modelID)]
+	return entry.Version, known
+}
+
+func (s *policyStore) swap(provider string, models []types.DiscoveredModel, seed bool) error {
 	s.mu.Lock()
 	prefix := policyKey(provider, "")
-	for key := range s.models {
+	before := map[string]int{}
+	for key, entry := range s.models {
 		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			before[key[len(prefix):]] = entry.Version
 			delete(s.models, key)
 		}
+	}
+	if seed {
+		s.seedVersions[provider] = before
+	} else {
+		delete(s.seedVersions, provider)
 	}
 	for _, model := range models {
 		entry := policyOf(model)
@@ -128,6 +162,8 @@ func (s *policyStore) flush() error {
 	if s.path == "" {
 		return nil
 	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	data, err := json.Marshal(policyFile{Models: s.models})
 	s.mu.Unlock()

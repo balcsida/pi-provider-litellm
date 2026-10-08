@@ -8,12 +8,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/MichaelKinsy/PiG/ai"
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/discover"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
 )
 
@@ -553,4 +555,470 @@ func TestStreamGuard(t *testing.T) {
 func withFamily(model types.DiscoveredModel, family types.BackendFamily) types.DiscoveredModel {
 	model.LiteLLMBackendFamily = family
 	return model
+}
+
+// modelByID returns the published model with id.
+func modelByID(t *testing.T, provider *ai.ModelsProvider, id string) *ai.Model {
+	t.Helper()
+	models, err := provider.GetModels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		if model.ID == id {
+			return model
+		}
+	}
+	t.Fatalf("model %q not published", id)
+	return nil
+}
+
+func yes() *bool { v := true; return &v }
+
+func messagesModel(t *testing.T, id string, compat *ai.ModelCompat, version int) types.DiscoveredModel {
+	t.Helper()
+	model := discoveredModel(id)
+	model.API, model.Compat, model.LiteLLMDiscoveryVersion = ai.APIAnthropicMessages, compat, version
+	models, err := toNativeModels("litellm", testRoot+"/v1", []types.DiscoveredModel{model}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return models[0]
+}
+
+func TestRefreshModelsSeedMasking(t *testing.T) {
+	t.Run("a stale sidecar entry does not let a stale stored model override the startup seed", func(t *testing.T) {
+		policies := newPolicyStore("")
+		stale := nativeModel(t, "claude-sonnet-5")
+		stale.Name, stale.LiteLLMDiscoveryVersion = "stale-name", 2
+		policies.replace("litellm", []types.DiscoveredModel{stale})
+		seed := nativeModel(t, "claude-sonnet-5")
+		seed.Name = "seed-name"
+		// seedModels writes the seed's policies over the stale ones; the version check must still see the old one.
+		if err := policies.replaceSeed("litellm", []types.DiscoveredModel{seed}); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, func(o *providerOptions) {
+			o.Policies, o.Models = policies, []types.DiscoveredModel{seed}
+		})
+		if _, err := refresh(h.provider, storedEntry(t, stale), false, false); err != nil {
+			t.Fatal(err)
+		}
+		if got := modelByID(t, h.provider, "claude-sonnet-5").DisplayName; got != "seed-name" {
+			t.Fatalf("name = %q, the stale stored model masked the seed", got)
+		}
+	})
+	t.Run("a current stored model still wins over a seed written after a network refresh", func(t *testing.T) {
+		policies := newPolicyStore("")
+		seed := nativeModel(t, "m")
+		seed.Name = "seed-name"
+		policies.replace("litellm", []types.DiscoveredModel{seed})
+		h := newHarness(t, func(o *providerOptions) { o.Policies, o.Models = policies, []types.DiscoveredModel{seed} })
+		stored := nativeModel(t, "m")
+		stored.Name = "stored-name"
+		if _, err := refresh(h.provider, storedEntry(t, stored), false, false); err != nil {
+			t.Fatal(err)
+		}
+		if got := modelByID(t, h.provider, "m").DisplayName; got != "stored-name" {
+			t.Fatalf("name = %q", got)
+		}
+	})
+}
+
+func TestRefreshModelsUndecodableRecord(t *testing.T) {
+	diagnostics := collectDiagnostics(t)
+	h := newHarness(t, nil)
+	good := nativeModel(t, "good")
+	h.policies.replace("litellm", []types.DiscoveredModel{good})
+	stored := storedEntry(t, good, json.RawMessage(`{"id":5}`))
+	if _, err := refresh(h.provider, stored, false, false); err != nil {
+		t.Fatalf("one undecodable record aborted the restore: %v", err)
+	}
+	if ids := modelIDs(t, h.provider); !equalStrings(ids, []string{"good"}) {
+		t.Fatalf("ids = %v", ids)
+	}
+	if len(*diagnostics) != 1 || !strings.Contains((*diagnostics)[0], "undecodable stored model") {
+		t.Fatalf("diagnostics = %v", *diagnostics)
+	}
+}
+
+func TestRefreshModelsCacheVersionRestores(t *testing.T) {
+	t.Run("removes an inherited strict-tool grant from a v2 Messages cache and refreshes it online", func(t *testing.T) {
+		fresh := messagesModel(t, "claude-fable-5-1", &ai.ModelCompat{ForceAdaptiveThinking: yes()}, types.DiscoveryVersion)
+		h := newHarness(t, func(o *providerOptions) {
+			o.Discover = func(context.Context, ai.Credential) (*discoveredCatalog, error) {
+				return &discoveredCatalog{Models: []types.DiscoveredModel{fresh}, BaseURL: testRoot}, nil
+			}
+		})
+		stale := messagesModel(t, "claude-fable-5-1", &ai.ModelCompat{ForceAdaptiveThinking: yes(), SupportsStrictTools: yes()}, 2)
+		h.policies.replace("litellm", []types.DiscoveredModel{stale})
+		if _, err := refresh(h.provider, storedEntry(t, stale), false, false); err != nil {
+			t.Fatal(err)
+		}
+		compat := modelByID(t, h.provider, "claude-fable-5-1").ProviderMeta.Compat
+		if compat == nil || compat.SupportsStrictTools != nil || compat.ForceAdaptiveThinking == nil || !*compat.ForceAdaptiveThinking {
+			t.Fatalf("offline compat = %+v", compat)
+		}
+		if _, err := refresh(h.provider, storedEntry(t, stale), true, false); err != nil {
+			t.Fatal(err)
+		}
+		if entry, _ := h.policies.entry("litellm", "claude-fable-5-1"); entry.Version != types.DiscoveryVersion {
+			t.Fatalf("version after the online refresh = %d", entry.Version)
+		}
+		compat = modelByID(t, h.provider, "claude-fable-5-1").ProviderMeta.Compat
+		if compat == nil || compat.SupportsStrictTools != nil || compat.ForceAdaptiveThinking == nil {
+			t.Fatalf("online compat = %+v", compat)
+		}
+	})
+	t.Run("keeps a startup-discovered strict-tool grant over its v2 cache entry offline", func(t *testing.T) {
+		seed := messagesModel(t, "claude-sonnet-5", &ai.ModelCompat{SupportsStrictTools: yes()}, types.DiscoveryVersion)
+		stale := seed
+		stale.LiteLLMDiscoveryVersion = 2
+		policies := newPolicyStore("")
+		policies.replace("litellm", []types.DiscoveredModel{stale})
+		policies.replaceSeed("litellm", []types.DiscoveredModel{seed})
+		h := newHarness(t, func(o *providerOptions) { o.Policies, o.Models = policies, []types.DiscoveredModel{seed} })
+		if _, err := refresh(h.provider, storedEntry(t, stale), false, false); err != nil {
+			t.Fatal(err)
+		}
+		compat := modelByID(t, h.provider, "claude-sonnet-5").ProviderMeta.Compat
+		if compat == nil || compat.SupportsStrictTools == nil || !*compat.SupportsStrictTools || h.calls.Load() != 0 {
+			t.Fatalf("compat = %+v calls = %d", compat, h.calls.Load())
+		}
+	})
+	t.Run("replaces a v3 cache entry from before the GPT-5.5+ tool-reasoning policy with startup discovery", func(t *testing.T) {
+		seed := nativeModel(t, "gpt-6-sol")
+		seed.LiteLLMBackendFamily = types.FamilyOpenAI
+		seed.LiteLLMPolicy = &types.LiteLLMModelPolicy{DropToolReasoning: true}
+		stale := nativeModel(t, "gpt-6-sol")
+		stale.LiteLLMBackendFamily, stale.LiteLLMDiscoveryVersion = types.FamilyOpenAI, 3
+		policies := newPolicyStore("")
+		policies.replace("litellm", []types.DiscoveredModel{stale})
+		policies.replaceSeed("litellm", []types.DiscoveredModel{seed})
+		h := newHarness(t, func(o *providerOptions) { o.Policies, o.Models = policies, []types.DiscoveredModel{seed} })
+		if _, err := refresh(h.provider, storedEntry(t, stale), false, false); err != nil {
+			t.Fatal(err)
+		}
+		policy, _, _ := policies.policyFor("litellm", "gpt-6-sol")
+		if policy == nil || !policy.DropToolReasoning || policy.ExplicitToolReasoningOff {
+			t.Fatalf("policy = %+v, want the seed's", policy)
+		}
+	})
+	t.Run("restores the tool-reasoning drop for a v3 GPT-5.5+ Chat cache entry offline", func(t *testing.T) {
+		h := newHarness(t, nil)
+		stale := nativeModel(t, "gpt-6-sol")
+		stale.LiteLLMBackendFamily, stale.LiteLLMDiscoveryVersion = types.FamilyOpenAI, 3
+		h.policies.replace("litellm", []types.DiscoveredModel{stale})
+		if _, err := refresh(h.provider, storedEntry(t, stale), false, false); err != nil {
+			t.Fatal(err)
+		}
+		policy, _, _ := h.policies.policyFor("litellm", "gpt-6-sol")
+		if policy == nil || !policy.DropToolReasoning || !policy.ExplicitToolReasoningOff {
+			t.Fatalf("policy = %+v", policy)
+		}
+	})
+}
+
+func TestRefreshModelsReenrichesCachedCatalogAliases(t *testing.T) {
+	fallback := func(t *testing.T, id string) types.DiscoveredModel {
+		model := nativeModel(t, id)
+		model.Name, model.MaxTokens, model.Compat = id+" (no metadata)", 16_384, nil
+		return model
+	}
+	restore := func(t *testing.T, models ...types.DiscoveredModel) providerHarness {
+		h := newHarness(t, nil)
+		h.policies.replace("litellm", models)
+		if _, err := refresh(h.provider, storedEntry(t, anySlice(models)...), false, false); err != nil {
+			t.Fatal(err)
+		}
+		if h.calls.Load() != 0 {
+			t.Fatal("offline restore ran discovery")
+		}
+		return h
+	}
+	allNull := ai.ThinkingLevelMap{"off": nil, "minimal": nil, "low": nil, "medium": nil, "high": nil, "xhigh": nil, "max": nil}
+
+	t.Run("re-enriches stale cached catalog aliases offline without discovery", func(t *testing.T) {
+		h := restore(t, fallback(t, "opus-5"))
+		model := modelByID(t, h.provider, "opus-5")
+		compat := model.ProviderMeta.Compat
+		if model.DisplayName != "Claude Opus 5" || !model.ProviderMeta.Reasoning || model.ProviderMeta.API != ai.APIOpenAICompletions ||
+			model.ProviderMeta.BaseURL != testRoot+"/v1" || !reflect.DeepEqual(model.ThinkingLevelMap, allNull) ||
+			compat == nil || compat.CacheControlFormat != "anthropic" || compat.SupportsStore == nil || *compat.SupportsStore ||
+			compat.SupportsReasoningEffort == nil || *compat.SupportsReasoningEffort {
+			t.Fatalf("model = %+v compat = %+v", model, compat)
+		}
+	})
+	t.Run("updates a cached catalog model to the Responses transport offline", func(t *testing.T) {
+		h := restore(t, fallback(t, "openai/gpt-5.5"))
+		model := modelByID(t, h.provider, "openai/gpt-5.5")
+		if model.DisplayName != "GPT-5.5" || model.ProviderMeta.API != ai.APIOpenAIResponses || model.ProviderMeta.Compat != nil {
+			t.Fatalf("model = %+v", model)
+		}
+	})
+	t.Run("does not re-enrich partially enriched cached aliases offline", func(t *testing.T) {
+		base := fallback(t, "opus-5")
+		variants := map[string]func(*types.DiscoveredModel){
+			"reasoning":     func(m *types.DiscoveredModel) { m.Reasoning = true },
+			"image input":   func(m *types.DiscoveredModel) { m.Input = []string{"text", "image"} },
+			"cost":          func(m *types.DiscoveredModel) { m.Cost.Input = 1 },
+			"context":       func(m *types.DiscoveredModel) { m.ContextWindow = 128_001 },
+			"output tokens": func(m *types.DiscoveredModel) { m.MaxTokens = 16_385 },
+		}
+		for name, mutate := range variants {
+			t.Run(name, func(t *testing.T) {
+				cached := base
+				mutate(&cached)
+				h := restore(t, cached)
+				model := modelByID(t, h.provider, "opus-5")
+				if model.DisplayName != "opus-5 (no metadata)" {
+					t.Fatalf("name = %q was re-enriched", model.DisplayName)
+				}
+				if name == "reasoning" && !reflect.DeepEqual(model.ThinkingLevelMap, allNull) {
+					t.Fatalf("levels = %v", model.ThinkingLevelMap)
+				}
+			})
+		}
+	})
+	t.Run("keeps unknown stale cached models unchanged offline", func(t *testing.T) {
+		cached := fallback(t, "unknown-model")
+		h := restore(t, cached)
+		model := modelByID(t, h.provider, "unknown-model")
+		if model.DisplayName != "unknown-model (no metadata)" || model.ProviderMeta.API != ai.APIOpenAICompletions || model.ProviderMeta.Reasoning {
+			t.Fatalf("model = %+v", model)
+		}
+	})
+}
+
+func anySlice(models []types.DiscoveredModel) []any {
+	out := make([]any, len(models))
+	for i, model := range models {
+		out[i] = model
+	}
+	return out
+}
+
+func TestDiscoveryCacheVersionTransition(t *testing.T) {
+	legacyModel := func(t *testing.T) types.DiscoveredModel {
+		model := nativeModel(t, "legacy")
+		model.Reasoning, model.ThinkingLevelMap, model.LiteLLMDiscoveryVersion = true, ai.ThinkingLevelMap{"low": nil}, 0
+		return model
+	}
+	moonshotCompat := &ai.ModelCompat{SupportsStore: new(false), SupportsDeveloperRole: new(false),
+		SupportsReasoningEffort: new(false), SupportsStrictMode: new(false), MaxTokensField: "max_tokens"}
+	restorableV2 := func(t *testing.T) types.DiscoveredModel {
+		model := nativeModel(t, "moonshot/kimi-k2.6")
+		model.Compat, model.LiteLLMDiscoveryVersion = moonshotCompat, 2
+		return model
+	}
+	wantMoonshotPolicy := func(t *testing.T, h providerHarness) {
+		t.Helper()
+		policy, _, _ := h.policies.policyFor("litellm", "moonshot/kimi-k2.6")
+		if policy == nil || policy.NormalizeStrictToolMessages || !policy.NormalizeThinkTags || policy.SuppressReasoningVisibility {
+			t.Fatalf("policy = %+v", policy)
+		}
+	}
+
+	t.Run("refreshes and replaces a legacy store when the network phase runs", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		h := newHarness(t, nil)
+		legacy := legacyModel(t)
+		if _, err := refresh(h.provider, storedEntry(t, legacy), false, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := refresh(h.provider, storedEntry(t, legacy), true, false); err != nil {
+			t.Fatal(err)
+		}
+		if ids := modelIDs(t, h.provider); !equalStrings(ids, []string{"fresh"}) || h.calls.Load() != 1 || len(*diagnostics) != 0 {
+			t.Fatalf("ids=%v calls=%d diagnostics=%v", ids, h.calls.Load(), *diagnostics)
+		}
+	})
+	t.Run("restores response policy without rewriting legacy reasoning levels offline", func(t *testing.T) {
+		h := newHarness(t, nil)
+		legacy := legacyModel(t)
+		legacy.ID, legacy.Compat = "moonshot/kimi-k2.6", moonshotCompat
+		if _, err := refresh(h.provider, storedEntry(t, legacy), false, false); err != nil {
+			t.Fatal(err)
+		}
+		model := modelByID(t, h.provider, "moonshot/kimi-k2.6")
+		if _, ok := model.ThinkingLevelMap["low"]; !ok || len(model.ThinkingLevelMap) != 1 || h.calls.Load() != 0 {
+			t.Fatalf("levels = %v calls = %d", model.ThinkingLevelMap, h.calls.Load())
+		}
+		wantMoonshotPolicy(t, h)
+	})
+	t.Run("handles mixed stores per entry without warning during offline restore", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		h := newHarness(t, nil)
+		v2 := restorableV2(t)
+		h.policies.replace("litellm", []types.DiscoveredModel{v2})
+		if _, err := refresh(h.provider, storedEntry(t, legacyModel(t), v2), false, false); err != nil {
+			t.Fatal(err)
+		}
+		legacy := modelByID(t, h.provider, "legacy")
+		if !legacy.ProviderMeta.Reasoning || len(legacy.ThinkingLevelMap) != 1 || h.calls.Load() != 0 || len(*diagnostics) != 0 {
+			t.Fatalf("legacy = %+v calls=%d diagnostics=%v", legacy, h.calls.Load(), *diagnostics)
+		}
+		wantMoonshotPolicy(t, h)
+	})
+	t.Run("warns once when repeated refresh attempts leave a mixed legacy store in place", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		h := newHarness(t, func(o *providerOptions) {
+			o.Discover = func(context.Context, ai.Credential) (*discoveredCatalog, error) {
+				return nil, errors.New("refresh failed")
+			}
+		})
+		v2 := restorableV2(t)
+		h.policies.replace("litellm", []types.DiscoveredModel{v2})
+		stored := storedEntry(t, legacyModel(t), v2)
+		refresh(h.provider, stored, false, false)
+		for range 2 {
+			if _, err := refresh(h.provider, stored, true, false); err == nil || err.Error() != "refresh failed" {
+				t.Fatalf("err = %v", err)
+			}
+			refresh(h.provider, stored, false, false)
+		}
+		if ids := modelIDs(t, h.provider); !equalStrings(ids, []string{"legacy", "moonshot/kimi-k2.6"}) {
+			t.Fatalf("ids = %v", ids)
+		}
+		if len(*diagnostics) != 1 || !strings.Contains((*diagnostics)[0], "required network refresh failed") {
+			t.Fatalf("diagnostics = %v", *diagnostics)
+		}
+	})
+}
+
+func TestReducedDiscoveryMetadataSurvivesTheProviderCache(t *testing.T) {
+	const chat = `"mode":"chat"`
+	cases := []struct{ name, rows, want string }{
+		{"matching backend", `{"model_name":"openai/gpt-5.5","model_info":{"id":"only",` + chat + `},"litellm_params":{"model":"openai/gpt-5.5"}}`, "openai/gpt-5.5"},
+		{"conflicting backend", `{"model_name":"openai/gpt-5.5","model_info":{"id":"only",` + chat + `},"litellm_params":{"model":"openai/gpt-5.5-internal-preview"}}`, "openai/gpt-5.5 (incomplete metadata)"},
+		{"unknown backend", `{"model_name":"openai/gpt-5.5","model_info":{"id":"only",` + chat + `},"litellm_params":{"model":"internal/mystery"}}`, "openai/gpt-5.5 (incomplete metadata)"},
+		{"mixed deployments", `{"model_name":"openai/gpt-5.5","model_info":{"id":"a",` + chat + `}},` +
+			`{"model_name":"openai/gpt-5.5","model_info":{"id":"b",` + chat + `},"litellm_params":{"model":"internal/mystery"}}`, "openai/gpt-5.5 (incomplete metadata)"},
+		{"differing duplicate ids", `{"model_name":"openai/gpt-5.5","model_info":{"id":"same",` + chat + `}},` +
+			`{"model_name":"openai/gpt-5.5","model_info":{"id":"same",` + chat + `,"max_input_tokens":64000}}`, "openai/gpt-5.5 (incomplete metadata)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/model/info" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"data":[` + tc.rows + `]}`))
+			}))
+			defer server.Close()
+			disabled := false
+			result, err := discover.DiscoverModels(context.Background(), server.URL, "sk-test", discover.Options{
+				DiscoveryOptions: types.DiscoveryOptions{ModelsDev: &disabled, AllowInsecureHTTP: true}, Silent: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			online, err := toNativeModels("litellm", testRoot+"/v1", result.Models, false)
+			if err != nil || len(online) != 1 || online[0].Name != tc.want {
+				t.Fatalf("online = %+v err = %v", online, err)
+			}
+			want, err := toAIModels("litellm", online)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, nil)
+			h.policies.replace("litellm", online)
+			if _, err := refresh(h.provider, storedEntry(t, online[0]), false, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := modelByID(t, h.provider, online[0].ID); !reflect.DeepEqual(got, want[0].(*ai.Model)) {
+				t.Fatalf("offline restore changed the model:\n got %+v\nwant %+v", got, want[0])
+			}
+		})
+	}
+}
+
+func TestStreamGuardOrdering(t *testing.T) {
+	oversized := withFamily(nativeModel(t, "stale"), types.FamilyOpenAI)
+	for _, method := range []string{"stream", "streamSimple"} {
+		t.Run(method+" blocks stale hosts before tool-cap validation and protocol dispatch", func(t *testing.T) {
+			h := newHarness(t, func(o *providerOptions) {
+				o.ResolveCredentialRoot = func(*ai.Credential, string, string) (string, error) { return "https://other.example", nil }
+			})
+			h.policies.replace("litellm", []types.DiscoveredModel{oversized})
+			fn := h.provider.Stream
+			if method == "streamSimple" {
+				fn = h.provider.StreamSimple
+			}
+			_, err := fn(context.Background(), firstModel(t, "litellm", oversized), chatContext(129), ai.StreamOptions{})
+			if err == nil || !strings.Contains(err.Error(), "stale LiteLLM model root") || strings.Contains(err.Error(), "tool cap") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+	t.Run("blocks placeholder cached hosts on non-default ports before protocol dispatch", func(t *testing.T) {
+		for _, host := range []string{"https://litellm.example.com:8443/v1", "https://LiteLLM.Example.com:8443/v1"} {
+			h := newHarness(t, nil)
+			model := firstModel(t, "litellm", nativeModel(t, "placeholder"))
+			model.ProviderMeta.BaseURL = host
+			_, err := h.provider.Stream(context.Background(), model, chatContext(0), ai.StreamOptions{})
+			if err == nil || !strings.Contains(err.Error(), "placeholder LiteLLM model host") || !strings.Contains(err.Error(), "network refresh") {
+				t.Fatalf("%s: err = %v", host, err)
+			}
+		}
+	})
+	t.Run("blocks a mixed-case placeholder credential root", func(t *testing.T) {
+		h := newHarness(t, func(o *providerOptions) {
+			o.ResolveCredentialRoot = func(*ai.Credential, string, string) (string, error) { return "https://LiteLLM.Example.com", nil }
+		})
+		_, err := h.provider.Stream(context.Background(), firstModel(t, "litellm", nativeModel(t, "m")), chatContext(0), ai.StreamOptions{})
+		if err == nil || !strings.Contains(err.Error(), "placeholder LiteLLM model host") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestStreamAPIRouting(t *testing.T) {
+	for api, wantPath := range map[ai.API]string{
+		ai.APIAnthropicMessages: "/v1/messages",
+		ai.APIOpenAICompletions: "/v1/chat/completions",
+		ai.APIOpenAIResponses:   "/v1/responses",
+	} {
+		t.Run(string(api), func(t *testing.T) {
+			paths := make(chan string, 4)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths <- r.URL.Path
+				http.Error(w, `{"error":{"message":"stop"}}`, http.StatusBadRequest)
+			}))
+			defer server.Close()
+			h := newHarness(t, func(o *providerOptions) {
+				o.AllowInsecureHTTP = true
+				o.ResolveCredentialRoot = func(*ai.Credential, string, string) (string, error) { return server.URL, nil }
+			})
+			model := discoveredModel("routed")
+			model.API = api
+			if api == ai.APIAnthropicMessages {
+				model.Compat = &ai.ModelCompat{}
+			}
+			native, err := toNativeModels("litellm", server.URL, []types.DiscoveredModel{model}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := h.provider.Stream(context.Background(), firstModel(t, "litellm", native[0]), chatContext(0), ai.StreamOptions{APIKey: "k"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			stream.ResultContext(ctx)
+			select {
+			case path := <-paths:
+				if path != wantPath {
+					t.Fatalf("path = %q, want %q", path, wantPath)
+				}
+			default:
+				t.Fatal("the request never reached the proxy")
+			}
+			if api == ai.APIAnthropicMessages && native[0].BaseURL != server.URL {
+				t.Fatalf("Messages baseUrl = %q, want the root", native[0].BaseURL)
+			}
+		})
+	}
 }

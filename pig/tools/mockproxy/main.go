@@ -253,24 +253,39 @@ func makeHandleResponses(checkKey string) http.HandlerFunc {
 			w.Header().Set("x-mock-tool-count", fmt.Sprintf("%d", len(tools)))
 		}
 
-		lastMsg := getLastUserMessage(req["messages"])
+		// The Responses API carries the conversation in "input"; accept "messages" too for lenient clients.
+		input := req["input"]
+		if input == nil {
+			input = req["messages"]
+		}
+		lastMsg := getLastUserMessage(input)
 		replyText := "mock reply to: " + lastMsg
+		third := len(replyText) / 3
+		deltas := []string{replyText[:third], replyText[third : 2*third], replyText[2*third:]}
+		quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
 
+		// Real Responses API stream shape: top-level item/delta fields, not nested under "response".
+		item := fmt.Sprintf(`{"id":"msg_test","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}`, quote(replyText))
 		events := []string{
-			`{"type":"response.created","response":{"id":"resp_test","object":"realtime.response","status":"in_progress","status_details":null,"created_at":1234567890,"output":[]},"event_id":"event_1"}`,
-			`{"type":"response.output_item.added","response":{"output":[{"type":"message","id":"msg_test"}]},"event_id":"event_2"}`,
-			`{"type":"response.content_part.added","response":{"output":[{"id":"msg_test","content":[{"type":"text","text":""}]}]},"event_id":"event_3"}`,
-			fmt.Sprintf(`{"type":"response.output_text.delta","response":{"output":[{"id":"msg_test","content":[{"text":"%s"}]}]},"event_id":"event_4"}`, replyText[:len(replyText)/3]),
-			fmt.Sprintf(`{"type":"response.output_text.delta","response":{"output":[{"id":"msg_test","content":[{"text":"%s"}]}]},"event_id":"event_5"}`, replyText[len(replyText)/3:2*len(replyText)/3]),
-			fmt.Sprintf(`{"type":"response.output_text.delta","response":{"output":[{"id":"msg_test","content":[{"text":"%s"}]}]},"event_id":"event_6"}`, replyText[2*len(replyText)/3:]),
-			`{"type":"response.output_text.done","response":{},"event_id":"event_7"}`,
-			`{"type":"response.content_part.done","response":{},"event_id":"event_8"}`,
-			`{"type":"response.output_item.done","response":{},"event_id":"event_9"}`,
-			`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":20}},"event_id":"event_10"}`,
+			`{"type":"response.created","sequence_number":0,"response":{"id":"resp_test","object":"response","created_at":1234567890,"status":"in_progress","model":"mock-responses","output":[]}}`,
+			`{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_test","object":"response","status":"in_progress","output":[]}}`,
+			`{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_test","type":"message","status":"in_progress","role":"assistant","content":[]}}`,
+			`{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_test","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`,
+			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[0])),
+			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[1])),
+			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":6,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[2])),
+			fmt.Sprintf(`{"type":"response.output_text.done","sequence_number":7,"item_id":"msg_test","output_index":0,"content_index":0,"text":%s}`, quote(replyText)),
+			fmt.Sprintf(`{"type":"response.content_part.done","sequence_number":8,"item_id":"msg_test","output_index":0,"content_index":0,"part":{"type":"output_text","text":%s,"annotations":[]}}`, quote(replyText)),
+			fmt.Sprintf(`{"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":%s}`, item),
+			fmt.Sprintf(`{"type":"response.completed","sequence_number":10,"response":{"id":"resp_test","object":"response","created_at":1234567890,"status":"completed","model":"mock-responses","output":[%s],"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":30}}}`, item),
 		}
 
 		for _, event := range events {
-			fmt.Fprintf(w, "data: %s\n\n", event)
+			var typed struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal([]byte(event), &typed)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
 		}
 	}
 }

@@ -21,7 +21,7 @@ const defaultLiteLLMBaseURL = "https://litellm.example.com"
 // isPlaceholderHost reports whether hostname is the placeholder host (a trailing dot is ignored).
 func isPlaceholderHost(hostname string) bool {
 	placeholder, _ := url.Parse(defaultLiteLLMBaseURL)
-	return strings.TrimSuffix(hostname, ".") == strings.TrimSuffix(placeholder.Hostname(), ".")
+	return strings.TrimSuffix(strings.ToLower(hostname), ".") == strings.TrimSuffix(strings.ToLower(placeholder.Hostname()), ".")
 }
 
 // loginHooks plugs the interactive flows into createProviderAuth. A nil flow means that auth method is not

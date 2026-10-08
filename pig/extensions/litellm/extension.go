@@ -165,6 +165,12 @@ func (s *extensionState) runtimeAuth(ctx sdk.Context, definition providerDefinit
 	if err != nil || resolved == nil {
 		return nil, err
 	}
+	return runtimeAuthFrom(definition, resolved)
+}
+
+// runtimeAuthFrom reads the host's getProviderAuth answer, falling back to the provider's registered
+// base URL and headers.
+func runtimeAuthFrom(definition providerDefinition, resolved map[string]any) (*types.LiteLLMRuntimeAuth, error) {
 	auth, _ := resolved["auth"].(map[string]any)
 	env, _ := resolved["env"].(map[string]any)
 	apiKey, _ := auth["apiKey"].(string)
@@ -174,7 +180,10 @@ func (s *extensionState) runtimeAuth(ctx sdk.Context, definition providerDefinit
 		envURL, _ := env[envBaseURL].(string)
 		baseURL = cleanConfig(envURL)
 	}
-	if baseURL == "" || apiKey == "" {
+	if baseURL == "" {
+		baseURL = requestBaseURL(definition) // the provider's registered baseUrl
+	}
+	if apiKey == "" {
 		return nil, nil
 	}
 	normalized, err := protocols.NormalizeBaseURL(baseURL, definition.AllowInsecureHTTP)
@@ -186,14 +195,17 @@ func (s *extensionState) runtimeAuth(ctx sdk.Context, definition providerDefinit
 		return nil, err
 	}
 	var headers map[string]string
-	rawHeaders, _ := auth["headers"].(map[string]any)
-	for name, value := range rawHeaders {
-		if text, ok := value.(string); ok {
-			if headers == nil {
-				headers = map[string]string{}
+	if rawHeaders, present := auth["headers"].(map[string]any); present {
+		for name, value := range rawHeaders {
+			if text, ok := value.(string); ok {
+				if headers == nil {
+					headers = map[string]string{}
+				}
+				headers[name] = text
 			}
-			headers[name] = text
 		}
+	} else if registered := resolveHeaders(definition); len(registered) > 0 {
+		headers = registered
 	}
 	return &types.LiteLLMRuntimeAuth{BaseURL: root, APIKey: apiKey, Headers: headers, AllowInsecureHTTP: definition.AllowInsecureHTTP}, nil
 }
@@ -287,7 +299,7 @@ func (s *extensionState) seedModels(definition providerDefinition) []types.Disco
 	if err != nil {
 		return skip(err.Error())
 	}
-	if err := s.policies.replace(definition.Name, models); err != nil {
+	if err := s.policies.replaceSeed(definition.Name, models); err != nil {
 		reportDiagnostic(fmt.Sprintf("LiteLLM (%s): could not save model policies: %s", definition.Name, err))
 	}
 	return models
@@ -432,7 +444,7 @@ func (s *extensionState) notifyMcp(message, level string) {
 	}
 }
 
-func stderrIsTerminal() bool {
+var stderrIsTerminal = func() bool {
 	info, err := os.Stderr.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
@@ -654,5 +666,7 @@ func Extension() *sdk.Extension {
 	setupFallbackWarning(e, state)
 	setupCostTracking(e, state) // before any budget handler: its after_provider_response handler must run first
 	setupRequestPolicy(e, state)
+	setupSkills(e, state) // its before_agent_start handler runs before the MCP sync, as in the TypeScript
+	setupMCP(e, state)
 	return e
 }

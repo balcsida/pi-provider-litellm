@@ -265,6 +265,8 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 			}
 			return available
 		},
+		// Both entries map to ai.StreamSimple, as PiG's builtin providers do (ai/builtin_providers.go:85);
+		// the guard below wraps each.
 		API: &ai.ProviderStreams{Stream: ai.StreamSimple, StreamSimple: ai.StreamSimple},
 	})
 
@@ -303,17 +305,21 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 				}
 				var model types.DiscoveredModel
 				if err := json.Unmarshal(raw, &model); err != nil {
-					return fmt.Errorf("decode stored model: %w", err)
+					// One undecodable record must not abort the offline restore of the others.
+					legacyCount++
+					reportUnavailable("skipping an undecodable stored model: " + err.Error())
+					continue
 				}
-				entry, known := policies.entry(options.ID, model.ID)
-				if !known || entry.Version != types.DiscoveryVersion {
+				entry, hasEntry := policies.entry(options.ID, model.ID)
+				version, known := policies.storedVersion(options.ID, model.ID)
+				if !known || version != types.DiscoveryVersion {
 					// PiG applies stored models over the seed, so a stale entry would otherwise mask what
 					// startup discovery just proved for the same route.
 					if fresh, ok := seeded[seedKey(model.ID, model.BaseURL)]; ok {
 						model = fresh
 					} else {
 						legacyCount++
-						if known {
+						if hasEntry {
 							model = entry.apply(model)
 						}
 						model = discover.RestoreCachedModelPolicy(model)

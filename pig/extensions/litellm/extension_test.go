@@ -4,6 +4,7 @@ package litellm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -330,6 +331,152 @@ func TestHelpers(t *testing.T) {
 		t.Setenv(envOffline, "1")
 		if got := discoveryDisabledReason(); got != "LITELLM_OFFLINE=1" {
 			t.Fatal(got)
+		}
+	})
+}
+
+func TestRuntimeAuthFrom(t *testing.T) {
+	definition := providerDefinition{Name: "litellm", BaseURL: "https://registered.example", Headers: map[string]any{"X-Team": "t"}}
+	hermeticAgentDir(t)
+	t.Run("uses the host's auth baseUrl and headers", func(t *testing.T) {
+		auth, err := runtimeAuthFrom(definition, map[string]any{"auth": map[string]any{
+			"apiKey": "k", "baseUrl": "https://host.example/v1", "headers": map[string]any{"X-Host": "h", "skip": 3.0},
+		}})
+		if err != nil || auth == nil || auth.BaseURL != "https://host.example" || auth.APIKey != "k" || len(auth.Headers) != 1 || auth.Headers["X-Host"] != "h" {
+			t.Fatalf("auth = %+v err = %v", auth, err)
+		}
+	})
+	t.Run("falls back to the env base URL", func(t *testing.T) {
+		auth, err := runtimeAuthFrom(definition, map[string]any{"auth": map[string]any{"apiKey": "k"}, "env": map[string]any{envBaseURL: "https://env.example"}})
+		if err != nil || auth == nil || auth.BaseURL != "https://env.example" {
+			t.Fatalf("auth = %+v err = %v", auth, err)
+		}
+	})
+	t.Run("falls back to the provider's registered baseUrl and headers", func(t *testing.T) {
+		auth, err := runtimeAuthFrom(definition, map[string]any{"auth": map[string]any{"apiKey": "k"}})
+		if err != nil || auth == nil || auth.BaseURL != "https://registered.example" || auth.Headers["X-Team"] != "t" {
+			t.Fatalf("auth = %+v err = %v", auth, err)
+		}
+	})
+	t.Run("has no auth without a key and rejects a placeholder root", func(t *testing.T) {
+		if auth, err := runtimeAuthFrom(definition, map[string]any{"auth": map[string]any{}}); auth != nil || err != nil {
+			t.Fatalf("auth = %+v err = %v", auth, err)
+		}
+		bare := providerDefinition{Name: "litellm"}
+		if _, err := runtimeAuthFrom(bare, map[string]any{"auth": map[string]any{"apiKey": "k"}}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestResolveRootPrecedence(t *testing.T) {
+	hermeticAgentDir(t)
+	state, definition := startup(t)
+	definition.UseDefaultEnv = true
+	t.Setenv(envBaseURL, "https://env.example")
+	oauthCredential := &ai.Credential{Type: ai.CredentialOAuth, Access: "tok", Extra: map[string]json.RawMessage{"baseUrl": json.RawMessage(`"https://sso.example"`)}}
+
+	t.Run("a credential decides, ahead of a request root", func(t *testing.T) {
+		if root, err := state.resolveRoot(definition, oauthCredential, "https://request.example", ""); err != nil || root != "https://sso.example" {
+			t.Fatalf("root = %q err = %v", root, err)
+		}
+	})
+	t.Run("an explicit request root outranks the remembered OAuth root and the environment", func(t *testing.T) {
+		state.oauthRoots[definition.Name] = oauthRuntimeRoot{apiKey: "tok", root: "https://remembered.example"}
+		if root, err := state.resolveRoot(definition, nil, "https://request.example/", "tok"); err != nil || root != "https://request.example" {
+			t.Fatalf("root = %q err = %v", root, err)
+		}
+	})
+	t.Run("the remembered OAuth root needs the same API key", func(t *testing.T) {
+		if root, _ := state.resolveRoot(definition, nil, "", "tok"); root != "https://remembered.example" {
+			t.Fatalf("root = %q", root)
+		}
+		if root, _ := state.resolveRoot(definition, nil, "", "other"); root != "https://env.example" {
+			t.Fatalf("a different key must not reuse the remembered root, got %q", root)
+		}
+	})
+	t.Run("falls back to configuration", func(t *testing.T) {
+		delete(state.oauthRoots, definition.Name)
+		if root, _ := state.resolveRoot(definition, nil, "", ""); root != "https://env.example" {
+			t.Fatalf("root = %q", root)
+		}
+	})
+}
+
+func TestOAuthToAuthPinsTheCredentialRoot(t *testing.T) {
+	hermeticAgentDir(t)
+	previous := defaultLoginFlows
+	defaultLoginFlows = loginHooks{
+		LoginOAuth: func(context.Context, ai.AuthInteraction, providerDefinition) (ai.Credential, error) {
+			return ai.Credential{}, nil
+		},
+		Refresh: func(_ context.Context, credential ai.Credential, _ providerDefinition) (ai.Credential, error) {
+			return credential, nil
+		},
+	}
+	t.Cleanup(func() { defaultLoginFlows = previous })
+	state, definition := startup(t)
+	definition.EnableOAuth = true
+	provider, err := state.newProvider(definition, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.Auth.OAuth == nil {
+		t.Fatal("OAuth is not offered")
+	}
+	credential := ai.Credential{Type: ai.CredentialOAuth, Access: "tok", Extra: map[string]json.RawMessage{"baseUrl": json.RawMessage(`"https://sso.example/"`)}}
+	resolved, err := provider.Auth.OAuth.ToAuth(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.APIKey != "tok" || resolved.BaseURL != "https://sso.example" {
+		t.Fatalf("resolved = %+v, the request host must be pinned to the credential root", resolved)
+	}
+	if got := state.oauthRoots[definition.Name]; got.apiKey != "tok" || got.root != "https://sso.example" {
+		t.Fatalf("remembered = %+v", got)
+	}
+	for name, bad := range map[string]ai.Credential{
+		"no token":    {Type: ai.CredentialOAuth},
+		"no root":     {Type: ai.CredentialOAuth, Access: "tok"},
+		"placeholder": {Type: ai.CredentialOAuth, Access: "tok", Extra: map[string]json.RawMessage{"baseUrl": json.RawMessage(`"https://LiteLLM.Example.com"`)}},
+	} {
+		if _, err := provider.Auth.OAuth.ToAuth(bad); err == nil {
+			t.Errorf("%s: ToAuth accepted the credential", name)
+		}
+	}
+}
+
+func TestNotifyMcp(t *testing.T) {
+	state, _ := startup(t)
+	t.Run("reports on the diagnostic stream when there is no terminal", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		previous := stderrIsTerminal
+		stderrIsTerminal = func() bool { return false }
+		t.Cleanup(func() { stderrIsTerminal = previous })
+		state.notifyMcp("hello \n", "info")
+		if len(*diagnostics) != 1 || (*diagnostics)[0] != "hello" || len(state.pendingMessages) != 0 {
+			t.Fatalf("diagnostics = %q pending = %v", *diagnostics, state.pendingMessages)
+		}
+	})
+	t.Run("buffers while the terminal is starting", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		previous := stderrIsTerminal
+		stderrIsTerminal = func() bool { return true }
+		t.Cleanup(func() { stderrIsTerminal = previous })
+		state.notifyMcp("early", "warning")
+		if len(*diagnostics) != 0 || len(state.pendingMessages) != 1 || state.pendingMessages[0] != (pendingMessage{"early", "warning"}) {
+			t.Fatalf("diagnostics = %q pending = %v", *diagnostics, state.pendingMessages)
+		}
+	})
+	t.Run("stops buffering once the session has started", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		previous := stderrIsTerminal
+		stderrIsTerminal = func() bool { return true }
+		t.Cleanup(func() { stderrIsTerminal = previous })
+		state.sessionStarted = true
+		state.notifyMcp("late", "info")
+		if len(*diagnostics) != 1 || (*diagnostics)[0] != "late" {
+			t.Fatalf("diagnostics = %q", *diagnostics)
 		}
 	})
 }

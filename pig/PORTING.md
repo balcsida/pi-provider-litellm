@@ -95,4 +95,15 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
    pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"   # streams "mock reply to: ..."
    ```
 
-4. `pig piglet build` of a sample Piglet with `extensionRealization: fused` (phase 6).
+4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
+   PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
+
+## Known PiG 0.4.1 issues
+
+- `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
+- A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted
+  when no effort carrier is evidenced, for example a Claude route on Chat Completions without
+  `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:173` (`thinkingMaxLevelForEntry`) indexes
+  the last element of the empty list `ai.GetSupportedThinkingLevels` returns. Pi tolerates the same model. The fix
+  belongs in PiG (return `""` when the list is empty); the extension deliberately keeps the TypeScript semantics rather
+  than inventing a level.

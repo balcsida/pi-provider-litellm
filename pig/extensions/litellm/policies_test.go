@@ -3,8 +3,10 @@ package litellm
 // Tests the policy sidecar (new in the PiG port; PiG's closed model struct drops these fields).
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
@@ -82,4 +84,48 @@ func TestPolicyStore(t *testing.T) {
 			t.Fatal("corrupt file produced an entry")
 		}
 	})
+}
+
+func TestPolicyStoreFlushSerialization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), policiesFilename)
+	store := newPolicyStore(path)
+	const providers = 24
+	var wg sync.WaitGroup
+	for i := range providers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := store.replaceSeed(fmt.Sprintf("p%d", i), []types.DiscoveredModel{discoveredModel("m")}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	reloaded := newPolicyStore(path)
+	for i := range providers {
+		if _, ok := reloaded.entry(fmt.Sprintf("p%d", i), "m"); !ok {
+			t.Fatalf("provider p%d is missing from the persisted snapshot: an older snapshot was written last", i)
+		}
+	}
+}
+
+func TestPolicyStoreStoredVersion(t *testing.T) {
+	store := newPolicyStore("")
+	stale := discoveredModel("m")
+	stale.LiteLLMDiscoveryVersion = 2
+	store.replace("litellm", []types.DiscoveredModel{stale})
+	if v, known := store.storedVersion("litellm", "m"); v != 2 || !known {
+		t.Fatalf("unseeded = %d %v", v, known)
+	}
+	store.replaceSeed("litellm", []types.DiscoveredModel{discoveredModel("m"), discoveredModel("new")})
+	if v, known := store.storedVersion("litellm", "m"); v != 2 || !known {
+		t.Fatalf("seeded keeps the pre-seed version, got %d %v", v, known)
+	}
+	if _, known := store.storedVersion("litellm", "new"); known {
+		t.Fatal("a route first seen by the seed was unknown before it")
+	}
+	store.replace("litellm", []types.DiscoveredModel{discoveredModel("m")})
+	if v, _ := store.storedVersion("litellm", "m"); v != types.DiscoveryVersion {
+		t.Fatalf("a network refresh must end the seed baseline, got %d", v)
+	}
 }

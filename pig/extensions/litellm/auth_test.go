@@ -478,3 +478,14 @@ func TestCredentialInfoFromAI(t *testing.T) {
 		t.Fatal("nil credential")
 	}
 }
+
+func TestPlaceholderHostIsCaseInsensitive(t *testing.T) {
+	for _, host := range []string{"LiteLLM.Example.com", "LITELLM.EXAMPLE.COM.", "litellm.example.com"} {
+		if !isPlaceholderHost(host) {
+			t.Errorf("isPlaceholderHost(%q) = false", host)
+		}
+	}
+	if _, err := requireCredentialRoot("https://LiteLLM.Example.com", "litellm"); err == nil || !strings.Contains(err.Error(), "placeholder LiteLLM base URL") {
+		t.Errorf("mixed-case placeholder root error = %v", err)
+	}
+}
