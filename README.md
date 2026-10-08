@@ -293,6 +293,8 @@ The registration does not copy the provider's API key or token. It uses Pi's `au
 
 The extension registers at startup and checks again before each agent turn. `/login litellm` disconnects the server as soon as it starts, before the new credential is stored, and the next turn connects again with the new credential and proxy root; a logout that leaves no root removes the server. `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, and `PI_OFFLINE` register nothing. A server with the same name in your own `mcp.json` takes precedence over the extension's.
 
+Before registering, the extension sends the proxy one MCP `initialize` with the credential and headers Pi will send, and ends the session it opened. LiteLLM 1.102.0 and later refuse it with 403 when no MCP servers are granted to the key, its team, or its organization, or none of them is allowed from your IP address. The extension then registers the server disabled: Pi does not connect to it, warn about it at startup, or turn on `codemode` for it, and `/mcp` lists it as disabled. Once servers are granted, enable it in `/mcp` for the session, or restart Pi, which checks again, as does a login. A credential that only a key helper or Google ADC supplies is not checked, and its server is registered enabled.
+
 Pi reads the provider's credential when it sends each request, not when the server was registered. If another Pi process stores a login for a different proxy, this session's open connection can send that credential to the previous proxy until the next turn moves the server.
 
 Earlier versions discovered tools through `/mcp-rest/tools/list` and registered them as `mcp_<server>_<tool>_<hash>`. Those names and the `<server>/<tool>` form of `toolExposure` keys no longer apply, and the `~/.pi/agent/litellm-mcp-pauses/` directory is no longer used.
@@ -432,7 +434,7 @@ The development probe runs against minimized snapshots with `npm run probe:proxy
 | Enterprise CLI SSO start/poll fails | Check the proxy logs and verify `/sso/cli/start` and `/sso/cli/poll/{login_id}` are reachable; only 404/405 falls back to legacy login |
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
-| MCP tools not showing | Run `/mcp` and check the provider's server: its state shows a connection or sign-in error. Verify the proxy serves `/mcp` and that the key has MCP access |
+| MCP tools not showing | Run `/mcp` and check the provider's server: its state shows a connection or sign-in error. `disabled` means the proxy refused the key at startup, usually because no MCP servers are granted to it, its team, or its organization; after a grant, enable it in `/mcp` or restart Pi. Verify the proxy serves `/mcp` and that the key has MCP access |
 | MCP tools listed but the model cannot call them | `codemode` and `deferred` tools are reached through Pi's `codemode` and `tool_search` tools. Check that neither is disabled; `--no-extensions` disables them and Pi's MCP client alike. Setting `litellm.mcp.exposure` to `direct` declares the tools on every request instead |
 | Skills not affecting prompts | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills |
 

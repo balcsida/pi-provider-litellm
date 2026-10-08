@@ -1930,7 +1930,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const mcpAttempts = new Map<string, { identity: string; registered: boolean }>();
   const mcpIdentitySalt = randomBytes(32);
 
-  function mcpServerConfig(definition: ProviderDefinition): McpServerConfig | undefined {
+  function mcpServerConfig(definition: ProviderDefinition): (McpServerConfig & { url: string }) | undefined {
     if (discoveryDisabledReason() || isHostOffline()) return undefined;
     let root: string;
     try {
@@ -1947,7 +1947,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       ...(headers ? { headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, piLiteral(v)])) } : {}),
       ...(mcpSettings?.exposure !== undefined ? { exposure: mcpSettings.exposure } : {}),
       ...(mcpSettings?.toolExposure !== undefined ? { toolExposure: mcpSettings.toolExposure } : {}),
-    } as McpServerConfig;
+    } as McpServerConfig & { url: string };
   }
 
   function dropMcpServer(definition: ProviderDefinition): void {
@@ -1956,7 +1956,55 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (attempt?.registered) pi.unregisterMcpServer(definition.name);
   }
 
-  function syncMcpServer(definition: ProviderDefinition): void {
+  // LiteLLM 1.102.0 and later answer `initialize` with 403 when the key has no MCP servers granted,
+  // and Pi warns at every start about a server that fails to connect. Asking first lets such a
+  // server be registered disabled: Pi neither connects to it nor warns, and /mcp still lists it, so
+  // the user can enable it once servers are granted.
+  async function mcpAccessRefused(definition: ProviderDefinition, url: string): Promise<boolean> {
+    try {
+      const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
+      // As in seeding, no key helper or ADC exchange runs here; a credential that needs one is not checked.
+      const auth = await authForCredential(definition, stored, false);
+      // The credential goes only to its own root.
+      if (`${auth.baseUrl}/mcp` !== url) return false;
+      // The credential and headers Pi's client sends, so the proxy answers as it will answer Pi.
+      const headers = { ...auth.headers, Authorization: `Bearer ${auth.apiKey}` };
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, accept: "application/json, text/event-stream", "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "pi", version: piCodingAgent.VERSION },
+          },
+        }),
+        redirect: "manual",
+        signal: AbortSignal.timeout(getSeedTimeoutMs()),
+      });
+      await response.body?.cancel().catch(() => undefined);
+      // Pi opens its own session; end the one this check opened.
+      const session = response.headers.get("mcp-session-id");
+      if (session) {
+        void fetch(url, {
+          method: "DELETE",
+          headers: { ...headers, "mcp-session-id": session },
+          redirect: "manual",
+          signal: AbortSignal.timeout(getSeedTimeoutMs()),
+        })
+          .then((closed) => closed.body?.cancel())
+          .catch(() => undefined);
+      }
+      return response.status === 403;
+    } catch {
+      return false;
+    }
+  }
+
+  async function syncMcpServer(definition: ProviderDefinition): Promise<void> {
     const config = mcpServerConfig(definition);
     const identity = config && createHmac("sha256", mcpIdentitySalt).update(JSON.stringify(config)).digest("hex");
     if (identity === mcpAttempts.get(definition.name)?.identity) return;
@@ -1964,12 +2012,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     // Pi refuses the new config.
     dropMcpServer(definition);
     if (!config || !identity) return;
+    // Claimed before the access check, so the next turn does not repeat it, and a login that starts
+    // meanwhile drops the claim before this registration can land.
+    const attempt = { identity, registered: false };
+    mcpAttempts.set(definition.name, attempt);
+    const refused = await mcpAccessRefused(definition, config.url);
+    if (mcpAttempts.get(definition.name) !== attempt) return;
     try {
-      pi.registerMcpServer(definition.name, config);
-      mcpAttempts.set(definition.name, { identity, registered: true });
+      pi.registerMcpServer(definition.name, refused ? { ...config, enabled: false } : config);
+      attempt.registered = true;
     } catch (error) {
-      // Remembered so the refusal is reported once rather than on every turn.
-      mcpAttempts.set(definition.name, { identity, registered: false });
+      // The claim stays, so the refusal is reported once rather than on every turn.
       notifyMcp(
         `LiteLLM MCP (${JSON.stringify(definition.name)}): ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -2100,7 +2153,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  const seeded = await Promise.all(definitions.map(seedModels));
+  // The MCP access check overlaps seeding rather than adding to startup. Servers registered while
+  // the extension loads connect when the session starts.
+  const [seeded] = await Promise.all([
+    Promise.all(definitions.map(seedModels)),
+    mcpEnabled ? Promise.all(definitions.map(syncMcpServer)) : undefined,
+  ]);
   // Pi runs a provider's network phase only once a credential resolves, so /litellm-refresh reads an
   // unchanged count as "no credentials" rather than as a successful refresh.
   const networkRefreshAttempts = new Map<string, number>();
@@ -2315,11 +2373,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   if (mcpEnabled) {
-    // Servers registered while the extension loads connect when the session starts. Each turn
-    // picks up a login that changed the proxy root, and a logout that removed it.
-    for (const definition of definitions) syncMcpServer(definition);
-    pi.on("before_agent_start", () => {
-      for (const definition of definitions) syncMcpServer(definition);
+    // Each turn picks up a login that changed the proxy root, and a logout that removed it.
+    pi.on("before_agent_start", async () => {
+      await Promise.all(definitions.map(syncMcpServer));
     });
   }
 

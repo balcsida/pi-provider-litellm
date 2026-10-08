@@ -17,12 +17,22 @@ afterEach(() => {
   vi.resetModules();
 });
 
-function mockProxy(): void {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+// Without `mcp`, the MCP access check fails, which registers the server enabled.
+function mockProxy(mcp?: (request: Request) => Response | Promise<Response>): void {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/model/info")) return Response.json({ data: [] });
+    if (mcp && url.endsWith("/mcp")) return mcp(new Request(url, init));
     throw new Error(`unexpected URL: ${url}`);
   });
+}
+
+// LiteLLM 1.102.0's answer to `initialize` for a key with no MCP servers granted.
+function noServersGranted(): Response {
+  return Response.json(
+    { detail: { error: "The key has no MCP servers granted, or none of its granted servers is loaded and allowed." } },
+    { status: 403 },
+  );
 }
 
 async function makeAgentDir(litellm: Record<string, unknown> = {}): Promise<string> {
@@ -269,5 +279,86 @@ describe("LiteLLM MCP server registration", () => {
     await startTurn(pi);
 
     expect(pi.mcpServers.has("litellm")).toBe(false);
+  });
+
+  it("registers the server disabled, without a notice, when the proxy refuses the key at initialize", async () => {
+    const checks: Request[] = [];
+    mockProxy((request) => {
+      checks.push(request);
+      return noServersGranted();
+    });
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const pi = await load(await makeAgentDir());
+    await startTurn(pi);
+    await startTurn(pi);
+
+    expect(pi.mcpServers.get("litellm")).toEqual({
+      url: "https://proxy.example.com/mcp",
+      auth: { provider: "litellm" },
+      enabled: false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("checks with the credential and headers Pi sends, and ends the session the check opened", async () => {
+    const requests: Request[] = [];
+    mockProxy((request) => {
+      requests.push(request);
+      if (request.method !== "POST") return new Response(null, { status: 200 });
+      return Response.json({ jsonrpc: "2.0", id: 1, result: {} }, { headers: { "mcp-session-id": "check-session" } });
+    });
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    process.env.LITELLM_HEADERS = JSON.stringify({ "x-mcp-client": "pi" });
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")).not.toHaveProperty("enabled");
+    const check = requests[0]!;
+    expect(check.method).toBe("POST");
+    expect(check.headers.get("authorization")).toBe("Bearer sk-default");
+    expect(check.headers.get("x-mcp-client")).toBe("pi");
+    expect(await check.json()).toMatchObject({ method: "initialize" });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    const close = requests[1]!;
+    expect(close.method).toBe("DELETE");
+    expect(close.headers.get("mcp-session-id")).toBe("check-session");
+    expect(close.headers.get("authorization")).toBe("Bearer sk-default");
+  });
+
+  it("drops a check that a login overtakes, and checks again on the next turn", async () => {
+    let answer: ((response: Response) => void) | undefined;
+    mockProxy(() => {
+      if (answer) return new Response(null, { status: 200 });
+      return new Promise((resolve) => {
+        answer = resolve;
+      });
+    });
+    const agentDir = await makeAgentDir();
+    const pi = await load(agentDir);
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({
+        litellm: { type: "api_key", key: "sk-old", env: { LITELLM_BASE_URL: "https://old.example.com" } },
+      }),
+      "utf8",
+    );
+    const turn = startTurn(pi);
+    await vi.waitFor(() => expect(answer).toBeDefined());
+
+    // The login may store a credential for another root, which Pi would send to this server.
+    void pi.providers[0]?.auth.apiKey?.login?.({
+      prompt: () => new Promise(() => {}),
+      notify: vi.fn(),
+      signal: new AbortController().signal,
+    } as unknown as AuthInteraction & { signal: AbortSignal });
+    answer?.(new Response(null, { status: 200 }));
+    await turn;
+    expect(pi.mcpServers.size).toBe(0);
+
+    await startTurn(pi);
+    expect(pi.mcpServers.get("litellm")).toEqual({ url: "https://old.example.com/mcp", auth: { provider: "litellm" } });
   });
 });
