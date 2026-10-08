@@ -71,6 +71,8 @@ type providerDefinition struct {
 	AllowInsecureHTTP  bool
 	// OIDC is the raw `oidc` setting, validated at login so a bad value never breaks startup.
 	OIDC any
+	// HasOIDC is set when the key is present, so a JSON null is rejected rather than read as absent.
+	HasOIDC bool
 }
 
 // litellmSettings is the global `litellm` settings block. Go maps lose key order, so the provider
@@ -632,6 +634,7 @@ func getProviderDefinitions(settings *litellmSettings) []providerDefinition {
 		}
 		if isDefault {
 			definition.OIDC = raw["oidc"]
+			_, definition.HasOIDC = raw["oidc"]
 		}
 		return definition
 	}

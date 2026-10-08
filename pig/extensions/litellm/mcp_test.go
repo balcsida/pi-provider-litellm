@@ -5,8 +5,10 @@ package litellm
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,19 +188,28 @@ func TestMcpReportsARefusedRegistrationOnceWithoutRetryingEveryTurn(t *testing.T
 }
 
 func TestMcpHoldsNoticesUntilTheSessionUICanShowThem(t *testing.T) {
-	_, state, m := mcpFixture(t, "")
+	hooks, state, host := wire(t, "")
 	defaultEnv(t, "https://proxy.example.com")
-	var messages []string
-	old := reportDiagnostic
-	reportDiagnostic = func(message string) { messages = append(messages, message) }
-	t.Cleanup(func() { reportDiagnostic = old })
-	// notifyMcp's buffering is covered with the session state; without a terminal a refusal goes straight to
-	// the diagnostic stream, once, and nothing is left pending.
-	f := newFakeRegistrar()
-	f.refuse = func(sdk.McpServerConfig) error { return errors.New("refused") }
-	m.syncAll(f)
-	if len(messages) != 1 || messages[0] != `LiteLLM MCP ("litellm"): refused` || len(state.pendingMessages) != 0 {
-		t.Fatalf("messages = %q, pending = %v", messages, state.pendingMessages)
+	diagnostics := collectDiagnostics(t)
+	previous := stderrIsTerminal
+	stderrIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stderrIsTerminal = previous })
+	host.refuse = func(sdk.McpServerConfig) error { return errors.New("refused") }
+	m, err := newMcpSync(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The terminal is starting: the refusal is held, not written over the TUI.
+	m.syncAll(host)
+	if len(*diagnostics) != 0 || len(host.notifications()) != 0 || len(state.pendingMessages) != 1 {
+		t.Fatalf("diagnostics %q, notices %v, pending %v", *diagnostics, host.notifications(), state.pendingMessages)
+	}
+	// session_start hands it to the session's UI, once.
+	hooks.only(t, sdk.EventSessionStart, 0, host, nil)
+	want := budgetNotice{`LiteLLM MCP ("litellm"): refused`, "warning"}
+	if got := host.notifications(); len(got) != 1 || got[0] != want || len(state.pendingMessages) != 0 || len(*diagnostics) != 0 {
+		t.Fatalf("notices %v, pending %v, diagnostics %q", got, state.pendingMessages, *diagnostics)
 	}
 }
 
@@ -260,5 +271,83 @@ func TestMcpWithdrawsThePreviousServerWhenTheHostRefusesItsReplacement(t *testin
 	}
 	if f.registers != 2 {
 		t.Fatalf("registers = %d, want 2", f.registers)
+	}
+}
+
+func TestMcpFirstSyncRunsWhenTheSessionStartsNotWhileTheExtensionLoads(t *testing.T) {
+	hooks, _, host := wire(t, "")
+	defaultEnv(t, "https://proxy.example.com")
+	// setupHooks registered through a registrar that has no RegisterMcpServer, so the factory cannot queue one;
+	// nothing reaches the host until an event delivers a context.
+	if host.registers != 0 {
+		t.Fatalf("registers while loading = %d", host.registers)
+	}
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	if host.registers != 1 || host.servers["litellm"].URL != "https://proxy.example.com/mcp" {
+		t.Fatalf("registers = %d, servers = %s", host.registers, mcpJSON(t, host.fakeRegistrar))
+	}
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	if host.registers != 1 {
+		t.Fatalf("the turn registered again: %d", host.registers)
+	}
+	t.Setenv(envBaseURL, "https://moved.example.com")
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	if host.registers != 2 || host.servers["litellm"].URL != "https://moved.example.com/mcp" {
+		t.Fatalf("registers = %d, servers = %s", host.registers, mcpJSON(t, host.fakeRegistrar))
+	}
+}
+
+func TestMcpReportsABogusExposureAndKeepsTheExtensionLoaded(t *testing.T) {
+	hooks, _, host := wire(t, `{"litellm":{"mcp":{"exposure":"bogus"}}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	diagnostics := collectDiagnostics(t)
+	// The host validates the config like PiG does and answers with an error instead of failing a load.
+	host.refuse = func(config sdk.McpServerConfig) error {
+		switch config.Exposure {
+		case "", sdk.McpExposureCodemode, sdk.McpExposureDeferred, sdk.McpExposureDirect, sdk.McpExposureHidden:
+			return nil
+		}
+		return fmt.Errorf("server \"litellm\": exposure must be one of codemode, deferred, direct, hidden")
+	}
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	want := budgetNotice{`LiteLLM MCP ("litellm"): server "litellm": exposure must be one of codemode, deferred, direct, hidden`, "warning"}
+	if got := host.notifications(); len(got) != 1 || got[0] != want {
+		t.Fatalf("notices = %v, want one %v", got, want)
+	}
+	if host.registers != 1 || len(host.servers) != 0 || len(*diagnostics) != 0 {
+		t.Fatalf("registers %d, servers %s, diagnostics %q", host.registers, mcpJSON(t, host.fakeRegistrar), *diagnostics)
+	}
+}
+
+func TestMcpRegistersNothingWhenMCPIsDisabledAndKeepsSkills(t *testing.T) {
+	hooks, _, host := wire(t, `{"litellm":{"skills":{"enabled":true},"mcp":{"enabled":false}}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	if host.registers != 0 || len(host.servers) != 0 {
+		t.Fatalf("registers %d, servers %s", host.registers, mcpJSON(t, host.fakeRegistrar))
+	}
+	if !slices.Contains(hooks.tools, "litellm_skill_list") {
+		t.Fatalf("tools = %v", hooks.tools)
+	}
+}
+
+func TestMcpLoginStartDropsTheServerThroughTheSessionHost(t *testing.T) {
+	hooks, state, host := wire(t, "")
+	defaultEnv(t, "https://proxy.example.com")
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	if _, ok := host.servers["litellm"]; !ok {
+		t.Fatal("not registered")
+	}
+	state.mu.Lock()
+	callbacks := append([]func(providerDefinition){}, state.onLoginStart...)
+	state.mu.Unlock()
+	for _, callback := range callbacks {
+		callback(state.definitions[0])
+	}
+	if _, ok := host.servers["litellm"]; ok {
+		t.Fatal("still registered while the login prompts")
 	}
 }

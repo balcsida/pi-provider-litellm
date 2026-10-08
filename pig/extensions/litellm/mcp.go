@@ -43,6 +43,7 @@ type mcpSync struct {
 
 	mu       sync.Mutex
 	attempts map[string]mcpAttempt
+	last     mcpRegistrar
 	// Headers can carry credentials, so a config is remembered as a keyed digest.
 	salt []byte
 }
@@ -162,13 +163,23 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 	m.attempts[definition.Name] = mcpAttempt{identity: identity, registered: true}
 }
 
+// lastRegistrar is the registrar of the latest sync, nil before the first one.
+func (m *mcpSync) lastRegistrar() mcpRegistrar {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.last
+}
+
 func (m *mcpSync) syncAll(registrar mcpRegistrar) {
+	m.mu.Lock()
+	m.last = registrar
+	m.mu.Unlock()
 	for _, definition := range m.state.definitions {
 		m.sync(registrar, definition)
 	}
 }
 
-func setupMCP(e *sdk.Extension, state *extensionState) {
+func setupMCP(e hookRegistrar, state *extensionState) {
 	if !isFeatureEnabled(state.settings, "mcp") {
 		return
 	}
@@ -179,14 +190,22 @@ func setupMCP(e *sdk.Extension, state *extensionState) {
 		return
 	}
 	// A login drops the server before it can store a new credential, since the host reads the credential per request.
+	// The drop reaches the host through the context of the session that last synced.
 	state.mu.Lock()
-	state.onLoginStart = append(state.onLoginStart, func(definition providerDefinition) { m.drop(e, definition) })
-	state.mu.Unlock()
-	// Servers registered while the extension loads connect when the session starts. Each turn picks up a
-	// login that changed the proxy root, and a logout that removed it.
-	m.syncAll(e)
-	e.OnEvent(sdk.EventBeforeAgentStart, func(ctx sdk.Context, _ map[string]any) (any, error) {
-		m.syncAll(ctx)
-		return nil, nil
+	state.onLoginStart = append(state.onLoginStart, func(definition providerDefinition) {
+		if registrar := m.lastRegistrar(); registrar != nil {
+			m.drop(registrar, definition)
+		}
 	})
+	state.mu.Unlock()
+	// The factory's registrations are queued and validated while the extension loads, where one the host
+	// refuses would fail the whole load. A server registered once the session has started is applied at once,
+	// the host's error comes back to be reported, and it connects through mcp_servers_change. Each turn then
+	// picks up a login that changed the proxy root, and a logout that removed it.
+	sync := func(h hookHost, _ map[string]any) (any, error) {
+		m.syncAll(h)
+		return nil, nil
+	}
+	e.OnEvent(sdk.EventSessionStart, sync)
+	e.OnEvent(sdk.EventBeforeAgentStart, sync)
 }

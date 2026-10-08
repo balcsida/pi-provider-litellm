@@ -49,11 +49,93 @@ type extensionState struct {
 
 	// MCP message buffering: Pi starts the terminal before supplying a context.
 	sessionStarted  bool
-	ui              *sdk.Context
+	ui              hookHost
 	pendingMessages []pendingMessage
 }
 
 type pendingMessage struct{ text, level string }
+
+// hookHost is the part of sdk.Context the event handlers use, so tests can drive them without a host.
+type hookHost interface {
+	budgetHost
+	mcpRegistrar
+	// RequestContext carries the cancellation of the request the handler runs for.
+	RequestContext() context.Context
+	Model() string
+	GetSessionID() (string, error)
+	// FindModel is ModelRegistry().Find: the host's view of a model, nil when it is unknown.
+	FindModel(provider, modelID string) map[string]any
+}
+
+// hookFunc is an event handler over hookHost; sdk.EventFunc over sdk.Context is its production form.
+type hookFunc func(h hookHost, data map[string]any) (any, error)
+
+// hookRegistrar is the part of *sdk.Extension the setup functions register through.
+type hookRegistrar interface {
+	OnEvent(eventName string, handler hookFunc)
+	Command(name, description string, completions func(prefix string) ([]sdk.AutocompleteItem, error), handler func(h hookHost, args string) error)
+	RegisterTool(definition sdk.ToolDefinition)
+}
+
+// sdkHost adapts sdk.Context to hookHost.
+type sdkHost struct {
+	ctx   sdk.Context
+	state *extensionState
+}
+
+func (h sdkHost) HasUI() bool                     { return h.ctx.HasUI() }
+func (h sdkHost) ModelProvider() string           { return h.ctx.ModelProvider() }
+func (h sdkHost) Model() string                   { return h.ctx.Model() }
+func (h sdkHost) SetStatus(key, text string)      { h.ctx.SetStatus(key, text) }
+func (h sdkHost) Notify(message, level string)    { h.ctx.Notify(message, level) }
+func (h sdkHost) Fg(color, text string) string    { return h.ctx.UITheme().Fg(color, text) }
+func (h sdkHost) GetSessionID() (string, error)   { return h.ctx.GetSessionID() }
+func (h sdkHost) RequestContext() context.Context { return requestContext{h.ctx} }
+func (h sdkHost) UnregisterMcpServer(name string) { h.ctx.UnregisterMcpServer(name) }
+func (h sdkHost) FindModel(provider, modelID string) map[string]any {
+	return h.ctx.ModelRegistry().Find(provider, modelID)
+}
+func (h sdkHost) RegisterMcpServer(name string, config sdk.McpServerConfig) error {
+	return h.ctx.RegisterMcpServer(name, config)
+}
+
+// ResolveAuth is getRuntimeAuth for a configured provider; nil auth means no credentials.
+func (h sdkHost) ResolveAuth(name string) (*types.LiteLLMRuntimeAuth, error) {
+	for _, definition := range h.state.definitions {
+		if definition.Name == name {
+			return h.state.runtimeAuth(h.ctx, definition)
+		}
+	}
+	return nil, nil
+}
+
+// requestContext makes sdk.Context's cancellation a context.Context.
+type requestContext struct{ sdk.Context }
+
+func (requestContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (requestContext) Value(any) any               { return nil }
+
+// sdkRegistrar adapts *sdk.Extension to hookRegistrar.
+type sdkRegistrar struct {
+	e     *sdk.Extension
+	state *extensionState
+}
+
+func (r sdkRegistrar) OnEvent(eventName string, handler hookFunc) {
+	r.e.OnEvent(eventName, func(ctx sdk.Context, data map[string]any) (any, error) {
+		return handler(sdkHost{ctx, r.state}, data)
+	})
+}
+
+func (r sdkRegistrar) Command(name, description string, completions func(prefix string) ([]sdk.AutocompleteItem, error), handler func(h hookHost, args string) error) {
+	r.e.RegisterCommand(name, sdk.CommandOptions{
+		Description:            description,
+		GetArgumentCompletions: completions,
+		Handler:                func(ctx sdk.Context, args string) error { return handler(sdkHost{ctx, r.state}, args) },
+	})
+}
+
+func (r sdkRegistrar) RegisterTool(definition sdk.ToolDefinition) { r.e.RegisterTool(definition) }
 
 func newExtensionState(settings *litellmSettings, definitions []providerDefinition, policies *policyStore) *extensionState {
 	names := map[string]bool{}
@@ -418,7 +500,10 @@ func (s *extensionState) newProvider(definition providerDefinition, seed []types
 }
 
 // notify shows a message in the UI, or on the diagnostic stream when there is none.
-func notify(ctx sdk.Context, message, level string) {
+func notify(ctx interface {
+	HasUI() bool
+	Notify(message, level string)
+}, message, level string) {
 	if ctx.HasUI() {
 		ctx.Notify(message, level)
 		return
@@ -449,13 +534,13 @@ var stderrIsTerminal = func() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func setupSessionState(e *sdk.Extension, s *extensionState) {
-	e.OnSessionStart(func(ctx sdk.Context, _ map[string]any) (any, error) {
+func setupSessionState(e hookRegistrar, s *extensionState) {
+	e.OnEvent(sdk.EventSessionStart, func(h hookHost, _ map[string]any) (any, error) {
 		s.mu.Lock()
 		s.sessionStarted = true
 		s.ui = nil
-		if ctx.HasUI() {
-			s.ui = &ctx
+		if h.HasUI() {
+			s.ui = h
 		}
 		pending := s.pendingMessages
 		s.pendingMessages = nil
@@ -465,7 +550,7 @@ func setupSessionState(e *sdk.Extension, s *extensionState) {
 		}
 		return nil, nil
 	})
-	e.OnSessionShutdown(func(sdk.Context, map[string]any) (any, error) {
+	e.OnEvent(sdk.EventSessionShutdown, func(hookHost, map[string]any) (any, error) {
 		s.mu.Lock()
 		s.ui, s.sessionStarted, s.pendingMessages = nil, false, nil
 		s.mu.Unlock()
@@ -473,7 +558,7 @@ func setupSessionState(e *sdk.Extension, s *extensionState) {
 	})
 }
 
-func (s *extensionState) inScope(ctx sdk.Context) bool {
+func (s *extensionState) inScope(ctx interface{ ModelProvider() string }) bool {
 	return s.providerNames[ctx.ModelProvider()]
 }
 
@@ -561,8 +646,8 @@ func jsonString(value string) string {
 	return string(data)
 }
 
-func setupSessionHeader(e *sdk.Extension, s *extensionState) {
-	e.OnEvent(sdk.EventBeforeProviderHeaders, func(ctx sdk.Context, data map[string]any) (any, error) {
+func setupSessionHeader(e hookRegistrar, s *extensionState) {
+	e.OnEvent(sdk.EventBeforeProviderHeaders, func(ctx hookHost, data map[string]any) (any, error) {
 		if !s.inScope(ctx) {
 			return nil, nil
 		}
@@ -600,8 +685,8 @@ func attemptedFallbacks(headers map[string]any) int {
 }
 
 // setupFallbackWarning names the route only: router fallbacks are invisible to discovery, and header text is proxy-supplied.
-func setupFallbackWarning(e *sdk.Extension, s *extensionState) {
-	e.OnEvent(sdk.EventAfterProviderResponse, func(ctx sdk.Context, data map[string]any) (any, error) {
+func setupFallbackWarning(e hookRegistrar, s *extensionState) {
+	e.OnEvent(sdk.EventAfterProviderResponse, func(ctx hookHost, data map[string]any) (any, error) {
 		if !s.inScope(ctx) {
 			return nil, nil
 		}
@@ -627,6 +712,18 @@ func setupFallbackWarning(e *sdk.Extension, s *extensionState) {
 			"`model_info.supported_endpoints`.", jsonString(provider), route, route), "warning")
 		return nil, nil
 	})
+}
+
+// setupHooks registers every handler, in the order the TypeScript factory does.
+func setupHooks(hooks hookRegistrar, state *extensionState) {
+	setupSessionState(hooks, state)
+	setupSessionHeader(hooks, state)
+	setupCostTracking(hooks, state) // before any budget handler: its after_provider_response handler must run first
+	setupBudget(hooks, state)       // after setupCostTracking: its after_provider_response handler must run second
+	setupFallbackWarning(hooks, state)
+	setupRequestPolicy(hooks, state)
+	setupSkills(hooks, state) // its before_agent_start handler runs before the MCP sync, as in the TypeScript
+	setupMCP(hooks, state)
 }
 
 // Extension is the extension factory.
@@ -660,14 +757,7 @@ func Extension() *sdk.Extension {
 		}
 	}
 
-	setupSessionState(e, state)
 	setupRefreshCommand(e, state)
-	setupSessionHeader(e, state)
-	setupFallbackWarning(e, state)
-	setupCostTracking(e, state) // before any budget handler: its after_provider_response handler must run first
-	setupBudget(e, state)       // after setupCostTracking: its after_provider_response handler must run second
-	setupRequestPolicy(e, state)
-	setupSkills(e, state) // its before_agent_start handler runs before the MCP sync, as in the TypeScript
-	setupMCP(e, state)
+	setupHooks(sdkRegistrar{e, state}, state)
 	return e
 }

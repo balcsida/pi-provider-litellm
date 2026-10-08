@@ -152,6 +152,14 @@ func TestProviderDefinitions(t *testing.T) {
 		}
 	})
 
+	t.Run("distinguishes a null oidc setting from an absent one", func(t *testing.T) {
+		withNull := loadDefinitions(t, `{"litellm":{"providers":{"litellm":{"oidc":null},"alias":{"oidc":null}}}}`)
+		absent := loadDefinitions(t, `{"litellm":{"providers":{"litellm":{}}}}`)
+		if !withNull[0].HasOIDC || withNull[1].HasOIDC || absent[0].HasOIDC {
+			t.Fatalf("null %+v alias %+v absent %+v", withNull[0], withNull[1], absent[0])
+		}
+	})
+
 	t.Run("reads baseUrl, apiKey and allowInsecureHttp, treating the literal undefined as unset", func(t *testing.T) {
 		definitions := loadDefinitions(t, `{"litellm":{"providers":{"litellm":{"baseUrl":" http://host.docker.internal ","apiKey":"undefined","allowInsecureHttp":true}}}}`)
 		got := definitions[0]

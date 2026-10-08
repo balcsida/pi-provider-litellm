@@ -104,9 +104,9 @@ func (c *costTracker) attach(message map[string]any, providerNames map[string]bo
 // setupCostTracking registers the response-cost capture and the message_end cost attachment. Register it
 // before the budget hooks and setupRequestPolicy: the cost after_provider_response handler must run first,
 // and its message_end handler runs before the think-tag normalizer, which then sees the costed message.
-func setupCostTracking(e *sdk.Extension, s *extensionState) {
+func setupCostTracking(e hookRegistrar, s *extensionState) {
 	tracker := &costTracker{pending: map[string]float64{}}
-	e.OnEvent(sdk.EventAfterProviderResponse, func(ctx sdk.Context, data map[string]any) (any, error) {
+	e.OnEvent(sdk.EventAfterProviderResponse, func(ctx hookHost, data map[string]any) (any, error) {
 		// Global hook: responses from other providers must not feed LiteLLM cost state.
 		if s.inScope(ctx) {
 			headers, _ := data["headers"].(map[string]any)
@@ -114,7 +114,7 @@ func setupCostTracking(e *sdk.Extension, s *extensionState) {
 		}
 		return nil, nil
 	})
-	e.OnEvent(sdk.EventMessageEnd, func(_ sdk.Context, data map[string]any) (any, error) {
+	e.OnEvent(sdk.EventMessageEnd, func(_ hookHost, data map[string]any) (any, error) {
 		message, _ := data["message"].(map[string]any)
 		if updated := tracker.attach(message, s.providerNames); updated != nil {
 			return map[string]any{"message": updated}, nil

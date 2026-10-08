@@ -897,7 +897,7 @@ func TestCliSSOLogin(t *testing.T) {
 			t.Fatalf("events = %v", script.events)
 		}
 		device := events[0].(ai.AuthDeviceCodeEvent)
-		if device.UserCode != "ABCD-EFGH" || device.VerificationURI != proxy.URL+"/sso/key/generate?key=cli-login&source=litellm-cli" || device.ExpiresInSeconds == nil || *device.ExpiresInSeconds != 600 {
+		if device.UserCode != "ABCD-EFGH" || device.VerificationURI != proxy.URL+"/sso/key/generate?source=litellm-cli&key=cli-login" || device.ExpiresInSeconds == nil || *device.ExpiresInSeconds != 600 {
 			t.Errorf("device event = %+v", device)
 		}
 		if credential.Access != "opaque-cli-token" || credential.Refresh != "" || extra(t, credential, "baseUrl") != proxy.URL || int64(credential.ExpiresMillis()) < started+7200*1000 {
@@ -1213,6 +1213,7 @@ func runOidcLogin(t *testing.T, options oidcOptions) oidcRun {
 	}
 	definition := defaultDefinition(t)
 	definition.OIDC = oidc
+	definition.HasOIDC = true
 	t.Setenv(envHeaders, `{"x-gateway-secret":"gateway-secret"}`)
 	if options.headers != "" {
 		definition.Headers = options.headers
@@ -1440,6 +1441,7 @@ func TestDirectOIDCLogin(t *testing.T) {
 		field string
 	}{
 		{"a string", testIssuerF, "oidc"},
+		{"null", nil, "oidc"},
 		{"a missing issuer", map[string]any{"clientId": "c"}, "oidc.issuer"},
 		{"an http issuer", map[string]any{"issuer": "http://idp.example.com", "clientId": "c"}, "oidc.issuer"},
 		{"issuer credentials", map[string]any{"issuer": "https://user:pass@idp.example.com", "clientId": "c"}, "oidc.issuer"},
@@ -1459,6 +1461,7 @@ func TestDirectOIDCLogin(t *testing.T) {
 			proxy := newRecorder(t, false)
 			definition := defaultDefinition(t)
 			definition.OIDC = c.oidc
+			definition.HasOIDC = true
 			script := &scriptedAuth{answer: answers(proxy.URL, "", "")}
 			_, err := loginOAuth(context.Background(), script.interaction(), definition)
 			if err == nil || !strings.HasPrefix(err.Error(), "Invalid LiteLLM "+c.field+" setting: ") {
@@ -1873,4 +1876,108 @@ func TestOAuthHelpers(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ---- security review follow-ups ---------------------------------------------------------------------------
+
+func TestOidcNullSettingMessage(t *testing.T) {
+	oauthTest(t)
+	definition := defaultDefinition(t)
+	definition.HasOIDC = true
+	_, err := loginOAuth(context.Background(), (&scriptedAuth{}).interaction(), definition)
+	if err == nil || err.Error() != "Invalid LiteLLM oidc setting: expected an object" {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestCliSSOStartClampsExpiresIn(t *testing.T) {
+	oauthTest(t)
+	proxy := newRecorder(t, false)
+	proxy.handle("/sso/cli/start", jsonHandler(200, map[string]any{"login_id": "l", "poll_secret": "p", "user_code": "u", "expires_in": 1e300}))
+	start, err := startCliSSO(context.Background(), proxy.URL, nil)
+	if err != nil || start == nil || start.expiresInSeconds != maxCliSSOExpiresInSeconds {
+		t.Errorf("start = %+v, %v", start, err)
+	}
+}
+
+func TestAuthResponseBodyLimit(t *testing.T) {
+	oauthTest(t)
+	proxy := newRecorder(t, false)
+	proxy.handle("/big", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"pad":"`+strings.Repeat("a", maxAuthBodyBytes)+`"}`)
+	})
+	response, err := doAuth(context.Background(), http.MethodGet, proxy.URL+"/big", http.Header{}, nil)
+	if err != nil || !errors.Is(response.bodyErr, errAuthBodyTooLarge) || response.object() != nil {
+		t.Errorf("response = %+v, %v", response, err)
+	}
+}
+
+func TestAuthRedirects(t *testing.T) {
+	oauthTest(t)
+	proxy := newRecorder(t, false)
+	other := newRecorder(t, false)
+	other.handle("/target", jsonHandler(200, map[string]any{"ok": true}))
+	proxy.handle("/target", jsonHandler(200, map[string]any{"ok": true}))
+	proxy.handle("/same", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/target", http.StatusFound) })
+	proxy.handle("/cross", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/target", http.StatusFound)
+	})
+	proxy.handle("/loop", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/loop", http.StatusFound) })
+	get := func(do func(context.Context, string, string, http.Header, []byte) (*authResponse, error), path string) int {
+		response, err := do(context.Background(), http.MethodGet, proxy.URL+path, http.Header{}, nil)
+		if err != nil {
+			return -1
+		}
+		return response.status
+	}
+	for _, c := range []struct {
+		name string
+		do   func(context.Context, string, string, http.Header, []byte) (*authResponse, error)
+		path string
+		want int
+	}{
+		{"follows a same-origin redirect", doAuthFollowing, "/same", 200},
+		{"stops at a cross-origin redirect", doAuthFollowing, "/cross", 302},
+		{"stops after five hops", doAuthFollowing, "/loop", 302},
+		{"does not follow when manual", doAuth, "/same", 302},
+	} {
+		if got := get(c.do, c.path); got != c.want {
+			t.Errorf("%s: status %d, want %d", c.name, got, c.want)
+		}
+	}
+	if len(other.log()) != 0 {
+		t.Error("cross-origin redirect target was contacted")
+	}
+}
+
+func TestOidcTokenRequiresIssuerClaim(t *testing.T) {
+	oauthTest(t)
+	idp := newRecorder(t, false)
+	idp.handle("/token", jsonHandler(200, map[string]any{"id_token": idToken(map[string]any{"aud": "c", "sub": "s", "exp": time.Now().Unix() + 3600})}))
+	_, failure, err := requestOidcToken(context.Background(), idp.URL+"/token", url.Values{}, expectedIDToken{issuer: "", clientID: "c"}, "")
+	if err != nil || failure == nil || failure.message != "OIDC id_token has invalid iss" {
+		t.Errorf("failure = %+v, %v", failure, err)
+	}
+}
+
+func TestPkceRefreshRejectsEmptyBaseURL(t *testing.T) {
+	oauthTest(t)
+	pinNow(testNow)
+	proxy := newRecorder(t, false)
+	credential := pkceCredential(proxy, func(c *ai.Credential) { setExtra(c, "baseUrl", "") })
+	credential.SetExpiresMillis(float64(testNow))
+	if _, err := refreshOf(t, credential); err == nil || err.Error() != "Invalid LiteLLM PKCE credential; run /login litellm again" {
+		t.Errorf("err = %v", err)
+	}
+	if len(proxy.log()) != 0 {
+		t.Error("a request was sent")
+	}
+}
+
+func TestSameOriginURLTrimsBeforeParsing(t *testing.T) {
+	issuer, _ := url.Parse("https://proxy.example.com")
+	got, err := sameOriginURL("  https://proxy.example.com/token \n", issuer, "token endpoint")
+	if err != nil || got != "https://proxy.example.com/token" {
+		t.Errorf("got %q, %v", got, err)
+	}
 }

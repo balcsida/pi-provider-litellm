@@ -55,17 +55,21 @@ func skillsFromBody(body any) []types.LiteLLMSkill {
 			}
 		}
 	}
-	raw, _ := json.Marshal(list)
+	// Decoded per element: one malformed entry must not discard the rest of the list.
 	var skills []types.LiteLLMSkill
-	if json.Unmarshal(raw, &skills) != nil {
-		return nil
+	for _, element := range list {
+		raw, _ := json.Marshal(element)
+		var skill types.LiteLLMSkill
+		if json.Unmarshal(raw, &skill) == nil {
+			skills = append(skills, skill)
+		}
 	}
 	return skills
 }
 
 // skillsRequest sends one bounded request with the credential and custom headers.
-func skillsRequest(method, target, apiKey string, headers map[string]string, accept string, body []byte) (*http.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), skillsRequestLimit)
+func skillsRequest(parent context.Context, method, target, apiKey string, headers map[string]string, accept string, body []byte) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(parent, skillsRequestLimit)
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -105,7 +109,7 @@ func (c cancelOnClose) Close() error {
 }
 
 // listSkills is listSkills: the Skill Hub marketplace first, then /v1/skills; failures yield no skills.
-func listSkills(baseURL, apiKey string, headers map[string]string, allowInsecureHTTP bool) ([]types.LiteLLMSkill, error) {
+func listSkills(ctx context.Context, baseURL, apiKey string, headers map[string]string, allowInsecureHTTP bool) ([]types.LiteLLMSkill, error) {
 	root, err := protocols.NormalizeBaseURL(baseURL, allowInsecureHTTP)
 	if err != nil {
 		return nil, err
@@ -119,7 +123,7 @@ func listSkills(baseURL, apiKey string, headers map[string]string, allowInsecure
 	skillsCacheMu.Unlock()
 
 	fetch := func(path string) ([]types.LiteLLMSkill, bool) {
-		response, err := skillsRequest(http.MethodGet, root+path, apiKey, headers, "application/json", nil)
+		response, err := skillsRequest(ctx, http.MethodGet, root+path, apiKey, headers, "application/json", nil)
 		if err != nil {
 			return nil, false
 		}
@@ -137,6 +141,10 @@ func listSkills(baseURL, apiKey string, headers map[string]string, allowInsecure
 	if !ok {
 		skills, _ = fetch("/v1/skills")
 	}
+	// A cancelled turn says nothing about the proxy: do not cache its empty answer for the next one.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	skillsCacheMu.Lock()
 	skillsCache = &skillsCacheEntry{baseURL: root, apiKey: apiKey, fetchedAt: time.Now(), skills: skills}
 	skillsCacheMu.Unlock()
@@ -151,7 +159,7 @@ type skillInput struct {
 
 // createSkill is createSkill. Only the Skill Hub creates skills from JSON: LiteLLM's POST /v1/skills is
 // Anthropic's multipart Skills API, so a JSON code skill sent there never becomes a listable skill.
-func createSkill(baseURL, apiKey string, input skillInput, headers map[string]string, allowInsecureHTTP bool) (any, error) {
+func createSkill(ctx context.Context, baseURL, apiKey string, input skillInput, headers map[string]string, allowInsecureHTTP bool) (any, error) {
 	if input.Source == nil {
 		return nil, errors.New("source is required: skills are created through the LiteLLM Skill Hub")
 	}
@@ -164,7 +172,7 @@ func createSkill(baseURL, apiKey string, input skillInput, headers map[string]st
 		payload["description"] = input.Description
 	}
 	body, _ := json.Marshal(payload)
-	response, err := skillsRequest(http.MethodPost, root+"/claude-code/plugins", apiKey, headers, "", body)
+	response, err := skillsRequest(ctx, http.MethodPost, root+"/claude-code/plugins", apiKey, headers, "", body)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +181,7 @@ func createSkill(baseURL, apiKey string, input skillInput, headers map[string]st
 		return nil, fmt.Errorf("LiteLLM skill create failed: HTTP %d", response.StatusCode)
 	}
 	resetSkillsCache()
-	enable, err := skillsRequest(http.MethodPost, root+"/claude-code/plugins/"+url.PathEscape(input.Name)+"/enable", apiKey, headers, "", nil)
+	enable, err := skillsRequest(ctx, http.MethodPost, root+"/claude-code/plugins/"+url.PathEscape(input.Name)+"/enable", apiKey, headers, "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -189,20 +197,20 @@ func createSkill(baseURL, apiKey string, input skillInput, headers map[string]st
 }
 
 // deleteSkill is deleteSkill: the Skill Hub first, the Skills Gateway when it is missing or failing.
-func deleteSkill(baseURL, apiKey, skillID string, headers map[string]string, allowInsecureHTTP bool) error {
+func deleteSkill(ctx context.Context, baseURL, apiKey, skillID string, headers map[string]string, allowInsecureHTTP bool) error {
 	root, err := protocols.NormalizeBaseURL(baseURL, allowInsecureHTTP)
 	if err != nil {
 		return err
 	}
 	hubStatus := 0
-	response, hubErr := skillsRequest(http.MethodDelete, root+"/claude-code/plugins/"+url.PathEscape(skillID), apiKey, headers, "application/json", nil)
+	response, hubErr := skillsRequest(ctx, http.MethodDelete, root+"/claude-code/plugins/"+url.PathEscape(skillID), apiKey, headers, "application/json", nil)
 	if hubErr == nil {
 		response.Body.Close()
 		hubStatus = response.StatusCode
 	}
 	status := hubStatus
 	if hubErr != nil || hubStatus == http.StatusNotFound || hubStatus >= 500 {
-		legacy, err := skillsRequest(http.MethodDelete, root+"/v1/skills/"+url.PathEscape(skillID), apiKey, headers, "", nil)
+		legacy, err := skillsRequest(ctx, http.MethodDelete, root+"/v1/skills/"+url.PathEscape(skillID), apiKey, headers, "", nil)
 		if err != nil {
 			return err
 		}
@@ -299,7 +307,7 @@ func skillToolDefinitions(getAuth func(sdk.Context) (types.LiteLLMRuntimeAuth, e
 				if err != nil {
 					return nil, err
 				}
-				skills, err := listSkills(auth.BaseURL, auth.APIKey, auth.Headers, auth.AllowInsecureHTTP)
+				skills, err := listSkills(requestContext{ctx}, auth.BaseURL, auth.APIKey, auth.Headers, auth.AllowInsecureHTTP)
 				if err != nil {
 					return nil, err
 				}
@@ -339,7 +347,7 @@ func skillToolDefinitions(getAuth func(sdk.Context) (types.LiteLLMRuntimeAuth, e
 				if err != nil {
 					return nil, err
 				}
-				result, err := createSkill(auth.BaseURL, auth.APIKey, skillInput{Name: name, Description: description, Source: source}, auth.Headers, auth.AllowInsecureHTTP)
+				result, err := createSkill(requestContext{ctx}, auth.BaseURL, auth.APIKey, skillInput{Name: name, Description: description, Source: source}, auth.Headers, auth.AllowInsecureHTTP)
 				if err != nil {
 					return nil, err
 				}
@@ -366,7 +374,7 @@ func skillToolDefinitions(getAuth func(sdk.Context) (types.LiteLLMRuntimeAuth, e
 				if err != nil {
 					return nil, err
 				}
-				if err := deleteSkill(auth.BaseURL, auth.APIKey, skillID, auth.Headers, auth.AllowInsecureHTTP); err != nil {
+				if err := deleteSkill(requestContext{ctx}, auth.BaseURL, auth.APIKey, skillID, auth.Headers, auth.AllowInsecureHTTP); err != nil {
 					return nil, err
 				}
 				return sdk.ToolResult{Content: "LiteLLM skill deleted: " + skillID, Details: map[string]any{}}, nil
@@ -378,7 +386,7 @@ func skillToolDefinitions(getAuth func(sdk.Context) (types.LiteLLMRuntimeAuth, e
 // skillsSystemPrompt is the before_agent_start body. Skills enrichment is best-effort: an expired
 // credential or an unreachable proxy must not report an extension error on every turn, so errors only
 // produce a verbose diagnostic. It returns the replacement prompt, or nil to keep it.
-func (s *extensionState) skillsSystemPrompt(systemPrompt string, getAuth func() (*types.LiteLLMRuntimeAuth, error)) any {
+func (s *extensionState) skillsSystemPrompt(ctx context.Context, systemPrompt string, getAuth func() (*types.LiteLLMRuntimeAuth, error)) any {
 	s.mu.Lock()
 	s.defaultRuntimeAuth = nil
 	s.mu.Unlock()
@@ -401,7 +409,7 @@ func (s *extensionState) skillsSystemPrompt(systemPrompt string, getAuth func() 
 	s.mu.Lock()
 	s.defaultRuntimeAuth = auth
 	s.mu.Unlock()
-	skills, err := listSkills(auth.BaseURL, auth.APIKey, auth.Headers, auth.AllowInsecureHTTP)
+	skills, err := listSkills(ctx, auth.BaseURL, auth.APIKey, auth.Headers, auth.AllowInsecureHTTP)
 	if err != nil {
 		return skip(err)
 	}
@@ -413,7 +421,7 @@ func (s *extensionState) skillsSystemPrompt(systemPrompt string, getAuth func() 
 }
 
 // setupSkills registers the skill tools and the prompt hook when the "skills" feature is enabled.
-func setupSkills(e *sdk.Extension, s *extensionState) {
+func setupSkills(e hookRegistrar, s *extensionState) {
 	if !isFeatureEnabled(s.settings, "skills") {
 		return
 	}
@@ -422,10 +430,10 @@ func setupSkills(e *sdk.Extension, s *extensionState) {
 	}) {
 		e.RegisterTool(definition)
 	}
-	e.OnEvent(sdk.EventBeforeAgentStart, func(ctx sdk.Context, data map[string]any) (any, error) {
+	e.OnEvent(sdk.EventBeforeAgentStart, func(h hookHost, data map[string]any) (any, error) {
 		prompt, _ := data["systemPrompt"].(string)
-		return s.skillsSystemPrompt(prompt, func() (*types.LiteLLMRuntimeAuth, error) {
-			return s.runtimeAuth(ctx, s.definitions[0])
+		return s.skillsSystemPrompt(h.RequestContext(), prompt, func() (*types.LiteLLMRuntimeAuth, error) {
+			return h.ResolveAuth(s.definitions[0].Name)
 		}), nil
 	})
 }

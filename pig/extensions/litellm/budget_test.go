@@ -2,7 +2,7 @@ package litellm
 
 // Ports tests/budget.test.ts and the "budget footer" and "/litellm-budget" cases of tests/budget-status.test.ts.
 // The footer and command cases drive budgetController through a fake host, clock and timer, because sdk.Context
-// cannot be faked; the "through the extension" cases are not ported (see the report).
+// cannot be faked; the "through the extension" cases are ported in extension_test.go over a recording registrar.
 
 import (
 	"context"
@@ -788,6 +788,8 @@ type fakeBudgetHost struct {
 	authErr  error
 	statuses []string
 	notices  []budgetNotice
+	// onCall runs at the start of every SetStatus and Notify, before the host's own lock is taken.
+	onCall func()
 }
 
 func (h *fakeBudgetHost) HasUI() bool { return h.ui }
@@ -803,6 +805,9 @@ func (h *fakeBudgetHost) setAuth(name string, auth *types.LiteLLMRuntimeAuth) {
 	h.mu.Unlock()
 }
 func (h *fakeBudgetHost) SetStatus(key, text string) {
+	if h.onCall != nil {
+		h.onCall()
+	}
 	if key != budgetStatusKey {
 		panic("unexpected status key " + key)
 	}
@@ -811,6 +816,9 @@ func (h *fakeBudgetHost) SetStatus(key, text string) {
 	h.mu.Unlock()
 }
 func (h *fakeBudgetHost) Notify(message, level string) {
+	if h.onCall != nil {
+		h.onCall()
+	}
 	h.mu.Lock()
 	h.notices = append(h.notices, budgetNotice{message, level})
 	h.mu.Unlock()
@@ -966,7 +974,7 @@ func (r *budgetRig) sessionStart() { r.c.sessionStart(r.host); r.settle() }
 func (r *budgetRig) turnEnd()      { r.c.turnEnd(r.host) }
 func (r *budgetRig) selectProvider(name string) {
 	r.host.setProvider(name)
-	r.c.providerSelected(r.host)
+	r.c.providerSelected(r.host, name)
 	r.settle()
 }
 func (r *budgetRig) command(args string) { r.c.command(r.host, args); r.settle() }
@@ -1577,4 +1585,67 @@ func TestBudgetCommand(t *testing.T) {
 			t.Fatalf("completions = %v", got)
 		}
 	})
+}
+
+func TestBudgetHostCallsRunOutsideTheControllerLock(t *testing.T) {
+	// Every SetStatus and Notify must find the controller mutex free: a stuck host call cannot be allowed to
+	// block the hooks that need it.
+	withHost := func(t *testing.T, mutate ...func(*budgetOptions)) (*budgetRig, *[]string) {
+		rig := newBudgetRig(t, mutate...)
+		var held []string
+		rig.host.onCall = func() {
+			if rig.c.mu.TryLock() {
+				rig.c.mu.Unlock()
+				return
+			}
+			held = append(held, "host call under the controller lock")
+		}
+		return rig, &held
+	}
+	t.Run("status writes after a poll, a provider switch and response headers", func(t *testing.T) {
+		mockBudgetProxy(t, budgetPersonalRoutes(t))
+		rig, held := withHost(t)
+		rig.sessionStart()
+		rig.c.responseHeaders(rig.host, map[string]any{"x-litellm-key-spend": "9", "x-litellm-key-max-budget": "10"})
+		rig.selectProvider("openai")
+		if len(rig.host.allStatuses()) < 3 || len(*held) != 0 {
+			t.Fatalf("statuses %q, violations %q", rig.host.allStatuses(), *held)
+		}
+	})
+	t.Run("the display warning", func(t *testing.T) {
+		rig, held := withHost(t, func(o *budgetOptions) { o.displayWarning = "careful" })
+		rig.host.provider = "openai"
+		rig.sessionStart()
+		if len(rig.host.notifications()) != 1 || len(*held) != 0 {
+			t.Fatalf("notices %v, violations %q", rig.host.notifications(), *held)
+		}
+	})
+	t.Run("the footer cleared by session_shutdown", func(t *testing.T) {
+		mockBudgetProxy(t, budgetPersonalRoutes(t))
+		rig, held := withHost(t)
+		rig.sessionStart()
+		rig.c.shutdown(rig.host)
+		if last, _ := rig.host.lastStatus(); last != "" || len(*held) != 0 {
+			t.Fatalf("last status %q, violations %q", last, *held)
+		}
+	})
+}
+
+func TestBudgetShutdownDoesNotWaitForAStuckHost(t *testing.T) {
+	mockBudgetProxy(t, budgetPersonalRoutes(t))
+	previous := shutdownDrainBudget
+	shutdownDrainBudget = 50 * time.Millisecond
+	t.Cleanup(func() { shutdownDrainBudget = previous })
+	rig := newBudgetRig(t)
+	rig.sessionStart()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	rig.host.onCall = func() { <-release }
+	finished := make(chan struct{})
+	go func() { rig.c.shutdown(rig.host); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown waited for the host's SetStatus")
+	}
 }

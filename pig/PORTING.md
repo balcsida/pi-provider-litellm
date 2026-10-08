@@ -110,8 +110,18 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 
 - Extension-only model fields live in the `litellm-model-policies.json` sidecar (see Design decisions), and the
   discovery-version staleness gate reads the sidecar instead of the stored model.
-- `model_select` is not fired by PiG 0.4.1, so the budget status line tracks the active provider from
-  `before_agent_start`, `turn_end` and `session_start`; a provider switch while idle shows on the next prompt.
+- PiG 0.4.1 emits `model_select` (from `SetModel`, with the Pi-shaped model in `data["model"]`), although its
+  parity table still lists it as planned. The budget status line follows the provider in `data["model"]["provider"]`;
+  `before_agent_start`, `turn_end` and `session_start` remain as a fallback through `ctx.ModelProvider()` for a host
+  that does not emit it.
+- The first MCP sync runs at `session_start`, not while the factory runs: `*sdk.Extension.RegisterMcpServer` only
+  queues the declaration and the host validates it while loading, so a refused config (`mcp.exposure: "bogus"`)
+  would fail the whole extension load. `sdk.Context.RegisterMcpServer` returns the host's error, which is reported
+  once through `notifyMcp`, and the registered server connects through `mcp_servers_change`.
+- Handlers and setup functions depend on two narrow unexported interfaces in `extension.go`, `hookRegistrar`
+  (`OnEvent`, `Command`, `RegisterTool`; `sdkRegistrar` adapts `*sdk.Extension`) and `hookHost` (the `sdk.Context`
+  methods the handlers use; `sdkHost` adapts `sdk.Context`), so the wiring tests register into a recording fake and
+  call the handlers with hand-built `data` maps (`TestHookRegistration`, `TestHookDataKeysAndScoping`).
 - `ctx.ui.setStatus(undefined)` has no SDK equivalent; an empty string clears the budget status.
 - A JSON `null` under `litellm.oidc` is treated as unset rather than rejected, because the decoded settings map
   cannot distinguish null from absent.

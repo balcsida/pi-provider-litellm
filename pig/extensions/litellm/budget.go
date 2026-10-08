@@ -655,22 +655,6 @@ type budgetHost interface {
 	ResolveAuth(name string) (*types.LiteLLMRuntimeAuth, error)
 }
 
-type sdkBudgetHost struct {
-	sdk.Context
-	state *extensionState
-}
-
-func (h sdkBudgetHost) Fg(color, text string) string { return h.Context.UITheme().Fg(color, text) }
-
-func (h sdkBudgetHost) ResolveAuth(name string) (*types.LiteLLMRuntimeAuth, error) {
-	for _, definition := range h.state.definitions {
-		if definition.Name == name {
-			return h.state.runtimeAuth(h.Context, definition)
-		}
-	}
-	return nil, nil
-}
-
 type budgetProvider struct{ name, displayName string }
 
 type budgetOptions struct {
@@ -735,6 +719,12 @@ type budgetController struct {
 	runCtx         context.Context
 	cancelRuns     context.CancelFunc
 	runs           sync.WaitGroup
+
+	// Status writes are numbered under mu and applied after it is released, so a host call never holds mu and
+	// a write that was overtaken is dropped.
+	statusSeq     int
+	statusMu      sync.Mutex
+	statusApplied int
 }
 
 func newBudgetController(options budgetOptions) *budgetController {
@@ -771,17 +761,41 @@ func (c *budgetController) gated() bool {
 	return c.options.disabledReason() != "" || c.options.hostOffline()
 }
 
-// renderLocked draws only the active provider's text, and only when it changed.
-func (c *budgetController) renderLocked(host budgetHost, name string) {
+// setStatusLocked records text as shown and returns the host call that writes it; the caller runs it after
+// unlocking mu.
+func (c *budgetController) setStatusLocked(host budgetHost, text string) func() {
+	c.shown = text
+	c.statusSeq++
+	seq := c.statusSeq
+	return func() {
+		c.statusMu.Lock()
+		defer c.statusMu.Unlock()
+		if seq < c.statusApplied {
+			return
+		}
+		c.statusApplied = seq
+		host.SetStatus(budgetStatusKey, text)
+	}
+}
+
+// renderLocked draws only the active provider's text, and only when it changed. It returns the host call to
+// run after unlocking mu, or nil.
+func (c *budgetController) renderLocked(host budgetHost, name string) func() {
 	if !host.HasUI() || c.activeProvider != name {
-		return
+		return nil
 	}
 	text := formatBudgetStatus(c.stateFor(name).levels, c.options.display, c.displayName[name], host, c.options.now().UnixMilli())
 	if text == c.shown {
-		return
+		return nil
 	}
-	host.SetStatus(budgetStatusKey, text)
-	c.shown = text
+	return c.setStatusLocked(host, text)
+}
+
+// call runs a host call returned by a *Locked method; it is nil when there is nothing to do.
+func call(f func()) {
+	if f != nil {
+		f()
+	}
 }
 
 func (c *budgetController) runContextLocked() context.Context {
@@ -812,27 +826,30 @@ func (c *budgetController) run(ctx context.Context, started int, host budgetHost
 	if auth == nil {
 		state.forget()
 		state.digest = ""
+		var render func()
 		if started == c.generation {
-			c.renderLocked(host, name)
+			render = c.renderLocked(host, name)
 		}
 		c.mu.Unlock()
+		call(render)
 		return budgetOutcome{kind: outcomeNoAuth}
 	}
 	digest := c.digest(*auth)
+	var forgotten func()
 	if state.digest != "" && state.digest != digest {
 		state.forget()
 		if started == c.generation {
-			c.renderLocked(host, name)
+			forgotten = c.renderLocked(host, name)
 		}
 	}
 	state.digest = digest
 	denied, previous := maps.Clone(state.denied), maps.Clone(state.levels)
 	c.mu.Unlock()
+	call(forgotten)
 
 	result := pollBudget(ctx, *auth, denied, previous, c.options.timeoutMs())
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	state.denied = denied
 	if result.OK {
 		levels := maps.Clone(result.Levels)
@@ -841,9 +858,12 @@ func (c *budgetController) run(ctx context.Context, started int, host budgetHost
 		}
 		state.levels, state.keyPolled = levels, result.KeyPolled
 	}
+	var render func()
 	if started == c.generation {
-		c.renderLocked(host, name)
+		render = c.renderLocked(host, name)
 	}
+	c.mu.Unlock()
+	call(render)
 	if result.OK {
 		return budgetOutcome{kind: outcomeOK}
 	}
@@ -894,11 +914,12 @@ func (c *budgetController) clearTimerLocked() {
 
 func (c *budgetController) warnOnce(host budgetHost) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.warned || c.options.displayWarning == "" {
+	skip := c.warned || c.options.displayWarning == ""
+	c.warned = true
+	c.mu.Unlock()
+	if skip {
 		return
 	}
-	c.warned = true
 	if host.HasUI() {
 		host.Notify(c.options.displayWarning, "warning")
 	} else {
@@ -950,38 +971,40 @@ func (c *budgetController) sessionStart(host budgetHost) {
 }
 
 // providerSelected is the model_select handler, run when the active provider changes (see setupBudget).
-func (c *budgetController) providerSelected(host budgetHost) {
+func (c *budgetController) providerSelected(host budgetHost, provider string) {
 	if !host.HasUI() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	previous := c.activeProvider
-	name := c.trackLocked(host, host.ModelProvider())
+	name := c.trackLocked(host, provider)
 	// A pending turn poll belongs to the provider its turns ran on; a newly selected one is polled below if stale.
 	if name != previous {
 		c.clearTimerLocked()
 	}
 	if name == "" {
+		var clear func()
 		if c.shown != "" {
-			host.SetStatus(budgetStatusKey, "")
-			c.shown = ""
+			clear = c.setStatusLocked(host, "")
 		}
+		c.mu.Unlock()
+		call(clear)
 		return
 	}
-	c.renderLocked(host, name)
+	render := c.renderLocked(host, name)
 	state := c.stateFor(name)
-	if c.gated() {
-		return
+	if !c.gated() {
+		if state.lastPollAt.IsZero() || c.options.now().Sub(state.lastPollAt) >= pollMinInterval {
+			c.pollLocked(host, name)
+		}
+		// A turn whose poll was dropped when this provider was switched away from still needs one.
+		missed := !state.lastTurnAt.IsZero() && state.lastTurnAt.Add(pollSettleDelay).After(state.lastPollAt)
+		if missed && c.stopTimer == nil {
+			c.schedulePollLocked(name)
+		}
 	}
-	if state.lastPollAt.IsZero() || c.options.now().Sub(state.lastPollAt) >= pollMinInterval {
-		c.pollLocked(host, name)
-	}
-	// A turn whose poll was dropped when this provider was switched away from still needs one.
-	missed := !state.lastTurnAt.IsZero() && state.lastTurnAt.Add(pollSettleDelay).After(state.lastPollAt)
-	if missed && c.stopTimer == nil {
-		c.schedulePollLocked(name)
-	}
+	c.mu.Unlock()
+	call(render)
 }
 
 func (c *budgetController) beforeAgentStart(host budgetHost) {
@@ -989,7 +1012,7 @@ func (c *budgetController) beforeAgentStart(host budgetHost) {
 	changed := host.ModelProvider() != c.activeProvider
 	c.mu.Unlock()
 	if changed {
-		c.providerSelected(host)
+		c.providerSelected(host, host.ModelProvider())
 	}
 }
 
@@ -1024,7 +1047,6 @@ func (c *budgetController) responseHeaders(host budgetHost, headers map[string]a
 		}
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	state := c.stateFor(name)
 	var key *budgetLevel
 	if level, ok := state.levels[budgetKey]; ok {
@@ -1035,7 +1057,9 @@ func (c *budgetController) responseHeaders(host budgetHost, headers map[string]a
 	} else {
 		delete(state.levels, budgetKey)
 	}
-	c.renderLocked(host, name)
+	render := c.renderLocked(host, name)
+	c.mu.Unlock()
+	call(render)
 }
 
 func (c *budgetController) shutdown(host budgetHost) {
@@ -1046,17 +1070,20 @@ func (c *budgetController) shutdown(host budgetHost) {
 		c.cancelRuns()
 		c.runCtx, c.cancelRuns = nil, nil
 	}
+	var clear func()
 	if c.shown != "" && host.HasUI() {
-		host.SetStatus(budgetStatusKey, "")
+		clear = c.setStatusLocked(host, "")
 	}
 	c.shown, c.activeProvider, c.latestHost = "", "", nil
 	c.mu.Unlock()
-	// Drain the cancelled polls, but never let a stuck host call hold up the shutdown.
+	// Clear the footer and drain the cancelled polls, but never let a stuck host call hold up the shutdown:
+	// the timeout starts before the first host call.
+	timeout := time.After(shutdownDrainBudget)
 	drained := make(chan struct{})
-	go func() { c.runs.Wait(); close(drained) }()
+	go func() { call(clear); c.runs.Wait(); close(drained) }()
 	select {
 	case <-drained:
-	case <-time.After(shutdownDrainBudget):
+	case <-timeout:
 	}
 }
 
@@ -1129,10 +1156,11 @@ func (c *budgetController) command(host budgetHost, args string) {
 
 // setupBudget is setupLiteLLMBudget. The factory calls it as `setupBudget(e, state)`.
 //
-// PiG does not fire model_select yet, so the active provider is tracked from before_agent_start (which runs
-// the model_select logic when the provider differs from the tracked one) and turn_end, through
-// ctx.ModelProvider(). A provider switch while idle therefore shows on the next prompt, not at once.
-func setupBudget(e *sdk.Extension, s *extensionState) {
+// The active provider is tracked from model_select (PiG 0.4.1 emits it from SetModel with the selected model
+// in data["model"]), and also from before_agent_start, which runs the same logic when the provider differs
+// from the tracked one, and turn_end, through ModelProvider(): a host that does not emit model_select still
+// shows a provider switch on the next prompt.
+func setupBudget(e hookRegistrar, s *extensionState) {
 	if !isFeatureEnabled(s.settings, "budget") {
 		return
 	}
@@ -1160,35 +1188,40 @@ func setupBudget(e *sdk.Extension, s *extensionState) {
 		options.providers = append(options.providers, budgetProvider{definition.Name, definition.DisplayName})
 	}
 	c := newBudgetController(options)
-	host := func(ctx sdk.Context) budgetHost { return sdkBudgetHost{Context: ctx, state: s} }
 
-	e.OnSessionStart(func(ctx sdk.Context, _ map[string]any) (any, error) {
-		c.sessionStart(host(ctx))
+	e.OnEvent(sdk.EventSessionStart, func(h hookHost, _ map[string]any) (any, error) {
+		c.sessionStart(h)
 		return nil, nil
 	})
-	e.OnEvent(sdk.EventBeforeAgentStart, func(ctx sdk.Context, _ map[string]any) (any, error) {
-		c.beforeAgentStart(host(ctx))
+	e.OnEvent(sdk.EventModelSelect, func(h hookHost, data map[string]any) (any, error) {
+		provider := h.ModelProvider()
+		if model, ok := data["model"].(map[string]any); ok {
+			provider, _ = model["provider"].(string)
+		}
+		c.providerSelected(h, provider)
 		return nil, nil
 	})
-	e.OnEvent(sdk.EventTurnEnd, func(ctx sdk.Context, _ map[string]any) (any, error) {
-		c.turnEnd(host(ctx))
+	e.OnEvent(sdk.EventBeforeAgentStart, func(h hookHost, _ map[string]any) (any, error) {
+		c.beforeAgentStart(h)
 		return nil, nil
 	})
-	e.OnEvent(sdk.EventAfterProviderResponse, func(ctx sdk.Context, data map[string]any) (any, error) {
+	e.OnEvent(sdk.EventTurnEnd, func(h hookHost, _ map[string]any) (any, error) {
+		c.turnEnd(h)
+		return nil, nil
+	})
+	e.OnEvent(sdk.EventAfterProviderResponse, func(h hookHost, data map[string]any) (any, error) {
 		headers, _ := data["headers"].(map[string]any)
-		c.responseHeaders(host(ctx), headers)
+		c.responseHeaders(h, headers)
 		return nil, nil
 	})
-	e.OnSessionShutdown(func(ctx sdk.Context, _ map[string]any) (any, error) {
-		c.shutdown(host(ctx))
+	e.OnEvent(sdk.EventSessionShutdown, func(h hookHost, _ map[string]any) (any, error) {
+		c.shutdown(h)
 		return nil, nil
 	})
-	e.RegisterCommand("litellm-budget", sdk.CommandOptions{
-		Description:            "Show LiteLLM key, user, team, member, and organization budgets",
-		GetArgumentCompletions: func(prefix string) ([]sdk.AutocompleteItem, error) { return c.completions(prefix), nil },
-		Handler: func(ctx sdk.Context, args string) error {
-			c.command(host(ctx), args)
+	e.Command("litellm-budget", "Show LiteLLM key, user, team, member, and organization budgets",
+		func(prefix string) ([]sdk.AutocompleteItem, error) { return c.completions(prefix), nil },
+		func(h hookHost, args string) error {
+			c.command(h, args)
 			return nil
-		},
-	})
+		})
 }

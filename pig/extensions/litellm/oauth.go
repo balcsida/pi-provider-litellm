@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -71,10 +72,25 @@ func init() {
 
 // ---- HTTP plumbing --------------------------------------------------------------------------------------
 
-func authClient() *http.Client {
+const (
+	maxAuthBodyBytes = 1 << 20
+	maxAuthRedirects = 5
+	// maxCliSSOExpiresInSeconds bounds a server-supplied CLI SSO lifetime so the deadline arithmetic cannot overflow.
+	maxCliSSOExpiresInSeconds = 3600
+)
+
+var errAuthBodyTooLarge = errors.New("response body too large")
+
+// authClient never follows redirects unless follow is set; then only same-origin ones, at most maxAuthRedirects.
+func authClient(follow bool) *http.Client {
 	return &http.Client{
-		Transport:     authTransport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: authTransport,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if !follow || len(via) > maxAuthRedirects || urlOrigin(request.URL) != urlOrigin(via[0].URL) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
 	}
 }
 
@@ -102,6 +118,16 @@ func (r *authResponse) object() map[string]any {
 // doAuth sends one request without following redirects, bounded by loginTimeout. A cancelled ctx returns its
 // cause; any other transport failure returns errAuthNetwork, whose text never carries the URL.
 func doAuth(ctx context.Context, method, endpoint string, header http.Header, body []byte) (*authResponse, error) {
+	return doAuthWith(ctx, false, method, endpoint, header, body)
+}
+
+// doAuthFollowing is doAuth for the proxy requests the TypeScript leaves on fetch's default redirect handling
+// (/sso/cli/start, the CLI SSO poll, /key/generate): same-origin redirects are followed.
+func doAuthFollowing(ctx context.Context, method, endpoint string, header http.Header, body []byte) (*authResponse, error) {
+	return doAuthWith(ctx, true, method, endpoint, header, body)
+}
+
+func doAuthWith(ctx context.Context, follow bool, method, endpoint string, header http.Header, body []byte) (*authResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, context.Cause(ctx)
 	}
@@ -122,7 +148,7 @@ func doAuth(ctx context.Context, method, endpoint string, header http.Header, bo
 		return nil, errAuthNetwork
 	}
 	request.Header = header
-	response, err := authClient().Do(request)
+	response, err := authClient(follow).Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, context.Cause(ctx)
@@ -131,7 +157,10 @@ func doAuth(ctx context.Context, method, endpoint string, header http.Header, bo
 	}
 	defer response.Body.Close()
 	var buffer bytes.Buffer
-	_, readErr := buffer.ReadFrom(response.Body)
+	_, readErr := buffer.ReadFrom(io.LimitReader(response.Body, maxAuthBodyBytes+1))
+	if readErr == nil && buffer.Len() > maxAuthBodyBytes {
+		readErr = errAuthBodyTooLarge
+	}
 	if ctx.Err() != nil {
 		return nil, context.Cause(ctx)
 	}
@@ -232,6 +261,7 @@ func sameOriginURL(value any, issuer *url.URL, field string) (string, error) {
 	if !ok || strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("LiteLLM CLI auth discovery has invalid %s", field)
 	}
+	text = strings.TrimSpace(text)
 	u, err := url.Parse(text)
 	if err != nil {
 		return "", fmt.Errorf("LiteLLM CLI auth discovery has invalid %s", field)
@@ -242,7 +272,7 @@ func sameOriginURL(value any, issuer *url.URL, field string) (string, error) {
 	if u.User != nil || u.Fragment != "" {
 		return "", fmt.Errorf("LiteLLM CLI auth discovery has invalid %s", field)
 	}
-	return strings.TrimSpace(text), nil
+	return text, nil
 }
 
 // httpsURL is an https URL without credentials or fragment, returned verbatim.
@@ -845,7 +875,7 @@ func requestOidcToken(ctx context.Context, endpoint string, form url.Values, exp
 	invalid := func(claim string) (*oidcToken, *tokenFailure, error) {
 		return nil, &tokenFailure{false, "OIDC id_token has invalid " + claim}, nil
 	}
-	if issuer, _ := claims["iss"].(string); issuer != expected.issuer {
+	if issuer, ok := claims["iss"].(string); !ok || issuer != expected.issuer {
 		return invalid("iss")
 	}
 	audiences, isList := claims["aud"].([]any)
@@ -951,7 +981,7 @@ func positiveNumber(value any) (float64, bool) {
 }
 
 func startCliSSO(ctx context.Context, baseURL string, headers map[string]string) (*cliSSOStart, error) {
-	response, err := doAuth(ctx, http.MethodPost, baseURL+"/sso/cli/start", rawHeaders(headers), []byte{})
+	response, err := doAuthFollowing(ctx, http.MethodPost, baseURL+"/sso/cli/start", rawHeaders(headers), []byte{})
 	if err != nil {
 		if errors.Is(err, errAuthNetwork) {
 			return nil, errors.New("LiteLLM CLI SSO start failed (network error)")
@@ -975,6 +1005,7 @@ func startCliSSO(ctx context.Context, baseURL string, headers map[string]string)
 	if !ok {
 		expiresIn = cliSSOExpiresInSeconds
 	}
+	expiresIn = min(expiresIn, maxCliSSOExpiresInSeconds)
 	return &cliSSOStart{loginID: loginID, pollSecret: pollSecret, userCode: userCode, expiresInSeconds: expiresIn}, nil
 }
 
@@ -1036,7 +1067,7 @@ func pollCliSSO(ctx context.Context, baseURL string, start *cliSSOStart, interac
 		}
 		header := rawHeaders(headers)
 		header.Set("x-litellm-cli-poll-secret", start.pollSecret)
-		response, err := doAuth(ctx, http.MethodGet, endpoint, header, nil)
+		response, err := doAuthFollowing(ctx, http.MethodGet, endpoint, header, nil)
 		if err != nil {
 			if !errors.Is(err, errAuthNetwork) {
 				return cliSSOResult{}, err
@@ -1105,7 +1136,7 @@ func generateVirtualKey(ctx context.Context, baseURL, userToken string, headers 
 	header := rawHeaders(headers)
 	header.Set("Authorization", "Bearer "+userToken)
 	header.Set("Content-Type", "application/json")
-	response, err := doAuth(ctx, http.MethodPost, baseURL+"/key/generate", header, []byte("{}"))
+	response, err := doAuthFollowing(ctx, http.MethodPost, baseURL+"/key/generate", header, []byte("{}"))
 	if err != nil {
 		return "", nil, err
 	}
@@ -1171,7 +1202,7 @@ func loginWithPastedToken(ctx context.Context, interaction ai.AuthInteraction, b
 
 func loginOAuth(ctx context.Context, interaction ai.AuthInteraction, definition providerDefinition) (ai.Credential, error) {
 	var oidc *oidcConfig
-	if definition.OIDC != nil {
+	if definition.HasOIDC {
 		config, err := parseOidcConfig(definition.OIDC)
 		if err != nil {
 			return ai.Credential{}, err
@@ -1205,7 +1236,7 @@ func loginOAuth(ctx context.Context, interaction ai.AuthInteraction, definition 
 	expiresIn := cliSSO.expiresInSeconds
 	notifyAuth(interaction, ai.AuthDeviceCodeEvent{
 		UserCode:         cliSSO.userCode,
-		VerificationURI:  baseURL + "/sso/key/generate?" + url.Values{"source": {"litellm-cli"}, "key": {cliSSO.loginID}}.Encode(),
+		VerificationURI:  baseURL + "/sso/key/generate?source=litellm-cli&key=" + url.QueryEscape(cliSSO.loginID),
 		ExpiresInSeconds: &expiresIn,
 	})
 	result, err := pollCliSSO(ctx, baseURL, cliSSO, interaction, headers)
@@ -1289,7 +1320,7 @@ func refreshLiteLLM(ctx context.Context, credential ai.Credential, definition pr
 func refreshPkce(ctx context.Context, credential ai.Credential, definition providerDefinition) (ai.Credential, error) {
 	baseURL, hasBaseURL := extraString(credential, "baseUrl")
 	clientID, _ := extraString(credential, "clientId")
-	if !hasBaseURL || !isAuthToken(clientID) || !isAuthToken(credential.Access) || !isAuthToken(credential.Refresh) || !isSafeInteger(credential.ExpiresMillis()) {
+	if !hasBaseURL || baseURL == "" || !isAuthToken(clientID) || !isAuthToken(credential.Access) || !isAuthToken(credential.Refresh) || !isSafeInteger(credential.ExpiresMillis()) {
 		return ai.Credential{}, errors.New("Invalid LiteLLM PKCE credential; run /login litellm again")
 	}
 	return refreshWithBackoff(credential, func() (func(*ai.Credential), *tokenFailure, error) {

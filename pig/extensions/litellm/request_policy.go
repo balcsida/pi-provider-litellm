@@ -232,8 +232,11 @@ func normalizeThinkTags(message map[string]any, providerNames map[string]bool, a
 		}
 		if len(content) > 0 {
 			if last, ok := content[len(content)-1].(map[string]any); ok && last["type"] == kind {
-				last[field] = last[field].(string) + text
-				return
+				// A malformed block (no string field) is not merged into; a new block follows it.
+				if previous, ok := last[field].(string); ok {
+					last[field] = previous + text
+					return
+				}
 			}
 		}
 		content = append(content, map[string]any{"type": kind, field: text})
@@ -290,9 +293,9 @@ func normalizeThinkTags(message map[string]any, providerNames map[string]bool, a
 
 // requestModelFor resolves what the hooks need about a model: api and thinkingLevelMap from the host's
 // registry (nil when the model is unknown), policy and family from the sidecar.
-func (s *extensionState) requestModelFor(ctx sdk.Context, provider, modelID string) (hookModel, *types.LiteLLMModelPolicy) {
+func (s *extensionState) requestModelFor(ctx hookHost, provider, modelID string) (hookModel, *types.LiteLLMModelPolicy) {
 	model := hookModel{ID: modelID}
-	if found := ctx.ModelRegistry().Find(provider, modelID); found != nil {
+	if found := ctx.FindModel(provider, modelID); found != nil {
 		model.API, _ = found["api"].(string)
 		if levels, ok := found["thinkingLevelMap"].(map[string]any); ok {
 			if off, ok := levels["off"].(string); ok {
@@ -306,8 +309,8 @@ func (s *extensionState) requestModelFor(ctx sdk.Context, provider, modelID stri
 }
 
 // setupRequestPolicy registers the request-payload hook and the think-tag message normalizer.
-func setupRequestPolicy(e *sdk.Extension, s *extensionState) {
-	e.OnEvent(sdk.EventBeforeProviderRequest, func(ctx sdk.Context, data map[string]any) (any, error) {
+func setupRequestPolicy(e hookRegistrar, s *extensionState) {
+	e.OnEvent(sdk.EventBeforeProviderRequest, func(ctx hookHost, data map[string]any) (any, error) {
 		if !s.inScope(ctx) {
 			return nil, nil
 		}
@@ -322,12 +325,15 @@ func setupRequestPolicy(e *sdk.Extension, s *extensionState) {
 		return nil, nil
 	})
 
-	e.OnEvent(sdk.EventMessageEnd, func(ctx sdk.Context, data map[string]any) (any, error) {
+	e.OnEvent(sdk.EventMessageEnd, func(ctx hookHost, data map[string]any) (any, error) {
 		message, ok := data["message"].(map[string]any)
 		if !ok || message["role"] != "assistant" {
 			return nil, nil
 		}
 		provider, _ := message["provider"].(string)
+		if !s.providerNames[provider] {
+			return nil, nil
+		}
 		modelID, _ := message["model"].(string)
 		// The discovered conclusion, not the route name, decides display normalization; an unresolvable
 		// model carries none and is left untouched.

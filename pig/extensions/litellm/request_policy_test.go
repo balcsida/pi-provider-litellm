@@ -277,3 +277,18 @@ func TestNormalizeThinkTags(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeThinkTagsSurvivesAMalformedTextBlock(t *testing.T) {
+	// A text block whose text is not a string passes through untouched; the block after it must not try to
+	// merge into it.
+	input := map[string]any{"role": "assistant", "provider": "litellm", "content": []any{
+		map[string]any{"type": "text", "text": 7.0},
+		map[string]any{"type": "text", "text": "a<think>b</think>c"},
+	}}
+	policy := &types.LiteLLMModelPolicy{NormalizeThinkTags: true}
+	got := normalizeThinkTags(input, map[string]bool{"litellm": true}, "openai-completions", policy)
+	sameJSON(t, "content", got["content"], `[{"type":"text","text":7},{"type":"text","text":"a"},{"type":"thinking","thinking":"b"},{"type":"text","text":"c"}]`)
+	if first := input["content"].([]any)[0].(map[string]any); first["text"] != 7.0 {
+		t.Fatalf("the input block was mutated: %v", first)
+	}
+}
