@@ -210,8 +210,7 @@ func TestReduceModelGroup(t *testing.T) {
 		})
 	}
 
-	// The Vitest case also passes `mode: 7`; the typed wire model cannot hold a non-string mode, so a
-	// null mode (also read as unknown) stands in for the unreadable one.
+	// TestMistypedWireFields ports the same case with the Vitest `mode: 7`; this one uses a null mode.
 	t.Run("treats an unreadable mode as unknown rather than as evidence of a non-chat deployment", func(t *testing.T) {
 		roomy := row(idMode("roomy", "chat"), info(func(i *types.ModelInfoDetails) { i.MaxInputTokens = f(200_000) }))
 		cramped := func(mode string) types.ModelInfoEntry {

@@ -32,11 +32,14 @@ func IsLiteLLMAPI(api string) bool {
 // NormalizeBaseURL is normalizeBaseUrl: it requires HTTPS (HTTP only for loopback hosts or when
 // allowInsecureHTTP is set), then strips trailing slashes and a trailing /v1.
 func NormalizeBaseURL(input string, allowInsecureHTTP bool) (string, error) {
+	// A *url.Error embeds the input, which may carry userinfo or tokens: never return it.
 	u, err := url.Parse(input)
-	if err != nil {
-		return "", err
+	if err != nil || u.Hostname() == "" {
+		return "", errors.New("LiteLLM base URL is invalid")
 	}
 	host := strings.ToLower(u.Hostname())
+	// Only "localhost", "::1" and dotted-quad 127.x.y.z count as loopback. The WHATWG URL parser
+	// also canonicalizes "127.1" and "2130706433" to 127.0.0.1; here they fail closed.
 	ip := net.ParseIP(host)
 	loopback := host == "localhost" || host == "::1" || (ip != nil && ip.To4() != nil && strings.HasPrefix(host, "127."))
 	if u.Scheme != "https" && !(u.Scheme == "http" && (loopback || allowInsecureHTTP)) {

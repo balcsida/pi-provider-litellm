@@ -2,11 +2,9 @@
 package types
 
 import (
-	"context"
 	"time"
 
 	"github.com/MichaelKinsy/PiG/ai"
-	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/backend"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/proxyversion"
 )
 
@@ -28,12 +26,23 @@ const (
 	APIOpenAIResponses   LiteLLMApi = "openai-responses"
 )
 
-// BackendFamily is the family type of package backend, re-exported for model fields.
-type BackendFamily = backend.Family
+// DiscoveryVersion is LITELLM_DISCOVERY_VERSION.
+const DiscoveryVersion = 6
+
+// BackendFamily is a backend vendor family; the empty string means no family.
+type BackendFamily string
+
+const (
+	FamilyClaude   BackendFamily = "claude"
+	FamilyDeepSeek BackendFamily = "deepseek"
+	FamilyGemini   BackendFamily = "gemini"
+	FamilyKimi     BackendFamily = "kimi"
+	FamilyOpenAI   BackendFamily = "openai"
+)
 
 type LiteLLMRuntimeAuth struct {
 	BaseURL           string            `json:"baseUrl"`
-	APIKey            string            `json:"apiKey"`
+	APIKey            string            `json:"-"`
 	Headers           map[string]string `json:"headers,omitempty"`
 	AllowInsecureHTTP bool              `json:"allowInsecureHttp,omitempty"`
 }
@@ -80,7 +89,7 @@ type DiscoveredModel struct {
 	LiteLLMPolicy                    *LiteLLMModelPolicy `json:"litellmPolicy,omitempty"`
 	LiteLLMResponsesReasoningControl bool                `json:"litellmResponsesReasoningControl,omitempty"`
 	LiteLLMBackendFamily             BackendFamily       `json:"litellmBackendFamily,omitempty"`
-	// LiteLLMDiscoveryVersion is backend.DiscoveryVersion when set.
+	// LiteLLMDiscoveryVersion is DiscoveryVersion when set.
 	LiteLLMDiscoveryVersion int `json:"litellmDiscoveryVersion,omitempty"`
 }
 
@@ -98,12 +107,11 @@ type DiscoveryResult struct {
 	ProxyVersion *proxyversion.Version `json:"proxyVersion,omitempty"`
 }
 
-// DiscoveryOptions: nil pointers are TypeScript `undefined`.
+// DiscoveryOptions: nil pointers are TypeScript `undefined`. It carries no context: AbortSignal
+// is the ctx first parameter of every discovery function.
 type DiscoveryOptions struct {
 	// Timeout nil means the default; a pointer to zero disables network discovery.
-	Timeout *time.Duration
-	// Context replaces AbortSignal.
-	Context           context.Context
+	Timeout           *time.Duration
 	Headers           map[string]string
 	AllowInsecureHTTP bool
 	// ModelsDev false reads only an existing cache at ModelsDevCachePath; with no cache path,
@@ -190,7 +198,7 @@ type AuthFileEntry struct {
 
 type ResolvedCredentials struct {
 	BaseURL      string `json:"baseUrl,omitempty"`
-	APIKey       string `json:"apiKey,omitempty"`
+	APIKey       string `json:"-"`
 	APIKeyConfig string `json:"apiKeyConfig,omitempty"`
 	// APIKeyFromGcloudADC: APIKey was minted from Google ADC rather than config, helper, or env.
 	APIKeyFromGcloudADC bool `json:"apiKeyFromGcloudAdc,omitempty"`

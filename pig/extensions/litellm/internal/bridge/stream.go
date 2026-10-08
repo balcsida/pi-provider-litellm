@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/MichaelKinsy/PiG/ai"
 	"github.com/MichaelKinsy/PiG/extensions/sdk"
@@ -47,7 +48,7 @@ func wrapStream(call ai.ModelsStreamFunction) sdk.ProviderStreamFunc {
 
 // decodeOptions turns the wire option object into ai.StreamOptions. encoding/json matches keys
 // case-insensitively, so apiKey, headers, env, maxTokens, sessionId, ... land on their fields;
-// keys without a field are ignored. An explicit temperature sets TemperatureSet.
+// keys without a field are ignored. A non-null temperature sets TemperatureSet.
 func decodeOptions(values map[string]any) (ai.StreamOptions, error) {
 	var options ai.StreamOptions
 	if len(values) == 0 {
@@ -63,7 +64,7 @@ func decodeOptions(values map[string]any) (ai.StreamOptions, error) {
 	if err := fromMap(clean, &options); err != nil {
 		return options, fmt.Errorf("decode stream options: %w", err)
 	}
-	_, options.TemperatureSet = clean["temperature"]
+	options.TemperatureSet = clean["temperature"] != nil
 	return options, nil
 }
 
@@ -109,12 +110,29 @@ func pump(ctx context.Context, cancel context.CancelFunc, events *ai.AssistantMe
 			return
 		}
 	}
-	reason, err := ai.StopReasonError, errors.New("provider stream ended without a terminal event")
 	if ctx.Err() != nil {
-		reason, err = ai.StopReasonAborted, context.Cause(ctx)
+		// Events stops at cancellation, but the driver still ends its stream with its own aborted
+		// message that carries the partial content: prefer it over a synthesized empty one.
+		settle, stop := context.WithTimeout(context.WithoutCancel(ctx), abortSettleTimeout)
+		defer stop()
+		if result, err := events.ResultContext(settle); err == nil && result != nil {
+			if wire, err := toMap(result); err == nil {
+				if result.StopReason == ai.StopReasonAborted || result.StopReason == ai.StopReasonError {
+					out.Push(map[string]any{"type": "error", "reason": string(result.StopReason), "error": wire})
+				} else {
+					out.Push(map[string]any{"type": "done", "reason": string(result.StopReason), "message": wire})
+				}
+				return
+			}
+		}
+		out.Push(errorEvent(model, ai.StopReasonAborted, context.Cause(ctx)))
+		return
 	}
-	out.Push(errorEvent(model, reason, err))
+	out.Push(errorEvent(model, ai.StopReasonError, errors.New("provider stream ended without a terminal event")))
 }
+
+// abortSettleTimeout bounds the wait for the driver's own terminal message after cancellation.
+const abortSettleTimeout = 2 * time.Second
 
 func errorEvent(model *ai.Model, reason ai.StopReason, cause error) map[string]any {
 	message := ai.AssistantMessage{Content: []ai.AssistantContentBlock{}, API: model.ProviderMeta.API, Provider: model.ProviderMeta.ProviderID,

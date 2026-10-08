@@ -29,7 +29,7 @@ func TestUpstreamReductionRegressions(t *testing.T) {
 		eq(t, ConservativeCostTiers([]ai.ModelCost{cost}), []ai.CostTier{tier(100, 10, 20, 30, 40)})
 	})
 
-	// The Vitest row uses `model_name: 42`; an unreadable name decodes only as the empty string here.
+	// TestMistypedWireFields ports the same case with the Vitest `model_name: 42`.
 	t.Run("filters rows without a readable route name before reducing limits and capabilities", func(t *testing.T) {
 		roomy := row(idMode("roomy", "chat"), info(func(i *types.ModelInfoDetails) { i.MaxInputTokens = f(200_000) }))
 		badName := row(name(""), idMode("bad-name", "chat"), info(func(i *types.ModelInfoDetails) {

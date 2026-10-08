@@ -4,37 +4,36 @@ package backend
 import (
 	"regexp"
 	"strings"
+
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
 )
 
 // DiscoveryVersion is LITELLM_DISCOVERY_VERSION.
-const DiscoveryVersion = 6
+const DiscoveryVersion = types.DiscoveryVersion
 
 // Family is BackendFamily; the empty string means no family.
-type Family string
+type Family = types.BackendFamily
 
 const (
-	FamilyClaude   Family = "claude"
-	FamilyDeepSeek Family = "deepseek"
-	FamilyGemini   Family = "gemini"
-	FamilyKimi     Family = "kimi"
-	FamilyOpenAI   Family = "openai"
+	FamilyClaude   = types.FamilyClaude
+	FamilyDeepSeek = types.FamilyDeepSeek
+	FamilyGemini   = types.FamilyGemini
+	FamilyKimi     = types.FamilyKimi
+	FamilyOpenAI   = types.FamilyOpenAI
 )
 
-// Row is BackendIdentityRow. Empty strings stand for absent fields.
-type Row struct {
-	ModelName     string
-	LiteLLMParams RowParams
-	ModelInfo     RowInfo
-}
+// fields flattens a /model/info entry into the strings backend identity reads; absent is "".
+type fields struct{ modelName, model, customProvider, baseModel, litellmProvider string }
 
-type RowParams struct {
-	Model             string
-	CustomLLMProvider string
-}
-
-type RowInfo struct {
-	BaseModel       string
-	LiteLLMProvider string
+func fieldsOf(entry types.ModelInfoEntry) fields {
+	f := fields{modelName: entry.ModelName}
+	if entry.LiteLLMParams != nil {
+		f.model, f.customProvider = entry.LiteLLMParams.Model, entry.LiteLLMParams.CustomLLMProvider
+	}
+	if entry.ModelInfo != nil {
+		f.baseModel, f.litellmProvider = entry.ModelInfo.BaseModel, entry.ModelInfo.LiteLLMProvider
+	}
+	return f
 }
 
 // Identity is BackendIdentity; Provider and Family are empty when absent.
@@ -115,8 +114,9 @@ func firstNonEmpty(values ...string) string {
 }
 
 // ResolveIdentity is resolveBackendIdentity; nil means the identity is withheld.
-func ResolveIdentity(row Row) *Identity {
-	raw := firstNonEmpty(wireString(row.ModelInfo.BaseModel), wireString(row.LiteLLMParams.Model), wireString(row.ModelName))
+func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
+	row := fieldsOf(entry)
+	raw := firstNonEmpty(wireString(row.baseModel), wireString(row.model), wireString(row.modelName))
 	if raw == "" {
 		return nil
 	}
@@ -131,7 +131,7 @@ func ResolveIdentity(row Row) *Identity {
 	}
 	// custom_llm_provider is provider evidence in its own right: a differing prefix is a
 	// conflict unless it is a known model-path segment.
-	customProvider := strings.ToLower(wireString(row.LiteLLMParams.CustomLLMProvider))
+	customProvider := strings.ToLower(wireString(row.customProvider))
 	if genericAdapters[customProvider] {
 		customProvider = ""
 	}
@@ -164,13 +164,14 @@ func ResolveIdentity(row Row) *Identity {
 }
 
 // ResolveCatalogProvider is resolveCatalogProvider; "" means undefined.
-func ResolveCatalogProvider(row Row) string {
-	identity := ResolveIdentity(row)
+func ResolveCatalogProvider(entry types.ModelInfoEntry) string {
+	row := fieldsOf(entry)
+	identity := ResolveIdentity(entry)
 	if identity != nil && identity.Provider != "" && !genericCatalogProviders[identity.Provider] {
 		return identity.Provider
 	}
-	reported := strings.ToLower(wireString(row.ModelInfo.LiteLLMProvider))
-	custom := strings.ToLower(wireString(row.LiteLLMParams.CustomLLMProvider))
+	reported := strings.ToLower(wireString(row.litellmProvider))
+	custom := strings.ToLower(wireString(row.customProvider))
 	if custom != "" && reported != "" && genericCatalogProviders[reported] {
 		return custom
 	}
@@ -181,10 +182,11 @@ func ResolveCatalogProvider(row Row) string {
 }
 
 // RoutesOnlyThrough is routesOnlyThrough: every declared routing signal must name an allowed provider.
-func RoutesOnlyThrough(row Row, providers map[string]bool) bool {
-	model := wireString(row.LiteLLMParams.Model)
+func RoutesOnlyThrough(entry types.ModelInfoEntry, providers map[string]bool) bool {
+	row := fieldsOf(entry)
+	model := wireString(row.model)
 	var routing []string
-	if custom := strings.ToLower(strings.TrimSpace(wireString(row.LiteLLMParams.CustomLLMProvider))); custom != "" {
+	if custom := strings.ToLower(strings.TrimSpace(wireString(row.customProvider))); custom != "" {
 		routing = append(routing, custom)
 	}
 	if slash := strings.Index(model, "/"); slash > 0 {

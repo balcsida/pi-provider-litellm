@@ -116,6 +116,23 @@ type modelsCatalogRecord struct {
 	Compat                        *ai.ModelCompat                  `json:"compat,omitempty"`
 }
 
+// catalogKeys are the wire keys of modelsCatalogRecord: the only keys an overlay may set or delete.
+var catalogKeys = []string{"type", "id", "name", "api", "provider", "baseUrl", "reasoning", "thinkingLevelMap", "input", "inputLimits",
+	"cost", "promptCache", "contextWindow", "maxTokens", "samplingParams", "samplingParamsByThinkingLevel", "headers", "compat"}
+
+// withProvider returns a shallow copy of wire with provider defaulted to providerID: the host sends
+// filterModels extension.ProviderModelConfig records, which have no provider field.
+func withProvider(wire map[string]any, providerID string) map[string]any {
+	out := make(map[string]any, len(wire)+1)
+	for key, value := range wire {
+		out[key] = value
+	}
+	if out["provider"] == nil {
+		out["provider"] = providerID
+	}
+	return out
+}
+
 func encodeModel(m *ai.Model) (map[string]any, error) {
 	caps := m.Capabilities
 	return toMap(modelsCatalogRecord{
@@ -163,8 +180,8 @@ func decodeModel(wire map[string]any, providerID string) (*ai.Model, error) {
 	return chat, nil
 }
 
-// streamModel decodes the model of a stream request under its own provider id, which is what the
-// host sends (extension.ModelInfo) and may be an alias of p.ID.
+// streamModel decodes the model of a stream request under its own provider id, which the host
+// always sends (extension.ModelInfo, coding/extension/model_info.go:44) and may be an alias of p.ID.
 func streamModel(wire map[string]any) (*ai.Model, error) {
 	providerID, _ := wire["provider"].(string)
 	if providerID == "" {
@@ -184,7 +201,7 @@ func filterModels(p *ai.ModelsProvider, wire []map[string]any, credentialWire ma
 	decoded := make([]*ai.Model, len(wire))
 	byPointer := make(map[*ai.Model]map[string]any, len(wire))
 	for i, w := range wire {
-		if decoded[i], err = decodeModel(w, p.ID); err != nil {
+		if decoded[i], err = decodeModel(withProvider(w, p.ID), p.ID); err != nil {
 			return nil, err
 		}
 		byPointer[decoded[i]] = w
@@ -197,8 +214,14 @@ func filterModels(p *ai.ModelsProvider, wire []map[string]any, credentialWire ma
 			return nil, err
 		}
 		if original, ok := byPointer[m]; ok {
-			for key, value := range encoded {
-				original[key] = value
+			for _, key := range catalogKeys {
+				if value, present := encoded[key]; present {
+					if key != "provider" || original[key] != nil {
+						original[key] = value
+					}
+				} else {
+					delete(original, key)
+				}
 			}
 			encoded = original
 		}

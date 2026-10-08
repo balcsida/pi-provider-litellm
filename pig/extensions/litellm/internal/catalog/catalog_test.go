@@ -264,3 +264,39 @@ func TestLoadPublicCatalog_RefreshesFutureDatedDiskCache(t *testing.T) {
 	}
 	mustLookup(t, c, "bedrock", "anthropic.claude-sonnet-4-6-v1:0")
 }
+
+func TestDrain_WaitsForStaleCacheRefresh(t *testing.T) {
+	release := make(chan struct{})
+	var started atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started.Add(1)
+		<-release
+		_ = json.NewEncoder(w).Encode(modelsDevFixture)
+	}))
+	t.Cleanup(server.Close)
+	path := filepath.Join(t.TempDir(), "models-dev.json")
+	data, _ := json.Marshal(map[string]any{"fetchedAt": 1, "catalog": modelsDevFixture})
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	offline := false
+	LoadPublicCatalog(context.Background(), LoadPublicCatalogOptions{Client: server.Client(), URL: server.URL, CachePath: path, Offline: &offline})
+
+	expired, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := Drain(expired); err != context.DeadlineExceeded {
+		t.Fatalf("Drain with blocked refresh = %v, want deadline exceeded", err)
+	}
+	close(release)
+	done, cancelDone := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDone()
+	if err := Drain(done); err != nil {
+		t.Fatalf("Drain after release = %v", err)
+	}
+	if started.Load() != 1 {
+		t.Fatalf("refreshes = %d", started.Load())
+	}
+	if err := Drain(context.Background()); err != nil {
+		t.Fatalf("idle Drain = %v", err)
+	}
+}

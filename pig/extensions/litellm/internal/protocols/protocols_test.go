@@ -80,3 +80,24 @@ func TestIsLiteLLMAPI(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeBaseURL_ErrorsDoNotLeakInput(t *testing.T) {
+	for _, in := range []string{"https://user:s3cret@host\x7f/v1", "http://user:s3cret@litellm.example.com", "https://", "https:/x.com", "https://:443"} {
+		_, err := NormalizeBaseURL(in, false)
+		if err == nil {
+			t.Fatalf("%q: expected error", in)
+		}
+		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "litellm.example.com") {
+			t.Fatalf("%q: error leaks input: %v", in, err)
+		}
+	}
+}
+
+// Fail-closed difference from WHATWG URL: these spell 127.0.0.1 but are not treated as loopback.
+func TestNormalizeBaseURL_NonCanonicalLoopbackIsNotLoopback(t *testing.T) {
+	for _, in := range []string{"http://127.1:4000", "http://2130706433:4000"} {
+		if _, err := NormalizeBaseURL(in, false); err == nil {
+			t.Fatalf("%q accepted as loopback", in)
+		}
+	}
+}

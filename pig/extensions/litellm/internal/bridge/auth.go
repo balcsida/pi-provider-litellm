@@ -10,9 +10,10 @@ import (
 // wrapAuth maps ai.ProviderAuth to sdk.ProviderAuth. Not mappable:
 //   - an APIKeyAuth without Resolve, or an OAuthAuth without Login, Refresh or ToAuth, is omitted
 //     because the SDK requires those callbacks (sdk/provider.go providerDeclaration);
-//   - sdk.AuthContext.Env/FileExists return errors that ai.AuthContext has no slot for; an error
-//     reads as "absent";
-//   - ai.AuthInteraction.Notify has no error return, so a failed notification is dropped;
+//   - sdk.AuthContext.Env/FileExists return errors that ai.AuthContext has no slot for; the first
+//     one is recorded (hostErrors) and returned from Resolve/Check instead of a false "absent";
+//   - ai.AuthInteraction.Notify has no error return, so the first failed notification is recorded
+//     and returned from Login once it finishes;
 //   - ai.LoginOptions (GetDeviceID) has no SDK counterpart and is passed zero.
 func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 	var out sdk.ProviderAuth
@@ -24,8 +25,9 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 				if err != nil {
 					return nil, err
 				}
-				result, err := a.Resolve(signal(in.Signal), ai.APIKeyAuthInput{Ctx: authContext(in.Ctx), Credential: credential})
-				if err != nil || result == nil {
+				var host hostErrors
+				result, err := a.Resolve(signal(in.Signal), ai.APIKeyAuthInput{Ctx: host.authContext(in.Ctx), Credential: credential})
+				if err = host.or(err); err != nil || result == nil {
 					return nil, err
 				}
 				return sdkAuthResult(result), nil
@@ -37,8 +39,9 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 				if err != nil {
 					return nil, err
 				}
-				check, err := a.Check(signal(in.Signal), ai.APIKeyAuthInput{Ctx: authContext(in.Ctx), Credential: credential})
-				if err != nil || check == nil {
+				var host hostErrors
+				check, err := a.Check(signal(in.Signal), ai.APIKeyAuthInput{Ctx: host.authContext(in.Ctx), Credential: credential})
+				if err = host.or(err); err != nil || check == nil {
 					return nil, err
 				}
 				return &sdk.AuthCheck{Type: string(check.Type), Source: optional(check.Source)}, nil
@@ -46,8 +49,9 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 		}
 		if a.Login != nil {
 			out.APIKey.Login = func(in sdk.AuthInteraction) (map[string]any, error) {
-				credential, err := a.Login(signal(in.Signal), interaction(in))
-				if err != nil {
+				var host hostErrors
+				credential, err := a.Login(signal(in.Signal), host.interaction(in))
+				if err = host.or(err); err != nil {
 					return nil, err
 				}
 				return toMap(credential)
@@ -60,8 +64,9 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 			IsSubscription: &o.IsSubscription,
 			LoginLabel:     optional(o.LoginLabel),
 			Login: func(in sdk.AuthInteraction) (map[string]any, error) {
-				credential, err := o.Login(signal(in.Signal), interaction(in), ai.LoginOptions{})
-				if err != nil {
+				var host hostErrors
+				credential, err := o.Login(signal(in.Signal), host.interaction(in), ai.LoginOptions{})
+				if err = host.or(err); err != nil {
 					return nil, err
 				}
 				return toMap(credential)
@@ -107,14 +112,35 @@ func optional(s string) *string {
 	return &s
 }
 
-func authContext(in sdk.AuthContext) ai.AuthContext {
+// hostErrors records the first failed host callback that the ai callback signatures cannot return.
+type hostErrors struct{ first error }
+
+func (h *hostErrors) record(err error) {
+	if h.first == nil {
+		h.first = err
+	}
+}
+
+// or prefers err, then the first recorded host error.
+func (h *hostErrors) or(err error) error {
+	if err != nil {
+		return err
+	}
+	return h.first
+}
+
+func (h *hostErrors) authContext(in sdk.AuthContext) ai.AuthContext {
 	return ai.AuthContext{
 		Env: func(name string) (string, bool) {
 			if in.Env == nil {
 				return "", false
 			}
 			value, err := in.Env(name)
-			if err != nil || value == nil {
+			if err != nil {
+				h.record(err)
+				return "", false
+			}
+			if value == nil {
 				return "", false
 			}
 			return *value, true
@@ -124,12 +150,13 @@ func authContext(in sdk.AuthContext) ai.AuthContext {
 				return false
 			}
 			ok, err := in.FileExists(path)
+			h.record(err)
 			return err == nil && ok
 		},
 	}
 }
 
-func interaction(in sdk.AuthInteraction) ai.AuthInteraction {
+func (h *hostErrors) interaction(in sdk.AuthInteraction) ai.AuthInteraction {
 	return ai.AuthInteraction{
 		Prompt: func(_ context.Context, prompt ai.AuthPrompt) (string, error) {
 			wire, err := toMap(prompt)
@@ -142,8 +169,12 @@ func interaction(in sdk.AuthInteraction) ai.AuthInteraction {
 			if in.Notify == nil {
 				return
 			}
-			if wire, err := toMap(event); err == nil {
-				_ = in.Notify(wire)
+			wire, err := toMap(event)
+			if err == nil {
+				err = in.Notify(wire)
+			}
+			if err != nil {
+				h.record(err)
 			}
 		},
 	}

@@ -1214,21 +1214,17 @@ type kimiEvidence struct {
 	identified, forcedThinking, moonshotTransport bool
 }
 
-func backendRow(entry types.ModelInfoEntry) backend.Row {
-	row := backend.Row{ModelName: entry.ModelName}
+func kimiDeploymentEvidence(entry types.ModelInfoEntry) kimiEvidence {
+	evidence := kimiEvidence{}
+	var params types.ModelInfoParams
+	var details types.ModelInfoDetails
 	if entry.LiteLLMParams != nil {
-		row.LiteLLMParams = backend.RowParams{Model: entry.LiteLLMParams.Model, CustomLLMProvider: entry.LiteLLMParams.CustomLLMProvider}
+		params = *entry.LiteLLMParams
 	}
 	if entry.ModelInfo != nil {
-		row.ModelInfo = backend.RowInfo{BaseModel: entry.ModelInfo.BaseModel, LiteLLMProvider: entry.ModelInfo.LiteLLMProvider}
+		details = *entry.ModelInfo
 	}
-	return row
-}
-
-func kimiDeploymentEvidence(entry types.ModelInfoEntry) kimiEvidence {
-	row := backendRow(entry)
-	evidence := kimiEvidence{}
-	for _, candidate := range []string{row.LiteLLMParams.Model, row.LiteLLMParams.CustomLLMProvider, row.ModelInfo.BaseModel, row.ModelInfo.LiteLLMProvider} {
+	for _, candidate := range []string{params.Model, params.CustomLLMProvider, details.BaseModel, details.LiteLLMProvider} {
 		identity := strings.TrimSpace(candidate)
 		if identity != "" && kimiFamilyPattern.MatchString(identity) {
 			evidence.identified = true
@@ -1237,7 +1233,7 @@ func kimiDeploymentEvidence(entry types.ModelInfoEntry) kimiEvidence {
 	}
 	// Visibility parameters are accepted by Moonshot's API, not by every host that serves a Kimi
 	// model. Both declared routing signals must name Moonshot.
-	evidence.moonshotTransport = backend.RoutesOnlyThrough(row, moonshotRoutes)
+	evidence.moonshotTransport = backend.RoutesOnlyThrough(entry, moonshotRoutes)
 	return evidence
 }
 

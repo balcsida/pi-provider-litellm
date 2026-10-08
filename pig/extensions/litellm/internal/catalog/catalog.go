@@ -406,6 +406,50 @@ func findPiModel(provider string, ids []string) *ai.GeneratedModel {
 	return nil
 }
 
+var (
+	backgroundMu       sync.Mutex
+	backgroundInFlight = map[*refreshCall]struct{}{}
+)
+
+// backgroundRefresh is `void refreshCatalog(...)`: the caller does not wait, and the stale cache
+// keeps serving. The fetch outlives ctx's cancellation but is bounded by options.Timeout, and
+// Drain waits for it.
+func backgroundRefresh(ctx context.Context, key string, options LoadPublicCatalogOptions) {
+	call := &refreshCall{done: make(chan struct{})}
+	backgroundMu.Lock()
+	backgroundInFlight[call] = struct{}{}
+	backgroundMu.Unlock()
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			backgroundMu.Lock()
+			delete(backgroundInFlight, call)
+			backgroundMu.Unlock()
+			close(call.done)
+		}()
+		refreshCatalog(ctx, key, options)
+	}()
+}
+
+// Drain waits for in-flight background refreshes, returning ctx.Err() if ctx ends first.
+// The extension calls it on session shutdown.
+func Drain(ctx context.Context) error {
+	backgroundMu.Lock()
+	pending := make([]*refreshCall, 0, len(backgroundInFlight))
+	for call := range backgroundInFlight {
+		pending = append(pending, call)
+	}
+	backgroundMu.Unlock()
+	for _, call := range pending {
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 type loaded struct{ catalog modelsDevCatalog }
 
 // LoadPublicCatalog reads the models.dev cache and, unless offline, refreshes it. ctx bounds the fetches.
@@ -439,8 +483,7 @@ func LoadPublicCatalog(ctx context.Context, options LoadPublicCatalogOptions) Pu
 		if cache == nil {
 			catalog = refreshCatalog(ctx, key, options)
 		} else if nowMillis()-cache.fetchedAt >= float64(modelsDevCacheTTL.Milliseconds()) {
-			// ponytail: detached refresh bounded by options.Timeout; add an owner/WaitGroup if shutdown must drain it.
-			go refreshCatalog(ctx, key, options)
+			backgroundRefresh(ctx, key, options)
 		}
 	}
 	return loaded{catalog}
