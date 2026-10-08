@@ -98,6 +98,25 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
 
+## Status
+
+All six phases are ported: discovery and model-group reduction, the native provider with the request guard and
+refresh wrapper, credentials and provider auth, request and response policy hooks with cost tracking, the login
+flows (CLI PKCE, direct OIDC, CLI SSO, pasted token) with refresh, budget status, Skills tools, MCP registration,
+the PiG package manifest, an example fused Piglet and a CI workflow. The Go suite is derived from the Vitest cases
+(about 1,900 tests and subtests) and reads the shared `tests/fixtures`.
+
+Intentional differences from the TypeScript extension, all forced by PiG:
+
+- Extension-only model fields live in the `litellm-model-policies.json` sidecar (see Design decisions), and the
+  discovery-version staleness gate reads the sidecar instead of the stored model.
+- `model_select` is not fired by PiG 0.4.1, so the budget status line tracks the active provider from
+  `before_agent_start`, `turn_end` and `session_start`; a provider switch while idle shows on the next prompt.
+- `ctx.ui.setStatus(undefined)` has no SDK equivalent; an empty string clears the budget status.
+- A JSON `null` under `litellm.oidc` is treated as unset rather than rejected, because the decoded settings map
+  cannot distinguish null from absent.
+- Diagnostics the TypeScript writes to stderr go through one reporter; in a fused binary they still reach stderr.
+
 ## Known PiG 0.4.1 issues
 
 - `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
