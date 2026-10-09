@@ -2724,6 +2724,8 @@ describe("direct OIDC login", () => {
     tokenBody?: Record<string, unknown>;
     token?: () => Response;
     callbackQuery?: (state: string) => string;
+    answer?: (prompt: Parameters<AuthInteraction["prompt"]>[0]) => string | undefined;
+    storedCredential?: Record<string, unknown>;
   };
 
   function idToken(claims: Record<string, unknown>): string {
@@ -2738,6 +2740,8 @@ describe("direct OIDC login", () => {
       join(agentDir, "settings.json"),
       JSON.stringify({ litellm: { providers: { litellm: { ...options.providerSettings, oidc } } } }),
     );
+    if (options.storedCredential)
+      await writeFile(join(agentDir, "auth.json"), JSON.stringify({ litellm: options.storedCredential }));
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
     process.env.LITELLM_HEADERS = '{"x-gateway-secret":"gateway-secret"}';
     const extension = await loadExtension(agentDir);
@@ -2790,9 +2794,13 @@ describe("direct OIDC login", () => {
       }
       throw new Error(`unexpected URL: ${url}`);
     });
+    const prompts: string[] = [];
     const login = pi.providers[0]!.auth.oauth!.login(
       interaction(
-        async (prompt) => ("placeholder" in prompt && prompt.placeholder ? proxyUrl : ""),
+        async (prompt) => {
+          prompts.push(prompt.message);
+          return options.answer?.(prompt) ?? ("placeholder" in prompt && prompt.placeholder ? proxyUrl : "");
+        },
         (event) => {
           if (event.type !== "auth_url") return;
           authorizationUrl = new URL(event.url);
@@ -2807,7 +2815,7 @@ describe("direct OIDC login", () => {
       (credential) => ({ credential, error: undefined }),
       (error: Error) => ({ credential: undefined, error }),
     );
-    return { ...outcome, pi, requests, issued, authorizationUrl, callbackResponse };
+    return { ...outcome, pi, requests, issued, authorizationUrl, callbackResponse, prompts };
   }
 
   async function listenOnFreePort(): Promise<Server> {
@@ -2822,11 +2830,13 @@ describe("direct OIDC login", () => {
 
   it("signs in with the identity provider and stores its id_token", async () => {
     const exp = Math.floor(Date.now() / 1000) + 3600;
-    const { credential, error, pi, requests, issued, authorizationUrl, callbackResponse } = await runOidcLogin({
-      claims: { exp },
-    });
+    const { credential, error, pi, requests, issued, authorizationUrl, callbackResponse, prompts } = await runOidcLogin(
+      { claims: { exp } },
+    );
 
     expect(error).toBeUndefined();
+    // A configured `oidc` leaves only the proxy URL to ask for: there is no sign-in choice to make.
+    expect(prompts).toEqual(["Enter LiteLLM proxy URL (no trailing /v1):"]);
     // Only the IdP is contacted, without redirects: no CLI-auth discovery, /sso/* or /key/generate on the proxy.
     expect(requests.map(({ url, method, redirect }) => ({ url, method, redirect }))).toEqual([
       { url: discoveryUrl, method: "GET", redirect: "manual" },
@@ -2876,6 +2886,7 @@ describe("direct OIDC login", () => {
       clientId,
       tokenEndpoint,
       subject: "user-123",
+      scope: "openid",
     });
     await expect(pi.providers[0]!.auth.oauth!.toAuth(credential!)).resolves.toMatchObject({ apiKey: issued[0] });
   }, 15_000);
@@ -3039,6 +3050,119 @@ describe("direct OIDC login", () => {
     expect(requests).toEqual([]);
   });
 
+  describe("entered at login", () => {
+    const ISSUER_PROMPT = "Enter your identity provider's issuer URL:";
+    const CLIENT_ID_PROMPT = "Enter the OAuth client ID (a public client without a secret):";
+    const SCOPE_PROMPT = "Enter scopes (blank for openid):";
+
+    // Answers the way a user signing in with their own identity provider would.
+    function ownIdp(answers: Record<string, string> = {}) {
+      const byMessage: Record<string, string> = {
+        "Sign in with:": "oidc",
+        [ISSUER_PROMPT]: issuer,
+        [CLIENT_ID_PROMPT]: ` ${clientId} `, // padded like a paste
+        [SCOPE_PROMPT]: "",
+        ...answers,
+      };
+      return (prompt: Parameters<AuthInteraction["prompt"]>[0]) => byMessage[prompt.message];
+    }
+
+    it.each([
+      ["the entered scopes", "openid offline_access", "openid offline_access"],
+      ["openid for blank scopes", "", "openid"],
+    ])("signs in with the identity provider and client ID, using %s", async (_name, entered, scope) => {
+      const { credential, error, requests, authorizationUrl, prompts } = await runOidcLogin({
+        oidc: undefined,
+        answer: ownIdp({ [SCOPE_PROMPT]: entered }),
+      });
+
+      expect(error).toBeUndefined();
+      expect(prompts).toEqual([
+        "Enter LiteLLM proxy URL (no trailing /v1):",
+        "Sign in with:",
+        ISSUER_PROMPT,
+        CLIENT_ID_PROMPT,
+        SCOPE_PROMPT,
+      ]);
+      // Only the IdP is contacted: no CLI-auth discovery, /sso/* or /key/generate on the proxy.
+      expect(requests.map(({ url }) => url)).toEqual([discoveryUrl, tokenEndpoint]);
+      expect(authorizationUrl?.searchParams.get("client_id")).toBe(clientId);
+      expect(authorizationUrl?.searchParams.get("scope")).toBe(scope);
+      expect(credential).toMatchObject({ flow: "oidc_pkce", baseUrl: proxyUrl, issuer, clientId, scope });
+    });
+
+    const previousLogin = {
+      type: "oauth",
+      access: "expired-id-token",
+      refresh: "",
+      expires: 0,
+      baseUrl: proxyUrl,
+      flow: "oidc_pkce",
+      issuer,
+      clientId,
+      tokenEndpoint,
+      subject: "user-123",
+      scope: "openid offline_access",
+    };
+
+    it("offers the previous identity provider login first", async () => {
+      let offered: string[] | undefined;
+      const { error, prompts, authorizationUrl } = await runOidcLogin({
+        oidc: undefined,
+        storedCredential: previousLogin,
+        answer: (prompt) => {
+          if (prompt.type !== "select") return undefined;
+          if (prompt.message === "Sign in with:") offered = prompt.options.map((option) => option.label);
+          return prompt.options[0]!.id;
+        },
+      });
+
+      expect(error).toBeUndefined();
+      // One keypress each for the proxy URL and the identity provider.
+      expect(prompts).toEqual(["LiteLLM proxy URL:", "Sign in with:"]);
+      expect(offered).toEqual([
+        `${issuer} with client ${clientId} (previous login)`,
+        "LiteLLM SSO",
+        "Your identity provider (OIDC client ID)…",
+      ]);
+      expect(authorizationUrl?.searchParams.get("client_id")).toBe(clientId);
+      expect(authorizationUrl?.searchParams.get("scope")).toBe("openid offline_access");
+    });
+
+    // Enter picks the first option, so a guess here would send the IdP's token elsewhere or drop scopes.
+    it.each<[string, Record<string, unknown>]>([
+      ["a login to another proxy", { baseUrl: "https://other.example.com" }],
+      ["a login that recorded no scope", { scope: undefined }],
+    ])("does not offer %s again", async (_name, override) => {
+      let offered: string[] | undefined;
+      const answer = ownIdp({ "LiteLLM proxy URL:": proxyUrl });
+      const { error } = await runOidcLogin({
+        oidc: undefined,
+        providerSettings: { baseUrl: proxyUrl },
+        storedCredential: { ...previousLogin, ...override },
+        answer: (prompt) => {
+          if (prompt.type === "select" && prompt.message === "Sign in with:")
+            offered = prompt.options.map((option) => option.label);
+          return answer(prompt);
+        },
+      });
+
+      expect(error).toBeUndefined();
+      expect(offered).toEqual(["LiteLLM SSO", "Your identity provider (OIDC client ID)…"]);
+    });
+
+    it.each([
+      ["an http issuer", ISSUER_PROMPT, "http://idp.example.com", "oidc.issuer"],
+      ["a client ID with a space", CLIENT_ID_PROMPT, "example client", "oidc.clientId"],
+      ["scopes without openid", SCOPE_PROMPT, "profile email", "oidc.scope"],
+    ])("fails login without any request for %s", async (_name, message, answer, field) => {
+      const { error, requests } = await runOidcLogin({ oidc: undefined, answer: ownIdp({ [message]: answer }) });
+
+      expect(error?.message).toMatch(new RegExp(`^Invalid LiteLLM ${field.replace(".", "\\.")} setting: `));
+      expect(requests).toEqual([]);
+    });
+  });
+
   describe("refresh", () => {
     const now = 1_800_000_000_000;
     const exp = now / 1000 + 3600;
@@ -3054,6 +3178,7 @@ describe("direct OIDC login", () => {
       clientId,
       tokenEndpoint,
       subject: "user-123",
+      scope: "openid offline_access",
       ...overrides,
     });
 
@@ -3233,7 +3358,7 @@ describe("login base URL reuse", () => {
     const credential = await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         messages.push(options.message);
-        if (options.options) return options.options.find((option) => option.id === STORED_URL)!.id;
+        if (options.options) return options.options.find((option) => [STORED_URL, "litellm"].includes(option.id))!.id;
         return options.type === "secret" ? "sk-sso-token" : "n";
       },
       signal: new AbortController().signal,
@@ -3250,23 +3375,24 @@ describe("login base URL reuse", () => {
     const pi = createPi();
     await extension(pi);
 
-    let offered: readonly { id: string; label: string; description?: string }[] | undefined;
+    const offered: (readonly { id: string; label: string }[])[] = [];
     await loginOAuth(pi.providers[0]!, {
       onPrompt: async (options) => {
         if (options.options) {
-          offered = options.options;
-          return options.options.find((option) => option.id === STORED_URL)!.id;
+          offered.push(options.options);
+          return options.options.find((option) => [STORED_URL, "litellm"].includes(option.id))!.id;
         }
         return options.type === "secret" ? "sk-sso-token" : "n";
       },
       signal: new AbortController().signal,
     });
 
-    expect(offered?.map((option) => option.label)).toEqual([
-      `${STORED_URL} (previous login)`,
-      "Enter a different URL…",
+    expect(offered.map((options) => options.map((option) => option.label))).toEqual([
+      [`${STORED_URL} (previous login)`, "Enter a different URL…"],
+      // A previous LiteLLM SSO login leaves no identity provider to offer again.
+      ["LiteLLM SSO", "Your identity provider (OIDC client ID)…"],
     ]);
-    expect(offered?.[0]?.id).toBe(STORED_URL);
+    expect(offered[0]?.[0]?.id).toBe(STORED_URL);
   });
 
   it("still asks for a URL when the offered one is declined", async () => {

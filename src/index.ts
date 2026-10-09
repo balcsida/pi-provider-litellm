@@ -993,6 +993,7 @@ type OidcCredentials = OAuthCredentials & {
   clientId: string;
   tokenEndpoint: string;
   subject: string;
+  scope: string;
 };
 
 type OidcTokenResult =
@@ -1158,6 +1159,7 @@ async function loginOidc(interaction: AuthInteraction, baseUrl: string, config: 
         clientId: config.clientId,
         tokenEndpoint: discovery.tokenEndpoint,
         subject: result.token.subject,
+        scope: config.scope,
       };
       return { ...credential, type: "oauth" };
     },
@@ -1312,11 +1314,69 @@ async function loginWithPastedToken(
   return { type: "oauth", access, refresh: "", expires, baseUrl };
 }
 
+const SIGN_IN_OIDC = "oidc";
+const SIGN_IN_PREVIOUS_OIDC = "previous-oidc";
+
+/**
+ * The stored login's identity provider, so signing in with it again takes one keypress. Enter picks it, so only a
+ * login to this proxy that recorded its scope qualifies: a guess could hand the IdP's token to another proxy or drop
+ * `offline_access`.
+ */
+function previousOidcConfig(definition: ProviderDefinition, baseUrl: string): OidcConfig | undefined {
+  const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
+  if (
+    stored?.type !== "oauth" ||
+    stored.flow !== OIDC_FLOW ||
+    stored.baseUrl !== baseUrl ||
+    typeof stored.scope !== "string"
+  )
+    return undefined;
+  try {
+    return parseOidcConfig({ issuer: stored.issuer, clientId: stored.clientId, scope: stored.scope });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Without an `oidc` setting, asks whether to sign in through LiteLLM or directly with an identity provider
+ * where the user has a public client. Any answer but an identity provider selects the LiteLLM-hosted flows.
+ */
+async function promptOidcConfig(
+  interaction: AuthInteraction,
+  definition: ProviderDefinition,
+  baseUrl: string,
+): Promise<OidcConfig | undefined> {
+  const previous = previousOidcConfig(definition, baseUrl);
+  const choice = await interaction.prompt({
+    type: "select",
+    message: "Sign in with:",
+    options: [
+      ...(previous
+        ? [{ id: SIGN_IN_PREVIOUS_OIDC, label: `${previous.issuer} with client ${previous.clientId} (previous login)` }]
+        : []),
+      { id: "litellm", label: "LiteLLM SSO" },
+      { id: SIGN_IN_OIDC, label: "Your identity provider (OIDC client ID)…" },
+    ],
+  });
+  if (choice === SIGN_IN_PREVIOUS_OIDC) return previous;
+  if (choice !== SIGN_IN_OIDC) return undefined;
+  const ask = async (message: string, placeholder?: string) =>
+    (await interaction.prompt({ type: "text", message, placeholder })).trim();
+  // Checked like the setting. redirectPorts stays settings-only, for IdPs that pin exact loopback ports.
+  return parseOidcConfig({
+    issuer: await ask("Enter your identity provider's issuer URL:", "https://idp.example.com"),
+    clientId: await ask("Enter the OAuth client ID (a public client without a secret):"),
+    scope: (await ask("Enter scopes (blank for openid):", "openid offline_access")) || undefined,
+  });
+}
+
 async function loginOAuth(interaction: AuthInteraction, definition: ProviderDefinition): Promise<OAuthCredential> {
-  const oidc = definition.oidc === undefined ? undefined : parseOidcConfig(definition.oidc);
+  const configured = definition.oidc === undefined ? undefined : parseOidcConfig(definition.oidc);
   const baseUrl = await promptBaseUrl(interaction, definition);
   // Direct OIDC sends nothing to the proxy. The IdP is never derived from it either: the proxy's own OAuth
   // metadata describes LiteLLM's authorization server, not the IdP that signs the JWTs it accepts.
+  const oidc = configured ?? (await promptOidcConfig(interaction, definition, baseUrl));
   if (oidc) return loginOidc(interaction, baseUrl, oidc);
   const headers = resolveHeaders(definition);
   const discovery = await discoverPkce(baseUrl, interaction.signal, headers);
