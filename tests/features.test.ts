@@ -233,6 +233,7 @@ describe("feature parity", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [] });
       if (url.startsWith("https://fresh.example.com/")) return jsonResponse(200, []);
       throw new Error(`unexpected URL: ${url}`);
     });
@@ -380,7 +381,9 @@ describe("feature parity", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "gpt-4o", litellm_params: { model: "openai/gpt-4o" } }] });
+      }
       throw new Error(`unexpected URL: ${url}`);
     });
 

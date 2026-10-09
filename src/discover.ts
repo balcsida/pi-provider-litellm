@@ -1167,9 +1167,12 @@ export async function discoverModels(
   const progress = options.silent ? undefined : options.onProgress;
   progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
-  if (infoResult.ok) {
+  // An empty `/model/info` list is treated like an unavailable endpoint: some proxies
+  // answer 200 with no rows for keys that can still list models through `/v1/models`.
+  const infoEntries = infoResult.ok ? (infoResult.data.data ?? []) : [];
+  if (infoEntries.length > 0) {
     const groups = new Map<string, ModelInfoEntry[]>();
-    for (const entry of infoResult.data.data ?? []) {
+    for (const entry of infoEntries) {
       // A route without a readable public name cannot be grouped or addressed.
       const route = wireString(entry.model_name);
       if (!route) continue;
@@ -1296,10 +1299,10 @@ export async function discoverModels(
     }
     return { source: "model_info", models, ...(proxyVersion ? { proxyVersion } : {}) };
   }
-  if (![401, 403, 404].includes(infoResult.status)) {
+  if (!infoResult.ok && ![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);
   }
-  progress?.("/model/info unavailable, trying /v1/models...");
+  progress?.("/model/info unavailable or empty, trying /v1/models...");
   const listResult = await fetchJson<ModelsListResponse>(`${base}/v1/models`, apiKey, options);
   if (!listResult.ok) {
     if ([401, 403, 404].includes(listResult.status)) {
