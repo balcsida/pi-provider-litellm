@@ -54,7 +54,7 @@ If your LiteLLM proxy supports SSO/OAuth authentication, Pi selects its supporte
 
 1. Run `/login litellm` inside pi and select `Sign in with LiteLLM SSO`
 2. Confirm the offered proxy URL, or enter one if this is the first login
-3. Choose `LiteLLM SSO`, or sign in with your own identity provider (see [Direct OIDC login](#direct-oidc-login))
+3. Without an `oidc` setting, choose `LiteLLM SSO` or your own identity provider (see [Direct OIDC login](#direct-oidc-login))
 4. Complete sign-in in the browser Pi opens, then return to Pi
 
 With `LiteLLM SSO`, Pi first checks `/.well-known/litellm-cli-auth`. A proxy exposing the supported CLI-auth contract uses authorization code + PKCE (`S256`) with a temporary `127.0.0.1` callback; the browser must run on the same machine as Pi. Advertised endpoints must stay on the proxy's origin, and discovery, registration, and token requests do not follow HTTP redirects. Invalid discovery stops login.
@@ -77,7 +77,7 @@ Prerequisites:
 - The IdP has a public client (no client secret) registered for authorization code + PKCE with the loopback redirect `http://127.0.0.1:<port>/callback`.
 - The browser runs on the same machine as Pi.
 
-To sign in without configuring anything, choose `Your identity provider (OIDC client ID)…` after confirming the proxy URL, then enter the issuer URL, the client ID, and the scopes (blank for `openid`). Pi checks them like the settings below and stores them with the credential, so the next login offers the same identity provider first. The login prompt does not ask for `redirectPorts`; an IdP that only accepts exact pre-registered redirect URIs needs the setting.
+To sign in without configuring anything, choose `Your identity provider (OIDC client ID)…` after confirming the proxy URL, then enter the issuer URL, the client ID, and the scopes (blank for `openid`). Pi checks them like the settings below and stores them with the credential, so the next login to the same proxy offers the same identity provider first. The login prompt does not ask for `redirectPorts`; an IdP that only accepts exact pre-registered redirect URIs needs the setting.
 
 To skip that prompt, configure the default `litellm` provider in the global `~/.pi/agent/settings.json`. Project settings are never read for this, so a cloned repository cannot point login at its own IdP.
 

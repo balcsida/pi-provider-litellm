@@ -1317,10 +1317,20 @@ async function loginWithPastedToken(
 const SIGN_IN_OIDC = "oidc";
 const SIGN_IN_PREVIOUS_OIDC = "previous-oidc";
 
-/** The stored login's identity provider, so signing in with it again takes one keypress. */
-function previousOidcConfig(definition: ProviderDefinition): OidcConfig | undefined {
+/**
+ * The stored login's identity provider, so signing in with it again takes one keypress. Enter picks it, so only a
+ * login to this proxy that recorded its scope qualifies: a guess could hand the IdP's token to another proxy or drop
+ * `offline_access`.
+ */
+function previousOidcConfig(definition: ProviderDefinition, baseUrl: string): OidcConfig | undefined {
   const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
-  if (stored?.type !== "oauth" || stored.flow !== OIDC_FLOW) return undefined;
+  if (
+    stored?.type !== "oauth" ||
+    stored.flow !== OIDC_FLOW ||
+    stored.baseUrl !== baseUrl ||
+    typeof stored.scope !== "string"
+  )
+    return undefined;
   try {
     return parseOidcConfig({ issuer: stored.issuer, clientId: stored.clientId, scope: stored.scope });
   } catch {
@@ -1335,8 +1345,9 @@ function previousOidcConfig(definition: ProviderDefinition): OidcConfig | undefi
 async function promptOidcConfig(
   interaction: AuthInteraction,
   definition: ProviderDefinition,
+  baseUrl: string,
 ): Promise<OidcConfig | undefined> {
-  const previous = previousOidcConfig(definition);
+  const previous = previousOidcConfig(definition, baseUrl);
   const choice = await interaction.prompt({
     type: "select",
     message: "Sign in with:",
@@ -1365,7 +1376,7 @@ async function loginOAuth(interaction: AuthInteraction, definition: ProviderDefi
   const baseUrl = await promptBaseUrl(interaction, definition);
   // Direct OIDC sends nothing to the proxy. The IdP is never derived from it either: the proxy's own OAuth
   // metadata describes LiteLLM's authorization server, not the IdP that signs the JWTs it accepts.
-  const oidc = configured ?? (await promptOidcConfig(interaction, definition));
+  const oidc = configured ?? (await promptOidcConfig(interaction, definition, baseUrl));
   if (oidc) return loginOidc(interaction, baseUrl, oidc);
   const headers = resolveHeaders(definition);
   const discovery = await discoverPkce(baseUrl, interaction.signal, headers);

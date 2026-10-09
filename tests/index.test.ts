@@ -3091,23 +3091,25 @@ describe("direct OIDC login", () => {
       expect(credential).toMatchObject({ flow: "oidc_pkce", baseUrl: proxyUrl, issuer, clientId, scope });
     });
 
+    const previousLogin = {
+      type: "oauth",
+      access: "expired-id-token",
+      refresh: "",
+      expires: 0,
+      baseUrl: proxyUrl,
+      flow: "oidc_pkce",
+      issuer,
+      clientId,
+      tokenEndpoint,
+      subject: "user-123",
+      scope: "openid offline_access",
+    };
+
     it("offers the previous identity provider login first", async () => {
       let offered: string[] | undefined;
       const { error, prompts, authorizationUrl } = await runOidcLogin({
         oidc: undefined,
-        storedCredential: {
-          type: "oauth",
-          access: "expired-id-token",
-          refresh: "",
-          expires: 0,
-          baseUrl: proxyUrl,
-          flow: "oidc_pkce",
-          issuer,
-          clientId,
-          tokenEndpoint,
-          subject: "user-123",
-          scope: "openid offline_access",
-        },
+        storedCredential: previousLogin,
         answer: (prompt) => {
           if (prompt.type !== "select") return undefined;
           if (prompt.message === "Sign in with:") offered = prompt.options.map((option) => option.label);
@@ -3125,6 +3127,28 @@ describe("direct OIDC login", () => {
       ]);
       expect(authorizationUrl?.searchParams.get("client_id")).toBe(clientId);
       expect(authorizationUrl?.searchParams.get("scope")).toBe("openid offline_access");
+    });
+
+    // Enter picks the first option, so a guess here would send the IdP's token elsewhere or drop scopes.
+    it.each<[string, Record<string, unknown>]>([
+      ["a login to another proxy", { baseUrl: "https://other.example.com" }],
+      ["a login that recorded no scope", { scope: undefined }],
+    ])("does not offer %s again", async (_name, override) => {
+      let offered: string[] | undefined;
+      const answer = ownIdp({ "LiteLLM proxy URL:": proxyUrl });
+      const { error } = await runOidcLogin({
+        oidc: undefined,
+        providerSettings: { baseUrl: proxyUrl },
+        storedCredential: { ...previousLogin, ...override },
+        answer: (prompt) => {
+          if (prompt.type === "select" && prompt.message === "Sign in with:")
+            offered = prompt.options.map((option) => option.label);
+          return answer(prompt);
+        },
+      });
+
+      expect(error).toBeUndefined();
+      expect(offered).toEqual(["LiteLLM SSO", "Your identity provider (OIDC client ID)…"]);
     });
 
     it.each([
@@ -3154,6 +3178,7 @@ describe("direct OIDC login", () => {
       clientId,
       tokenEndpoint,
       subject: "user-123",
+      scope: "openid offline_access",
       ...overrides,
     });
 
