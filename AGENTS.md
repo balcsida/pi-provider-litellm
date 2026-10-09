@@ -158,9 +158,43 @@
 
 - The release workflow is tag-driven for `v*.*.*`; it publishes with `npm publish --access public --provenance` and creates a GitHub release.
 - Local release prep should keep `package.json` and `package-lock.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
-- Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag.
+- Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` after the user pushes the tag, then replace the generated release notes (see Release Notes).
 - The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only.
 - `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files, and requires every allowlisted source file to ship; update tests before changing that policy.
+
+## Release Notes
+
+- `release.yml` creates each GitHub release with `--generate-notes`, which only seeds a placeholder: GitHub's "What's
+  Changed" list repeats PR titles and says nothing about behavior. Every release gets hand-written notes instead, patch
+  and minor included, not only major ones; never leave the generated list in place.
+- Draft the notes during release prep and include them in the prep report. Once the user has given the go-ahead for the
+  release and `gh release view <tag>` shows the release the workflow created, apply them with
+  `gh release edit <tag> --notes-file <file>`, then check the result with `gh release view <tag>`.
+- Release immutability is on for this repository: a published release's tag and assets are locked, and its notes stay
+  editable with `gh release edit`. Editing an older release that predates the setting made it immutable too (v3.2.0 to
+  v3.4.0), which cannot be undone, so ask the user before editing one that `gh release view <tag> --json isImmutable`
+  still reports as false.
+- Write for people who install the package, not from PR titles. Read each merged PR, the issues it closes, and the README
+  and code at the tag; check every setting key, env var, command, default, error text, and version number against them.
+  Describe the change against the previous tag, not against the PR's base.
+- Use only the sections that apply, in this order: `## Breaking changes`, `## Behavior change`, `## Features`,
+  `## Fixes` (or `## Fixes and hardening`), `## Maintenance`, `## Contributors`. No "What's Changed" list.
+- One bullet per change: a bold sentence naming the user-visible effect, then what a user needs to act on it (defaults,
+  setting keys, env vars, commands, and error text in backticks, affected Pi or LiteLLM versions, old versus new
+  behavior). End it with `([#N](https://github.com/balcsida/pi-provider-litellm/pull/N))`, adding `fixes`, `closes`, or
+  `refs` and the `.../issues/N` link for each issue. Use indented sub-bullets only for a large feature or a breaking
+  change's migration details. Keep dollar amounts in backticks, or GitHub renders them as math.
+- Say what upgrading costs. Give migration steps for breaking changes (for example pinning the last release for older
+  Pi), and add `Stored models are rediscovered after updating when networking is allowed and discovery succeeds;
+  otherwise cached models remain until a later successful refresh.` when `LITELLM_DISCOVERY_VERSION` differs from the
+  previous tag (`git grep -h 'LITELLM_DISCOVERY_VERSION =' <tag> -- src/backend-identity.ts`).
+- Leave out `chore: release` PRs. Fold dependency bumps, assets, CI, and docs-only work into one `## Maintenance`
+  bullet each, or drop them when nothing else needs a section.
+- Thank outside contributors and issue reporters under `## Contributors` by `@handle` with the PR or issue link, and
+  mark first contributions. Do not thank the maintainer or bots.
+- End with `**Full changelog:** https://github.com/balcsida/pi-provider-litellm/compare/<previous tag>...<tag>`.
+- Follow v4.0.1 (fixes), v4.0.0 (breaking changes with migration steps) and v3.1.0 (behavior change) as models
+  (`gh release view <tag>`).
 
 ## Package Metadata
 
