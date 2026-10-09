@@ -2302,6 +2302,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const mcpIdentitySalt = randomBytes(32);
 
   function mcpServerConfig(definition: ProviderDefinition): (McpServerConfig & { url: string }) | undefined {
+    if (definition.enableMcp === false) return undefined;
     if (discoveryDisabledReason() || isHostOffline()) return undefined;
     let root: string;
     try {
