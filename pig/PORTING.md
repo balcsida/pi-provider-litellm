@@ -147,17 +147,18 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   inside a session.
 - `/login litellm` inside a stock 0.4.1 session offers only PiG's generic `Enter API key` prompt, stores the key
   without the proxy URL, and never shows the SSO flows. The extension declares both methods correctly and the host
-  publishes the OAuth flow; the gaps are PiG's, fixed on the fork branch `fix/native-provider-login` of
-  `balcsida/PiG`: the registry records a native provider's registration without its OAuth method and rewrites it on
+  publishes the OAuth flow; the gaps are PiG's ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)),
+  fixed on the fork branch `fix/native-provider-login` of `balcsida/PiG`: the registry records a native provider's registration without its OAuth method and rewrites it on
   every catalog refresh (0.4.1 also predates PiG#192, the inheritance of a published flow); a flow's `select` prompt
   is answered with `Login cancelled`; a provider's own `apiKey.login` is not run; and the flow's `loginLabel` is not
   shown. With that build, step 5 of the verification ladder passes for CLI SSO, PKCE (with refresh), pasted token
   and API key, with no change to the extension. Until PiG ships it, configure credentials through the environment or
   `settings.json`.
 - `pig piglet build` cannot fuse a Go factory that depends on a third-party module
-  ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)): the fused builder overlays Pig's own
-  `go.mod` and compiles read-only, and a Binary fuses every compatible factory whether or not
-  `extensionRealization` is set. This is why the login flows stay hand-written instead of using
+  ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196); a fix is offered in
+  [MichaelKinsy/PiG#202](https://github.com/MichaelKinsy/PiG/pull/202), and the maintainer's own is on the 0.4.2 line):
+  the fused builder overlays Pig's own `go.mod` and compiles read-only, and a Binary fuses every compatible factory
+  whether or not `extensionRealization` is set. This is why the login flows stay hand-written instead of using
   `github.com/balcsida/litellm-auth-go`, and why this module must keep depending only on the standard library,
   PiG and the SDK until that issue is resolved.
 - A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted

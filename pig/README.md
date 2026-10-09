@@ -45,7 +45,8 @@ The first build downloads the PiG source and needs a Go toolchain (`pig setup go
 ### Fused builds and third-party Go modules
 
 `pig piglet build` cannot fuse a Go factory that depends on a third-party module
-([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)). This extension therefore depends only on
+([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196); a fix is offered in
+[MichaelKinsy/PiG#202](https://github.com/MichaelKinsy/PiG/pull/202)). This extension therefore depends only on
 the standard library, PiG and the SDK, and its login flows are implemented here rather than through a shared
 library.
 
@@ -63,8 +64,8 @@ The same inspection host backs `pig login --list` and the CLI `pig login litellm
 On stock PiG 0.4.1, `/login litellm` offers only PiG's generic API-key prompt: the SSO flows (CLI SSO, PKCE,
 direct OIDC, pasted token) never appear, and the key is stored without the proxy URL. PiG records a native
 provider's registration without its account login method, answers a flow's `select` prompt with `Login cancelled`,
-and does not run a provider's own API-key login. The fork branch `fix/native-provider-login` of `balcsida/PiG`
-fixes all of it without any change here; with that build the login smoke in `pig/tools/login-smoke` passes for CLI
+and does not run a provider's own API-key login ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)).
+The fork branch `fix/native-provider-login` of `balcsida/PiG` fixes all of it without any change here; with that build the login smoke in `pig/tools/login-smoke` passes for CLI
 SSO, PKCE with refresh, pasted token and API key. Until PiG ships the fix, configure credentials through
 `LITELLM_API_KEY` and `LITELLM_BASE_URL` or `settings.json`.
 
