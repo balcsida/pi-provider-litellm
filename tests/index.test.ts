@@ -359,7 +359,7 @@ describe("extension startup", () => {
   });
 
   it("escapes provider and route names in a headless fallback warning", async () => {
-    const provider = "litellm-alias";
+    const provider = 'alias"\n\u001b[31m';
     const agentDir = await makeAgentDir();
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ litellm: { providers: { [provider]: {} } } }));
     const extension = await loadExtension(agentDir);
@@ -385,7 +385,7 @@ describe("extension startup", () => {
     expect(output).toContain('the request for "high\\"\\n\\u001b[31m" was answered by a fallback');
     expect(output.trimEnd()).not.toContain("\n");
     expect(output).not.toContain("\u001b");
-    expect(output).toContain('LiteLLM ("litellm-alias"):');
+    expect(output).toContain('LiteLLM ("alias\\"\\n\\u001b[31m"):');
     expect(output).not.toContain("private-backend");
   });
 

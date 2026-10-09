@@ -1305,4 +1305,32 @@ describe("Per-provider MCP registration toggle", () => {
 
     expect(pi.mcpServers.has("litellm")).toBe(false);
   });
+
+  it("skips MCP access check in mcpAccessRefused for an alias provider with useGcloudTokenAuth: true", async () => {
+    const mcpRequests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) return Response.json({ data: [] });
+      if (url.endsWith("/mcp")) {
+        mcpRequests.push(url);
+        return Response.json({ detail: { error: "forbidden" } }, { status: 403 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://corp.example.com";
+    process.env.LITELLM_PROVIDER_CORP_API_KEY = "sk-fallback";
+    process.env.LITELLM_PROVIDER_CORP_USE_GCLOUD_AUTH = "1";
+
+    const agentDir = await makeAgentDir();
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(mcpRequests).toHaveLength(0);
+    expect(pi.mcpServers.get("corp")).toEqual({
+      url: "https://corp.example.com/mcp",
+      auth: { provider: "corp" },
+    });
+  });
 });
