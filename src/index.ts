@@ -2337,10 +2337,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
       // The check must send the credential Pi will send. Like seeding, it runs no key helper and
       // mints no ADC token, and resolving without them would fall through to another key.
+      const useGcloudToken = definition.useDefaultEnv
+        ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+        : definition.useGcloudTokenAuth;
       if (
         (stored?.type === "api_key" && stored.key?.startsWith("!")) ||
         definition.apiKeyConfig?.startsWith("!") ||
-        (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+        useGcloudToken
       ) {
         return false;
       }
