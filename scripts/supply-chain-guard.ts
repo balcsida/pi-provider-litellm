@@ -67,6 +67,7 @@ const nonRegistrySpecPrefixes = [
 // exactly, so an entry for a module the package does not ship fails the suite.
 export const allowedSourceModules = [
   "backend-identity",
+  "budget",
   "cost",
   "discover",
   "gcloud-token",

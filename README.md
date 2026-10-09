@@ -224,7 +224,7 @@ Provider fields:
 
 ### Optional LiteLLM features
 
-LiteLLM Skills and MCP integration are enabled by default. Disable either feature, or choose how MCP tools reach the model, globally in `~/.pi/agent/settings.json`:
+LiteLLM Skills, MCP integration, and the budget footer are enabled by default. Disable any of them, choose how MCP tools reach the model, or choose how budgets are shown, globally in `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -239,18 +239,24 @@ LiteLLM Skills and MCP integration are enabled by default. Disable either featur
         "*delete*": "hidden",
         "github-search_code": "direct"
       }
+    },
+    "budget": {
+      "enabled": true,
+      "display": "all"
     }
   }
 }
 ```
 
-Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server globally.
+
+Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Setting `budget.enabled` to `false` registers no budget footer, polls, or `/litellm-budget` command; `budget.display` is described under [Budget status](#budget-status). Restart Pi after changing these settings.
 
 MCP can also be enabled or disabled per provider:
 - In `~/.pi/agent/settings.json`: set `providers.<name>.mcp.enabled` (or `providers.<name>.enableMcp`) to `false` (or `true`).
 - In environment variables: set `LITELLM_PROVIDER_<NAME>_ENABLE_MCP` or `LITELLM_PROVIDER_<NAME>_MCP_ENABLED` to `"0"` or `"false"` to disable MCP for a specific provider.
 
 Restart Pi after changing these settings.
+
 
 `mcp.exposure` and `mcp.toolExposure` are passed to Pi unchanged and mean what they mean in a Pi `mcp.json` server entry: `codemode` (Pi's default when `exposure` is unset; callable from Pi's `codemode` scripts), `deferred` (declared to the model once Pi's `tool_search` loads it), `direct` (declared on every request), or `hidden`. `toolExposure` keys are tool names as LiteLLM's `/mcp` endpoint offers them, which LiteLLM prefixes with the server name, for example `github-search_code`; `*` matches any characters. Pi validates both settings, and an unusable value is reported once.
 
@@ -267,6 +273,43 @@ To refresh catalogs on demand, run `/litellm-refresh` for every configured LiteL
 Every request routed through a configured LiteLLM provider includes Pi's canonical session ID in the
 `x-litellm-session-id` header. This groups Chat Completions, Responses, and native Messages requests in LiteLLM without
 adding transport-specific fields to request bodies.
+
+## Budget status
+
+Pi's footer shows the LiteLLM budgets set for your credential, its user, its team, and its organization, for the active model's provider:
+
+```
+LiteLLM key $3.10/$10 · user $40/$100 · team $412/$1k · member $20/$50 · org $9.2k/$50k
+```
+
+Each segment is spend and limit for one level: `key`, `user`, `team`, `member` (your own budget inside the team), and `org`, in that order. These are the limits set on each level, and LiteLLM may not enforce every one of them on this key: since LiteLLM 1.95, a user's personal budget applies to a team key only when the operator sets `apply_user_budget_to_team_keys`. A level whose limit is unset, `null`, or `0` is not shown, so with no budgets the footer is empty. A segment is dim, turns to the warning colour from 80 % used, and to the error colour from 100 %. Set `"display": "tightest"` to show only the level with the least money left, with its percentage and reset time; any other `display` value falls back to `"all"` with a warning:
+
+```
+LiteLLM team $412/$1k (41%) · resets 12d
+```
+
+The footer carries only the provider's display name, these labels, and numbers; team names, key aliases, and proxy messages never reach it.
+
+The extension reads `/key/info` first, then `/v2/user/info` (`/user/info` on older proxies) and `/team/info`, then `/organization/list`, with the provider's own credential and custom headers, and only from that provider's proxy. LiteLLM's permissions decide what you can see:
+
+- A team key without a user shows no `user`, `member`, or `org` level.
+- A JWT credential, such as the one a [Direct OIDC login](#direct-oidc-login) presents, has no key row, so `/key/info` cannot be read. It shows the `user` level and, when that user belongs to exactly one team, that team's `team`, `member`, and `org` levels. With several teams, the one LiteLLM charges depends on the proxy's JWT settings, so only `user` shows. A virtual key whose `/key/info` cannot be read shows no team levels, because its user's team need not be the one the key is charged to.
+- Organization budgets need LiteLLM Enterprise.
+- A key whose `allowed_routes` exclude the info routes cannot be polled. It falls back to the `x-litellm-key-spend` and `x-litellm-key-max-budget` headers on every model response, which show only the `key` level, and only when the key has a limit.
+- An endpoint that answers 4xx (other than 429) or 500 is not asked again until the credential or the custom headers change, or you run `/litellm-budget`. LiteLLM answers 500 for errors that repeat on every call, such as a proxy without a database. Other errors keep the last values and are retried at the next refresh. Nothing is reported while polling.
+
+It refreshes when a session starts, when you select a LiteLLM model whose numbers are older than a minute, and after a turn: 15 seconds later, so LiteLLM can record the turn's spend, and never within 60 seconds of the previous poll. Idle sessions do not poll. Between polls the response headers can only raise the key's spend. LiteLLM writes spend to its database every 10 to 60 seconds, and spend resets are applied by a job that runs about every 10 minutes, so spend can lag by up to a minute and a reset by about ten minutes; a reset time already past is not shown.
+
+`/litellm-budget` forgets remembered 4xx and 500 answers, polls every configured LiteLLM provider now (or `/litellm-budget <provider>` for one), and prints a breakdown with two-decimal amounts, percentages, reset times, and the levels this credential cannot read, with their HTTP status:
+
+```
+LiteLLM ("litellm") budget
+  key     $3.10 of $10 (31%), resets in 12h
+  team    $412.30 of $1,000 (41%), resets in 24d
+  Not readable with this credential: org (401)
+```
+
+Automatic polls need Pi's interactive UI and do not run under `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, or `PI_OFFLINE`; header updates still apply. `/litellm-budget` is stopped by the first two only. The credential and custom headers are kept in memory only as a keyed digest, and proxy responses are reduced to the numbers shown and never logged.
 
 ## Model transport
 
@@ -318,7 +361,9 @@ LiteLLM serves the MCP servers it gateways over streamable HTTP at `/mcp`. For e
 
 The registration does not copy the provider's API key or token. It uses Pi's `auth: { provider }` setting, so Pi sends the provider's current credential as `Authorization: Bearer` on every request, and token refreshes, Google ADC, and key helpers apply without registering again. Custom headers (`LITELLM_HEADERS`, or an alias's `headers`) are registered as configured, after `$` and a leading `!` are escaped so Pi does not expand them a second time. Pi sends provider credentials only over https or to a loopback host, so a proxy reached over plain http elsewhere (`allowInsecureHttp`) gets no MCP server, and the refusal is reported once.
 
-The extension registers at startup and checks again before each agent turn. `/login litellm` disconnects the server as soon as it starts, before the new credential is stored, and the next turn connects again with the new credential and proxy root; a logout that leaves no root removes the server. `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, and `PI_OFFLINE` register nothing. A server with the same name in your own `mcp.json` takes precedence over the extension's.
+The extension registers at startup and updates the registration before each agent turn. `/login litellm` disconnects the server as soon as it starts, before the new credential is stored, and the next turn connects again with the new credential and proxy root; a logout that leaves no root removes the server. `LITELLM_OFFLINE=1`, `LITELLM_DISCOVERY_TIMEOUT_MS=0`, and `PI_OFFLINE` register nothing. A server with the same name in your own `mcp.json` takes precedence over the extension's.
+
+Before registering, the extension sends the proxy one MCP `initialize` with the credential and headers Pi will send, and ends the session it opened. LiteLLM 1.102.0 and later refuse it with 403 when no MCP servers are granted to the key, its team, or its organization, or none of them is allowed from your IP address. The extension then registers the server disabled: Pi does not connect to it, warn about it at startup, or turn on `codemode` for it, and `/mcp` lists it as disabled. Once servers are granted, enable it in `/mcp` for the session, or restart Pi, which checks again, as does a login. When a key helper (a `!command` key) or Google ADC is configured, the check is skipped and the server is registered enabled.
 
 Pi reads the provider's credential when it sends each request, not when the server was registered. If another Pi process stores a login for a different proxy, this session's open connection can send that credential to the previous proxy until the next turn moves the server.
 
@@ -459,7 +504,7 @@ The development probe runs against minimized snapshots with `npm run probe:proxy
 | Enterprise CLI SSO start/poll fails | Check the proxy logs and verify `/sso/cli/start` and `/sso/cli/poll/{login_id}` are reachable; only 404/405 falls back to legacy login |
 | Enterprise SSO login shows "virtual key generation failed" | The LiteLLM instance may lack a database (`/key/generate` requires one), your user account may lack key-generation permission, or the request timed out; the JWT is used directly as a fallback |
 | Enterprise SSO token prompt fails with "SSO token is required" | The token field was left empty — paste the token copied from the LiteLLM UI |
-| MCP tools not showing | Run `/mcp` and check the provider's server: its state shows a connection or sign-in error. Verify the proxy serves `/mcp` and that the key has MCP access |
+| MCP tools not showing | Run `/mcp` and check the provider's server: its state shows a connection or sign-in error. `disabled` means the proxy refused the key at startup, usually because no MCP servers are granted to it, its team, or its organization; after a grant, enable it in `/mcp` or restart Pi. Verify the proxy serves `/mcp` and that the key has MCP access |
 | MCP tools listed but the model cannot call them | `codemode` and `deferred` tools are reached through Pi's `codemode` and `tool_search` tools. Check that neither is disabled; `--no-extensions` disables them and Pi's MCP client alike. Setting `litellm.mcp.exposure` to `direct` declares the tools on every request instead |
 | Skills not affecting prompts | Verify the proxy exposes `/claude-code/marketplace.json` or `/v1/skills` and returns enabled skills |
 

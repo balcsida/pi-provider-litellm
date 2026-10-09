@@ -1,0 +1,1 @@
+[{"organization_id":"O2","spend":1.0,"litellm_budget_table":{"max_budget":5.0}},{"organization_id":"O","organization_alias":"Org","spend":9210.0,"litellm_budget_table":{"max_budget":50000.0,"budget_duration":"30d"},"members":[{"user_id":"U1","user_email":"u1@example.com"}],"teams":[{"team_id":"T"}]}]

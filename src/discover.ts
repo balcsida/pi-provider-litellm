@@ -606,7 +606,7 @@ function loadDiscoveryPublicCatalog(options: DiscoveryOptions): Promise<PublicCa
   );
 }
 
-async function fetchJson<T>(
+export async function fetchJson<T>(
   url: string,
   apiKey: string,
   options: DiscoveryOptions,
