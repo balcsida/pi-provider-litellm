@@ -22,6 +22,7 @@ function mockProxy(mcp?: (request: Request) => Response | Promise<Response>): vo
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/model/info")) return Response.json({ data: [] });
+    if (url.endsWith("/v1/models")) return Response.json({ data: [] });
     if (mcp && url.endsWith("/mcp")) return mcp(new Request(url, init));
     throw new Error(`unexpected URL: ${url}`);
   });

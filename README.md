@@ -2,7 +2,7 @@
 
 LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.99.2+ is required; on older Pi, install `npm:pi-provider-litellm@3.4.0`.
 
-Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
+Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
 ## Install
 
@@ -420,7 +420,7 @@ The development probe runs against minimized snapshots with `npm run probe:proxy
 | No models, or no new routes, while `PI_OFFLINE` is set | Pi skips every model network refresh, including the one `/model` starts. Run `/litellm-refresh`, or unset `PI_OFFLINE` (`PI_OFFLINE=0` is not enough) |
 | `No models available` at startup, gone after a restart | A Pi startup race, not discovery — see [`No models available` at startup](#no-models-available-at-startup) |
 | "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
-| `/model/info` returning 401/403/404 | Expected behavior with virtual keys — extension falls back to `/v1/models` |
+| `/model/info` returning 401/403/404 or an empty list | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models. Offline mode does not recover a root mismatch, including a different path prefix — see [Model host enforcement](#model-host-enforcement) |
 | A provider shows no models | The base URL is missing, invalid, still the placeholder, or its full root, including any path prefix, differs from the root in the cached catalog. Check stderr and see [Model host enforcement](#model-host-enforcement) |
 | A configured or restored model fails to complete but never leaks the credential | Its `api` is absent from the current provider catalog, so Pi used global API fallback with the credential root pinned. Open `/model` against the active proxy to repopulate the protocol — see [Model host enforcement](#model-host-enforcement) |

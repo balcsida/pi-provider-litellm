@@ -233,6 +233,7 @@ describe("feature parity", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [] });
       if (url.startsWith("https://fresh.example.com/")) return jsonResponse(200, []);
       throw new Error(`unexpected URL: ${url}`);
     });
@@ -272,6 +273,7 @@ describe("feature parity", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/v1/models")) return jsonResponse(200, { data: [] });
       if (url.endsWith("/claude-code/marketplace.json")) return jsonResponse(404, {});
       if (url.endsWith("/v1/skills")) {
         return jsonResponse(200, {
@@ -306,7 +308,7 @@ describe("feature parity", () => {
 
   it("clears cached Skills auth when Pi reports revoked credentials", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, []));
     const extension = await loadExtension(agentDir);
     const pi = createPi();
     await extension(pi);
@@ -380,7 +382,9 @@ describe("feature parity", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.endsWith("/model/info")) return jsonResponse(200, { data: [] });
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "gpt-4o", litellm_params: { model: "openai/gpt-4o" } }] });
+      }
       throw new Error(`unexpected URL: ${url}`);
     });
 
@@ -796,7 +800,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -837,7 +841,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -868,7 +872,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -923,7 +927,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -985,7 +989,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1028,7 +1032,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1058,7 +1062,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1178,7 +1182,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1328,7 +1332,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1360,7 +1364,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1389,7 +1393,7 @@ describe("feature parity", () => {
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1502,7 +1506,7 @@ describe("feature parity", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://litellm.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();
@@ -1532,7 +1536,7 @@ describe("feature parity", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "sk-test";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, { data: [] }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
 
     const extension = await loadExtension(agentDir);
     const pi = createPi();

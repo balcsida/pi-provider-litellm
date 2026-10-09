@@ -31,7 +31,7 @@ describe("before_agent_start skills hook", () => {
   // An expired LiteLLM SSO credential makes Pi's getProviderAuth throw. The hook must not
   // turn that into a per-turn `Extension "..." error:` report.
   it("survives an unrefreshable OAuth credential", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, []));
     const beforeAgentStart = await startHook();
 
     await expect(
@@ -70,7 +70,7 @@ describe("before_agent_start skills hook", () => {
   });
 
   it("rejects placeholder runtime hosts before sending credentials", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, []));
     const beforeAgentStart = await startHook();
     vi.mocked(globalThis.fetch).mockClear();
 
@@ -93,7 +93,7 @@ describe("before_agent_start skills hook", () => {
 
   it("reports the reason on stderr under LITELLM_VERBOSE_DISCOVERY", async () => {
     process.env.LITELLM_VERBOSE_DISCOVERY = "1";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, []));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, []));
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const beforeAgentStart = await startHook();
 

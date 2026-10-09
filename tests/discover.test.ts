@@ -6270,6 +6270,18 @@ describe("discoverModels fallback to /v1/models", () => {
     expect(result.models[0]?.compat).not.toMatchObject({ supportsReasoningEffort: true });
   });
 
+  it("falls back when /model/info succeeds with no entries", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [] }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "openai/gpt-4o" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("models_list");
+    expect(result.models.map((m) => m.id)).toEqual(["openai/gpt-4o"]);
+  });
+
   it("throws when /model/info returns a non-401/403/404 error", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
     await expect(discoverModels("https://litellm.example.com", "sk-test", {})).rejects.toThrow(/500/);
