@@ -28,8 +28,9 @@
 
 - Model discovery lives in `src/discover.ts`; pure deployment-group reduction lives in `src/model-groups.ts`.
 - Shared thinking-level definitions and map intersection live in `src/thinking-levels.ts`.
-- Prefer `/model/info` for rich metadata. Use `/v1/models` as the status-code fallback only when `/model/info`
-  returns 401, 403, or 404; after a successful `/model/info`, also query `/v1/models` only to expand wildcard routes.
+- Prefer `/model/info` for rich metadata. Use `/v1/models` as the fallback only when `/model/info` returns 401, 403,
+  or 404, or succeeds with no entries (some virtual keys see an empty list); after a non-empty `/model/info`, also
+  query `/v1/models` only to expand wildcard routes.
 - Treat `model_name` as a public route group, not backend evidence. Resolve backend identity from
   `model_info.base_model` before `litellm_params.model`; treat `custom_llm_provider` as provider evidence, withholding
   identity when a non-generic provider conflicts with the model prefix. Reduce every deployment before choosing
