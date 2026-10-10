@@ -39,6 +39,8 @@ const SETTINGS_KEY = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_DISPLAY_NAME = "LITELLM_DISPLAY_NAME";
+const ENV_PROVIDERS = "LITELLM_PROVIDERS";
+const ENV_PROVIDERS_JSON = "LITELLM_PROVIDERS_JSON";
 const GCLOUD_ADC_SOURCE = "gcloud ADC";
 const ENV_API_KEY_HELPER = "LITELLM_API_KEY_HELPER";
 const ENV_HEADERS = "LITELLM_HEADERS";
@@ -72,10 +74,14 @@ type RawProviderSettings = {
   headers?: unknown;
   enabled?: unknown;
   allowInsecureHttp?: unknown;
+  useGcloudTokenAuth?: unknown;
+  enableOAuth?: unknown;
   oidc?: unknown;
+  enableMcp?: unknown;
+  mcp?: unknown;
 };
 
-type ProviderDefinition = {
+export type ProviderDefinition = {
   name: string;
   displayName: string;
   baseUrl?: string;
@@ -87,7 +93,128 @@ type ProviderDefinition = {
   allowInsecureHttp: boolean;
   /** Raw `oidc` setting, validated at login so a bad value never breaks startup. */
   oidc?: unknown;
+  envPrefix?: string;
+  enableMcp?: boolean;
 };
+
+const RESERVED_PROVIDER_NAMES = new Set(["mcp", "skills", "codemode", "tool_search", "litellm"]);
+const PROVIDER_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const PROVIDER_ENV_VAR_REGEX =
+  /^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|ENABLE_MCP|MCP_ENABLED)$/;
+
+export function isValidProviderName(name: string): boolean {
+  if (typeof name !== "string") return false;
+  if (!PROVIDER_NAME_REGEX.test(name)) return false;
+  if (RESERVED_PROVIDER_NAMES.has(name)) return false;
+  return true;
+}
+
+export function parseCanonicalProviderList(raw: string | undefined): string[] {
+  if (typeof raw !== "string") return [];
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  return trimmed
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function parseProvidersJson(raw: string | undefined): Record<string, RawProviderSettings> | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!isPlainObject(parsed)) return undefined;
+    const result: Record<string, RawProviderSettings> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (isPlainObject(value)) {
+        result[key] = value as RawProviderSettings;
+      }
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseBooleanSetting(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim().toLowerCase();
+    return trimmed === "1" || trimmed === "true";
+  }
+  return false;
+}
+
+export type ParsedProviderEnv = {
+  token: string;
+  envPrefix: string;
+  name?: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  apiKeyHelper?: string;
+  headers?: unknown;
+  allowInsecureHttp?: boolean;
+  useGcloudTokenAuth?: boolean;
+  enableOAuth?: boolean;
+  enableMcp?: boolean;
+};
+
+export function parseProviderEnvVars(env: NodeJS.ProcessEnv): Record<string, ParsedProviderEnv> {
+  const result: Record<string, ParsedProviderEnv> = {};
+  for (const key of Object.keys(env)) {
+    const match = key.match(PROVIDER_ENV_VAR_REGEX);
+    if (!match) continue;
+    const token = match[1]!;
+    const field = match[2]!;
+    const val = env[key];
+    if (val === undefined) continue;
+
+    if (!result[token]) {
+      result[token] = {
+        token,
+        envPrefix: `LITELLM_PROVIDER_${token}`,
+      };
+    }
+    const entry = result[token]!;
+    switch (field) {
+      case "BASE_URL":
+        entry.baseUrl = cleanConfig(val);
+        break;
+      case "API_KEY":
+        entry.apiKey = cleanConfig(val);
+        break;
+      case "API_KEY_HELPER":
+        entry.apiKeyHelper = cleanConfig(val);
+        break;
+      case "HEADERS":
+        entry.headers = cleanConfig(val);
+        break;
+      case "DISPLAY_NAME":
+        entry.displayName = cleanConfig(val);
+        break;
+      case "NAME":
+        entry.name = cleanConfig(val);
+        break;
+      case "ALLOW_INSECURE_HTTP":
+        entry.allowInsecureHttp = parseBooleanSetting(val);
+        break;
+      case "USE_GCLOUD_AUTH":
+        entry.useGcloudTokenAuth = parseBooleanSetting(val);
+        break;
+      case "ENABLE_OAUTH":
+        entry.enableOAuth = parseBooleanSetting(val);
+        break;
+      case "ENABLE_MCP":
+      case "MCP_ENABLED":
+        entry.enableMcp = parseBooleanSetting(val);
+        break;
+    }
+  }
+  return result;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -126,6 +253,7 @@ function resolveCredentialRoot(
     credentialBaseUrl ??
     cleanConfig(requestBaseUrl) ??
     cleanConfig(definition.baseUrl) ??
+    (definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined) ??
     (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
   return baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
 }
@@ -376,28 +504,38 @@ function parseCustomHeaders(raw: string | undefined): Record<string, string> | u
 }
 
 function resolveHeaders(definition: ProviderDefinition): Record<string, string> | undefined {
-  if (typeof definition.headers === "string") return parseCustomHeaders(resolveTemplateConfigValue(definition.headers));
-  return parseHeaderRecord(definition.headers);
+  const rawHeaders =
+    definition.headers ??
+    (definition.envPrefix ? process.env[`${definition.envPrefix}_HEADERS`] : undefined) ??
+    (definition.useDefaultEnv ? process.env[ENV_HEADERS] : undefined);
+  if (typeof rawHeaders === "string") return parseCustomHeaders(resolveTemplateConfigValue(rawHeaders));
+  return parseHeaderRecord(rawHeaders);
 }
 
 async function resolveHeadersFromContext(
   definition: ProviderDefinition,
   env: (name: string) => Promise<string | undefined>,
 ): Promise<Record<string, string> | undefined> {
-  if (typeof definition.headers === "string")
-    return parseCustomHeaders(await resolveTemplateConfigValueFromContext(definition.headers, env));
-  return parseHeaderRecord(definition.headers);
+  const rawHeaders =
+    definition.headers ??
+    (definition.envPrefix ? await env(`${definition.envPrefix}_HEADERS`) : undefined) ??
+    (definition.useDefaultEnv ? await env(ENV_HEADERS) : undefined);
+  if (typeof rawHeaders === "string")
+    return parseCustomHeaders(await resolveTemplateConfigValueFromContext(rawHeaders, env));
+  return parseHeaderRecord(rawHeaders);
 }
 
-async function resolveCredentials(
+export async function resolveCredentials(
   definition: ProviderDefinition,
   { executeHelpers = true } = {},
 ): Promise<ResolvedCredentials> {
   const configuredBase =
-    cleanConfig(definition.baseUrl) ?? (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
-  const envKey = definition.useDefaultEnv ? cleanConfig(process.env[ENV_API_KEY]) : undefined;
-  const envHelperCommand = definition.useDefaultEnv ? getApiKeyHelperCommand() : undefined;
-  const useGcloudToken = definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled();
+    cleanConfig(definition.baseUrl) ??
+    (definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined) ??
+    (definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined);
+  const useGcloudToken = definition.useDefaultEnv
+    ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+    : definition.useGcloudTokenAuth;
   const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
   // Resolved lazily so a `!command` key is not executed when a
   // higher-precedence credential (saved auth, gcloud token) already won.
@@ -408,10 +546,34 @@ async function resolveCredentials(
       warnUnresolvedApiKeyConfig(definition.name, definition.apiKeyConfig);
     }
   }
-  const helperKey =
-    !gcloudKey && !configuredKey && executeHelpers && envHelperCommand
-      ? executeApiKeyCommand(envHelperCommand)
-      : undefined;
+
+  let helperKey: string | undefined;
+  let helperCommand: string | undefined;
+  let envKey: string | undefined;
+  let envKeySource: string | undefined;
+
+  if (!gcloudKey && !configuredKey && definition.envPrefix) {
+    helperCommand = normalizeCommand(process.env[`${definition.envPrefix}_API_KEY_HELPER`]);
+    if (helperCommand && executeHelpers) {
+      helperKey = executeApiKeyCommand(helperCommand);
+    }
+    if (!helperCommand) {
+      envKey = cleanConfig(process.env[`${definition.envPrefix}_API_KEY`]);
+      if (envKey) envKeySource = `$${definition.envPrefix}_API_KEY`;
+    }
+  }
+
+  if (!gcloudKey && !configuredKey && !helperKey && !helperCommand && !envKey && definition.useDefaultEnv) {
+    helperCommand = getApiKeyHelperCommand();
+    if (helperCommand && executeHelpers) {
+      helperKey = executeApiKeyCommand(helperCommand);
+    }
+    if (!helperCommand) {
+      envKey = cleanConfig(process.env[ENV_API_KEY]);
+      if (envKey) envKeySource = `$${ENV_API_KEY}`;
+    }
+  }
+
   const apiKey = gcloudKey || configuredKey || helperKey || envKey;
 
   let apiKeyConfig: string | undefined;
@@ -419,12 +581,12 @@ async function resolveCredentials(
     apiKeyConfig = definition.apiKeyConfig;
   } else if (!executeHelpers && definition.apiKeyConfig?.startsWith("!")) {
     apiKeyConfig = definition.apiKeyConfig;
-  } else if (helperKey && envHelperCommand) {
-    apiKeyConfig = envHelperCommand;
-  } else if (!executeHelpers && envHelperCommand) {
-    apiKeyConfig = envHelperCommand;
+  } else if (helperKey && helperCommand) {
+    apiKeyConfig = helperCommand;
+  } else if (!executeHelpers && helperCommand) {
+    apiKeyConfig = helperCommand;
   } else if (envKey) {
-    apiKeyConfig = `$${ENV_API_KEY}`;
+    apiKeyConfig = envKeySource;
   }
   return {
     baseUrl: configuredBase ? normalizeBaseUrl(configuredBase, definition.allowInsecureHttp) : undefined,
@@ -486,7 +648,20 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const record = raw as RawProviderSettings;
   if (record.enabled === false) return undefined;
-  return record;
+  const enableMcp =
+    record.enableMcp !== undefined
+      ? parseBooleanSetting(record.enableMcp)
+      : isPlainObject(record.mcp)
+        ? record.mcp.enabled !== undefined
+          ? parseBooleanSetting(record.mcp.enabled)
+          : undefined
+        : record.mcp !== undefined
+          ? parseBooleanSetting(record.mcp)
+          : undefined;
+  return {
+    ...record,
+    ...(enableMcp !== undefined ? { enableMcp } : {}),
+  };
 }
 
 function isFeatureEnabled(
@@ -497,35 +672,187 @@ function isFeatureEnabled(
   return !isPlainObject(raw) || raw.enabled !== false;
 }
 
-function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
+type IntermediateProvider = {
+  name: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKeyConfig?: string;
+  headers?: unknown;
+  allowInsecureHttp?: boolean;
+  useGcloudTokenAuth?: boolean;
+  enableOAuth?: boolean;
+  envPrefix?: string;
+  enableMcp?: boolean;
+};
+
+export function getProviderDefinitions(settings: Record<string, unknown> | undefined): ProviderDefinition[] {
   const rawProviders = settings?.providers && typeof settings.providers === "object" ? settings.providers : undefined;
   const providerSettings = rawProviders as Record<string, unknown> | undefined;
   const defaultSettings = normalizeProviderSettings(providerSettings?.[PROVIDER_NAME]);
   const defaultDisplayName = cleanConfig(process.env[ENV_DISPLAY_NAME]) ?? "LiteLLM";
+  const parsedEnv = parseProviderEnvVars(process.env);
+  const primaryEnv = parsedEnv[PROVIDER_NAME.toUpperCase()];
 
-  const makeDefinition = (
-    name: string,
-    raw: RawProviderSettings | undefined,
-    isDefault: boolean,
-  ): ProviderDefinition => ({
-    name,
-    displayName: stringSetting(raw?.displayName) ?? (isDefault ? defaultDisplayName : name),
-    baseUrl: stringSetting(raw?.baseUrl),
-    apiKeyConfig: stringSetting(raw?.apiKey),
-    headers: raw?.headers ?? (isDefault ? `$${ENV_HEADERS}` : undefined),
-    useDefaultEnv: isDefault,
-    useGcloudTokenAuth: isDefault,
-    enableOAuth: isDefault,
-    allowInsecureHttp: raw?.allowInsecureHttp === true,
-    oidc: isDefault ? raw?.oidc : undefined,
-  });
+  const primaryDefinition: ProviderDefinition = {
+    name: PROVIDER_NAME,
+    displayName: stringSetting(defaultSettings?.displayName) ?? defaultDisplayName,
+    baseUrl: stringSetting(defaultSettings?.baseUrl),
+    apiKeyConfig: stringSetting(defaultSettings?.apiKey),
+    headers: defaultSettings?.headers ?? `$${ENV_HEADERS}`,
+    useDefaultEnv: true,
+    useGcloudTokenAuth: true,
+    enableOAuth: true,
+    allowInsecureHttp: defaultSettings?.allowInsecureHttp === true,
+    oidc: defaultSettings?.oidc,
+    enableMcp: typeof defaultSettings?.enableMcp === "boolean" ? defaultSettings.enableMcp : primaryEnv?.enableMcp,
+  };
 
-  const definitions = [makeDefinition(PROVIDER_NAME, defaultSettings, true)];
+  const secondaryProviders = new Map<string, IntermediateProvider>();
+  const disabledProviders = new Set<string>();
+
+  // 1. Incorporate LITELLM_PROVIDERS_JSON
+  const jsonProviders = parseProvidersJson(process.env[ENV_PROVIDERS_JSON]);
+  if (jsonProviders) {
+    for (const [name, raw] of Object.entries(jsonProviders)) {
+      if (!isValidProviderName(name)) continue;
+      if (raw.enabled === false) {
+        disabledProviders.add(name);
+        continue;
+      }
+      const normalized = normalizeProviderSettings(raw);
+      if (!normalized) continue;
+      secondaryProviders.set(name, {
+        name,
+        displayName: stringSetting(normalized.displayName),
+        baseUrl: stringSetting(normalized.baseUrl),
+        apiKeyConfig: stringSetting(normalized.apiKey),
+        headers: normalized.headers,
+        allowInsecureHttp: parseBooleanSetting(normalized.allowInsecureHttp),
+        useGcloudTokenAuth: parseBooleanSetting(normalized.useGcloudTokenAuth),
+        enableOAuth: parseBooleanSetting(normalized.enableOAuth),
+        enableMcp: typeof normalized.enableMcp === "boolean" ? normalized.enableMcp : undefined,
+      });
+    }
+  }
+
+  // 2. Scan env vars
+  const claimedTokens = new Set<string>([PROVIDER_NAME.toUpperCase()]);
+
+  // 3. Incorporate canonical list LITELLM_PROVIDERS
+  const canonicalList = parseCanonicalProviderList(process.env[ENV_PROVIDERS]);
+  const tokenOwners = new Map<string, string>([[PROVIDER_NAME.toUpperCase(), PROVIDER_NAME]]);
+  for (const canonicalId of canonicalList) {
+    if (!isValidProviderName(canonicalId)) continue;
+    if (disabledProviders.has(canonicalId)) continue;
+    const token = canonicalId.toUpperCase().replace(/-/g, "_");
+    const owner = tokenOwners.get(token);
+    const hasCollision = owner !== undefined && owner !== canonicalId;
+    if (!hasCollision && !tokenOwners.has(token)) {
+      tokenOwners.set(token, canonicalId);
+    }
+    const envData = !hasCollision ? parsedEnv[token] : undefined;
+    if (envData) claimedTokens.add(token);
+
+    const existing = secondaryProviders.get(canonicalId);
+    secondaryProviders.set(canonicalId, {
+      name: canonicalId,
+      displayName: envData?.displayName ?? existing?.displayName,
+      baseUrl: existing?.baseUrl,
+      apiKeyConfig: existing?.apiKeyConfig,
+      headers: existing?.headers,
+      allowInsecureHttp: envData?.allowInsecureHttp ?? existing?.allowInsecureHttp,
+      useGcloudTokenAuth: envData?.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
+      enableOAuth: envData?.enableOAuth ?? existing?.enableOAuth,
+      envPrefix: envData?.envPrefix ?? existing?.envPrefix,
+      enableMcp: envData?.enableMcp ?? existing?.enableMcp,
+    });
+  }
+
+  // 4. Incorporate remaining unlisted prefix-scanned tokens
+  for (const [token, envData] of Object.entries(parsedEnv)) {
+    if (claimedTokens.has(token)) continue;
+    const providerId = envData.name ?? token.toLowerCase().replace(/_/g, "-");
+    if (!isValidProviderName(providerId)) continue;
+    if (disabledProviders.has(providerId) || disabledProviders.has(token.toLowerCase())) continue;
+
+    tokenOwners.set(token, providerId);
+
+    const existing = secondaryProviders.get(providerId);
+    secondaryProviders.set(providerId, {
+      name: providerId,
+      displayName: envData.displayName ?? existing?.displayName,
+      baseUrl: existing?.baseUrl,
+      apiKeyConfig: existing?.apiKeyConfig,
+      headers: existing?.headers,
+      allowInsecureHttp: envData.allowInsecureHttp ?? existing?.allowInsecureHttp,
+      useGcloudTokenAuth: envData.useGcloudTokenAuth ?? existing?.useGcloudTokenAuth,
+      enableOAuth: envData.enableOAuth ?? existing?.enableOAuth,
+      envPrefix: envData.envPrefix ?? existing?.envPrefix,
+      enableMcp: envData.enableMcp ?? existing?.enableMcp,
+    });
+  }
+
+  // 5. Merge with settings.json (disk settings override env vars; enabled === false excludes)
   for (const [name, raw] of Object.entries(providerSettings ?? {})) {
     if (name === PROVIDER_NAME) continue;
-    const normalized = normalizeProviderSettings(raw);
-    if (!normalized) continue;
-    definitions.push(makeDefinition(name, normalized, false));
+    if (typeof name !== "string" || name.length === 0 || RESERVED_PROVIDER_NAMES.has(name)) continue;
+
+    const rawRecord = normalizeProviderSettings(raw);
+
+    if (!rawRecord) {
+      secondaryProviders.delete(name);
+      continue;
+    }
+
+    const existing = secondaryProviders.get(name);
+    const token = name.toUpperCase().replace(/-/g, "_");
+    let matchingEnvPrefix = existing ? existing.envPrefix : undefined;
+    if (!existing) {
+      const owner = tokenOwners.get(token);
+      if ((owner === undefined || owner === name) && !claimedTokens.has(token) && parsedEnv[token]) {
+        matchingEnvPrefix = `LITELLM_PROVIDER_${token}`;
+        tokenOwners.set(token, name);
+        claimedTokens.add(token);
+      }
+    }
+
+    secondaryProviders.set(name, {
+      name,
+      displayName: stringSetting(rawRecord.displayName) ?? existing?.displayName,
+      baseUrl: stringSetting(rawRecord.baseUrl) ?? existing?.baseUrl,
+      apiKeyConfig: stringSetting(rawRecord.apiKey) ?? existing?.apiKeyConfig,
+      headers: rawRecord.headers ?? existing?.headers,
+      allowInsecureHttp:
+        typeof rawRecord.allowInsecureHttp === "boolean"
+          ? rawRecord.allowInsecureHttp
+          : (existing?.allowInsecureHttp ?? false),
+      useGcloudTokenAuth:
+        typeof rawRecord.useGcloudTokenAuth === "boolean"
+          ? rawRecord.useGcloudTokenAuth
+          : (existing?.useGcloudTokenAuth ?? false),
+      enableOAuth:
+        typeof rawRecord.enableOAuth === "boolean" ? rawRecord.enableOAuth : (existing?.enableOAuth ?? false),
+      envPrefix: matchingEnvPrefix,
+      enableMcp: typeof rawRecord.enableMcp === "boolean" ? rawRecord.enableMcp : existing?.enableMcp,
+    });
+  }
+
+  const definitions: ProviderDefinition[] = [primaryDefinition];
+  for (const [name, entry] of secondaryProviders) {
+    definitions.push({
+      name,
+      displayName: entry.displayName ?? name,
+      baseUrl: entry.baseUrl,
+      apiKeyConfig: entry.apiKeyConfig,
+      headers: entry.headers,
+      useDefaultEnv: false,
+      useGcloudTokenAuth: entry.useGcloudTokenAuth ?? false,
+      enableOAuth: entry.enableOAuth ?? false,
+      allowInsecureHttp: entry.allowInsecureHttp ?? false,
+      oidc: undefined,
+      envPrefix: entry.envPrefix,
+      enableMcp: entry.enableMcp,
+    });
   }
   return definitions;
 }
@@ -541,6 +868,10 @@ function knownBaseUrl(definition: ProviderDefinition): { url: string; source: st
   const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
   const candidates: [string | undefined, string][] = [
     [cleanConfig(definition.baseUrl), "configured"],
+    [
+      definition.envPrefix ? cleanConfig(process.env[`${definition.envPrefix}_BASE_URL`]) : undefined,
+      `$${definition.envPrefix}_BASE_URL`,
+    ],
     [definition.useDefaultEnv ? cleanConfig(process.env[ENV_BASE_URL]) : undefined, `$${ENV_BASE_URL}`],
     [
       stored?.type === "oauth"
@@ -1444,11 +1775,9 @@ async function configuredBaseUrl(
   ctx: { env(name: string): Promise<string | undefined> },
   credential?: ApiKeyCredential,
 ): Promise<string | undefined> {
-  return (
-    cleanConfig(credential?.env?.[ENV_BASE_URL]) ??
-    cleanConfig(definition.baseUrl) ??
-    (definition.useDefaultEnv ? cleanConfig(await ctx.env(ENV_BASE_URL)) : undefined)
-  );
+  const scopedEnv = definition.envPrefix ? cleanConfig(await ctx.env(`${definition.envPrefix}_BASE_URL`)) : undefined;
+  const defaultEnv = definition.useDefaultEnv ? cleanConfig(await ctx.env(ENV_BASE_URL)) : undefined;
+  return cleanConfig(credential?.env?.[ENV_BASE_URL]) ?? cleanConfig(definition.baseUrl) ?? scopedEnv ?? defaultEnv;
 }
 
 async function resolveApiKeyAuth(
@@ -1470,39 +1799,73 @@ async function resolveApiKeyAuth(
       apiKey: stored,
     };
   } else {
-    creds = await resolveCredentials(
-      { ...definition, apiKeyConfig: undefined, useDefaultEnv: false },
-      { executeHelpers },
-    );
-    if (!creds.apiKey && definition.apiKeyConfig) {
+    // 1) Google ADC
+    const useGcloudToken = definition.useDefaultEnv
+      ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+      : definition.useGcloudTokenAuth;
+    const gcloudKey = executeHelpers && useGcloudToken ? (await getGcloudToken())?.trim() : undefined;
+    let apiKey = gcloudKey;
+    let apiKeyConfig: string | undefined;
+    if (gcloudKey) {
+      source = GCLOUD_ADC_SOURCE;
+    }
+
+    // 2) definition.apiKeyConfig
+    if (!apiKey && definition.apiKeyConfig) {
       const configured = definition.apiKeyConfig.startsWith("!")
         ? executeHelpers
           ? executeApiKeyCommand(definition.apiKeyConfig)
           : undefined
         : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
       if (configured) {
-        creds.apiKey = configured;
-        creds.apiKeyConfig = definition.apiKeyConfig;
+        apiKey = configured;
+        apiKeyConfig = definition.apiKeyConfig;
+        source = definition.apiKeyConfig;
       } else if (!definition.apiKeyConfig.startsWith("!")) {
         warnUnresolvedApiKeyConfig(definition.name, definition.apiKeyConfig);
       }
     }
-    if (!creds.apiKey && definition.useDefaultEnv) {
+
+    // 3) Scoped envPrefix: _API_KEY_HELPER then _API_KEY
+    if (!apiKey && definition.envPrefix) {
+      const helper = normalizeCommand(await ctx.env(`${definition.envPrefix}_API_KEY_HELPER`));
+      if (helper) {
+        apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
+        apiKeyConfig = helper;
+        source = `$${definition.envPrefix}_API_KEY_HELPER`;
+      } else {
+        const envKey = cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY`));
+        if (envKey) {
+          apiKey = envKey;
+          apiKeyConfig = `$${definition.envPrefix}_API_KEY`;
+          source = `$${definition.envPrefix}_API_KEY`;
+        }
+      }
+    }
+
+    // 4) Default env: LITELLM_API_KEY_HELPER then LITELLM_API_KEY
+    if (!apiKey && definition.useDefaultEnv) {
       const helper = normalizeCommand(await ctx.env(ENV_API_KEY_HELPER));
       if (helper) {
-        creds.apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
-        creds.apiKeyConfig = helper;
+        apiKey = executeHelpers ? executeApiKeyCommand(helper) : undefined;
+        apiKeyConfig = helper;
         source = ENV_API_KEY_HELPER;
       } else {
         const envKey = cleanConfig(await ctx.env(ENV_API_KEY));
         if (envKey) {
-          creds.apiKey = envKey;
-          creds.apiKeyConfig = ENV_API_KEY;
+          apiKey = envKey;
+          apiKeyConfig = ENV_API_KEY;
           source = ENV_API_KEY;
         }
       }
     }
-    if (!creds.baseUrl && baseUrl) creds.baseUrl = normalizeBaseUrl(baseUrl, definition.allowInsecureHttp);
+
+    creds = {
+      baseUrl: baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined,
+      apiKey: apiKey || undefined,
+      apiKeyConfig,
+      apiKeyFromGcloudAdc: Boolean(gcloudKey),
+    };
   }
   if (!creds.apiKey) return undefined;
   const normalizedRoot = baseUrl ? normalizeBaseUrl(baseUrl, definition.allowInsecureHttp) : undefined;
@@ -1541,18 +1904,16 @@ function createProviderAuth(
   return {
     apiKey: {
       name: `${definition.displayName} API key`,
-      login:
-        definition.name === PROVIDER_NAME
-          ? async (interaction) => {
-              loginHooks?.start();
-              const credential = await loginApiKey(interaction, definition);
-              return completeLogin(credential);
-            }
-          : undefined,
+      login: async (interaction) => {
+        loginHooks?.start();
+        const credential = await loginApiKey(interaction, definition);
+        return completeLogin(credential);
+      },
       check: async ({ ctx, credential }) => {
         const baseUrl =
           credential?.env?.[ENV_BASE_URL] ??
           definition.baseUrl ??
+          (definition.envPrefix ? await ctx.env(`${definition.envPrefix}_BASE_URL`) : undefined) ??
           (definition.useDefaultEnv ? await ctx.env(ENV_BASE_URL) : undefined);
         if (!cleanConfig(baseUrl)) return undefined;
         if (credential?.key) return { type: "api_key", source: "stored credential" };
@@ -1565,6 +1926,14 @@ function createProviderAuth(
               : await resolveTemplateConfigValueFromContext(definition.apiKeyConfig, ctx.env);
             if (configuredKey) return definition.apiKeyConfig;
           }
+          if (definition.envPrefix) {
+            if (cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY_HELPER`))) {
+              return `$${definition.envPrefix}_API_KEY_HELPER`;
+            }
+            if (cleanConfig(await ctx.env(`${definition.envPrefix}_API_KEY`))) {
+              return `$${definition.envPrefix}_API_KEY`;
+            }
+          }
           if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY_HELPER))) return ENV_API_KEY_HELPER;
           if (definition.useDefaultEnv && cleanConfig(await ctx.env(ENV_API_KEY))) return ENV_API_KEY;
           return undefined;
@@ -1574,8 +1943,10 @@ function createProviderAuth(
         // key, the helper and the environment key. Whether the refresh token still mints
         // is only knowable at request time, and this must not make a network call; if it
         // fails, `resolve` falls back and reports the credential it actually used.
-        if (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled() && (await hasGcloudAdcCredentials()))
-          return { type: "api_key", source: GCLOUD_ADC_SOURCE };
+        const useGcloudToken = definition.useDefaultEnv
+          ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+          : definition.useGcloudTokenAuth;
+        if (useGcloudToken && (await hasGcloudAdcCredentials())) return { type: "api_key", source: GCLOUD_ADC_SOURCE };
         const fallback = await fallbackSource();
         return fallback ? { type: "api_key", source: fallback } : undefined;
       },
@@ -1931,6 +2302,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const mcpIdentitySalt = randomBytes(32);
 
   function mcpServerConfig(definition: ProviderDefinition): (McpServerConfig & { url: string }) | undefined {
+    if (definition.enableMcp === false) return undefined;
     if (discoveryDisabledReason() || isHostOffline()) return undefined;
     let root: string;
     try {
@@ -1965,10 +2337,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
       // The check must send the credential Pi will send. Like seeding, it runs no key helper and
       // mints no ADC token, and resolving without them would fall through to another key.
+      const useGcloudToken = definition.useDefaultEnv
+        ? definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled()
+        : definition.useGcloudTokenAuth;
       if (
         (stored?.type === "api_key" && stored.key?.startsWith("!")) ||
         definition.apiKeyConfig?.startsWith("!") ||
-        (definition.useGcloudTokenAuth && isGcloudTokenAuthEnabled())
+        useGcloudToken
       ) {
         return false;
       }
@@ -2172,20 +2547,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const networkRefreshAttempts = new Map<string, number>();
 
   for (const [index, definition] of definitions.entries()) {
+    const loginHooks = {
+      // Disconnect before the login can store a new credential: Pi's MCP client reads the
+      // provider's current token on every request, including the session teardown, so a
+      // connection still open to the old proxy root would send it the new credential.
+      start: () => dropMcpServer(definition),
+      complete: () => {
+        loginGeneration++;
+      },
+    };
     const auth = createProviderAuth(
       definition,
       () => oauthRuntimeRoots.delete(definition.name),
-      definition.name === PROVIDER_NAME
-        ? {
-            // Disconnect before the login can store a new credential: Pi's MCP client reads the
-            // provider's current token on every request, including the session teardown, so a
-            // connection still open to the old proxy root would send it the new credential.
-            start: () => dropMcpServer(definition),
-            complete: () => {
-              loginGeneration++;
-            },
-          }
-        : undefined,
+      loginHooks,
       () => oauthRuntimeRoots.get(definition.name),
     );
     if (auth.oauth) {
