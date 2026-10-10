@@ -73,13 +73,15 @@ func DiscoverModels(ctx context.Context, baseURL, apiKey string, options Options
 	if err != nil {
 		return nil, err
 	}
-	if infoResult.OK {
+	// An empty /model/info list is treated like an unavailable endpoint: some proxies answer 200
+	// with no rows for keys that can still list models through /v1/models.
+	if infoResult.OK && len(infoResult.Data.Data) > 0 {
 		return discoverFromModelInfo(ctx, base, apiKey, options, infoResult.Data)
 	}
-	if !isMissingOrDenied(infoResult.Status) {
+	if !infoResult.OK && !isMissingOrDenied(infoResult.Status) {
 		return nil, fmt.Errorf("/model/info returned %d", infoResult.Status)
 	}
-	options.progress("/model/info unavailable, trying /v1/models...")
+	options.progress("/model/info unavailable or empty, trying /v1/models...")
 	listResult, err := FetchJSON[looseRows](ctx, base+"/v1/models", apiKey, options)
 	if err != nil {
 		return nil, err

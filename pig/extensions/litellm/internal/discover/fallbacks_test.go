@@ -1499,6 +1499,18 @@ func TestFallbacks_ModelsListFallsBackWhenModelInfoReturnsAnAuthOrMissingStatus(
 	}
 }
 
+func TestFallbacks_ModelsListFallsBackWhenModelInfoSucceedsWithNoEntries(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbOK(`{"data":[]}`),
+		"/v1/models":  fbData(`{"id":"openai/gpt-4o"}`),
+	})
+
+	if result.Source != types.SourceModelsList {
+		t.Errorf("source = %s", result.Source)
+	}
+	fbExpectStrings(t, fbIDs(result.Models), "openai/gpt-4o")
+}
+
 func TestFallbacks_ModelsListUsesPiCatalogMetadataForTheFallback(t *testing.T) {
 	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
 		"/model/info": fbStatus(403),
