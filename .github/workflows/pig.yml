@@ -1,0 +1,94 @@
+name: PiG
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pig:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MOCK_ADDR: 127.0.0.1:48417
+      LITELLM_BASE_URL: http://127.0.0.1:48417
+      LITELLM_API_KEY: test-key
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The repository's Actions policy allows only actions/checkout and actions/setup-node, so the runner's Go is
+      # used; GOTOOLCHAIN=auto fetches the toolchain go.mod asks for.
+      - name: Go on PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Format
+        shell: bash
+        working-directory: pig/extensions/litellm
+        run: |
+          set -euo pipefail
+
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        working-directory: pig/extensions/litellm
+        run: go vet ./...
+
+      - name: Test extension
+        working-directory: pig/extensions/litellm
+        run: go test -race ./...
+
+      - name: Test mock proxy
+        working-directory: pig/tools/mockproxy
+        run: go test ./...
+
+      - name: Install PiG
+        run: go install github.com/MichaelKinsy/PiG/cmd/pig@v0.4.1
+
+      - name: Validate package
+        run: pig package validate ./pig --json
+
+      - name: Start mock proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .tmp
+          (cd pig/tools/mockproxy && go build -o ../../../.tmp/mockproxy .)
+          .tmp/mockproxy -addr "$MOCK_ADDR" -key "$LITELLM_API_KEY" \
+            > .tmp/mockproxy.log 2>&1 &
+          url="$LITELLM_BASE_URL/health/liveliness"
+          for _ in $(seq 1 30); do
+            if curl --connect-timeout 1 --max-time 3 -fsS "$url" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat .tmp/mockproxy.log >&2
+          exit 1
+
+      - name: PiG smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PIG_CODING_AGENT_DIR="$(mktemp -d)"
+          export PIG_CODING_AGENT_DIR
+
+          models="$(pig -e ./pig/extensions/litellm --list-models)"
+          echo "$models"
+          for model in mock-chat mock-claude mock-responses; do
+            grep -q "$model" <<<"$models"
+          done
+
+          reply="$(pig -e ./pig/extensions/litellm \
+            --model litellm/mock-chat -p "say hi")"
+          echo "$reply"
+          grep -q 'mock reply to: say hi' <<<"$reply"

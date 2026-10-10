@@ -311,6 +311,11 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 
 `litellm_skill_create` needs Skill Hub `sourceJson` metadata and a proxy that exposes `/claude-code/plugins`. It does not create skills from code: LiteLLM's `POST /v1/skills` is Anthropic's multipart Skills API.
 
+## PiG
+
+A Go port for [PiG](https://github.com/MichaelKinsy/PiG) lives in [`pig/`](pig/README.md). It reads the same
+settings, environment variables and `auth.json` entries; see [pig/README.md](pig/README.md) to install it.
+
 ## Mocked LiteLLM smoke workflow
 
 The `LiteLLM Smoke` GitHub Actions workflow starts VidaiMock and a real LiteLLM proxy on the runner. LiteLLM exposes route-distinct Chat, Responses, native Messages, and mixed-deployment models whose upstreams are served by VidaiMock. The smoke runner discovers those models through LiteLLM, asserts each model's expected API, exercises `/v1/chat/completions`, `/v1/responses`, and `/v1/messages`, verifies the expected `x-litellm-response-cost` behavior, and proves endpoint coverage from captured LiteLLM request logs rather than response text.
