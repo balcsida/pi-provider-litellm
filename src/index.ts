@@ -95,10 +95,29 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Remove a leading UTF-8 byte order mark, as Pi's own `stripBom` does. */
+function stripBom(content: string): string {
+  return content.startsWith("\uFEFF") ? content.slice(1) : content;
+}
+
+/**
+ * Pi's `stripJsonComments`, mirrored exactly so a file Pi accepts is never silently ignored here.
+ * It drops `//` line comments and trailing commas while leaving string literals untouched: a quoted
+ * string is matched first and re-emitted verbatim, so a `//` inside a URL or key survives.
+ */
+function stripJsonComments(input: string): string {
+  return input
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match[0] === '"' ? match : ""))
+    .replace(
+      /"(?:\\.|[^"\\])*"|,(\s*[}\]])/g,
+      (match, tail: string | undefined) => tail ?? (match[0] === '"' ? match : ""),
+    );
+}
+
 async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | undefined> {
   try {
     const raw = await readFile(join(getAgentDir(), SETTINGS_FILENAME), "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const parsed = JSON.parse(stripBom(raw)) as Record<string, unknown>;
     const settings = parsed[SETTINGS_KEY];
     return settings && typeof settings === "object" && !Array.isArray(settings)
       ? (settings as Record<string, unknown>)
@@ -121,7 +140,10 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
  */
 async function readModelsProviderSettings(): Promise<Record<string, unknown> | undefined> {
   try {
-    const parsed = JSON.parse(await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8")) as Record<string, unknown>;
+    // Pi reads models.json as JSONC (comments and trailing commas), unlike settings.json. Parsing it
+    // strictly here would drop a config Pi itself accepts, which surfaces as a bogus auth failure.
+    const raw = await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8");
+    const parsed = JSON.parse(stripJsonComments(stripBom(raw))) as Record<string, unknown>;
     const providers: Record<string, unknown> = {};
     const aliases = isPlainObject(parsed[SETTINGS_KEY]) ? parsed[SETTINGS_KEY].providers : undefined;
     if (isPlainObject(aliases)) Object.assign(providers, aliases);

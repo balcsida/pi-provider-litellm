@@ -3674,4 +3674,74 @@ describe("models.json provider config", () => {
     expect(pi.providers[0]?.baseUrl).toBe("https://env.example.com/v1");
     await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-env" } });
   });
+
+  it("parses a JSONC models.json with comments and trailing commas", async () => {
+    const agentDir = await makeAgentDir();
+    // Faithful to a hand-written Pi models.json: `//` comments plus trailing commas in both a nested
+    // object and the outer one. Pi accepts all of these; a strict parse must not. Pi strips only
+    // `//` comments, so a `/* */` block comment is deliberately absent here — it would fail in Pi too.
+    await writeFile(
+      join(agentDir, "models.json"),
+      `{
+  // Pi reads this file as JSONC, not strict JSON.
+  "providers": {
+    // the default provider
+    "litellm": {
+      "baseUrl": "https://models.example.com",
+      "apiKey": "sk-models",
+      "compat": { "supportsStrictTools": false, },
+    },
+  },
+}`,
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-models" } });
+  });
+
+  it("parses a models.json that starts with a byte order mark", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "models.json"),
+      `\uFEFF${JSON.stringify({
+        providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "sk-bom" } },
+      })}`,
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-bom" } });
+  });
+
+  it("keeps a // inside a models.json string literal", async () => {
+    const agentDir = await makeAgentDir();
+    // A naive comment stripper would truncate this value at the // and corrupt the config.
+    await writeModels(agentDir, {
+      providers: {
+        litellm: {
+          baseUrl: "https://models.example.com",
+          apiKey: "sk-models",
+          displayName: "Gateway // prod",
+        },
+      },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("Gateway // prod");
+  });
 });
