@@ -100,11 +100,7 @@ function stripBom(content: string): string {
   return content.startsWith("\uFEFF") ? content.slice(1) : content;
 }
 
-/**
- * Pi's `stripJsonComments`, mirrored exactly so a file Pi accepts is never silently ignored here.
- * It drops `//` line comments and trailing commas while leaving string literals untouched: a quoted
- * string is matched first and re-emitted verbatim, so a `//` inside a URL or key survives.
- */
+/** Pi's `stripJsonComments`, mirrored so a file Pi accepts is never silently ignored here. */
 function stripJsonComments(input: string): string {
   return input
     .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match[0] === '"' ? match : ""))
@@ -127,21 +123,12 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
   }
 }
 
-/**
- * Pi's own provider-config file, read raw for the same reason as settings.json: its typed schema
- * does not surface this plugin's keys. Only `providers` is taken from it — feature flags
- * (`skills`/`mcp`/`budget`) stay in settings.json, so a provider block here cannot switch them off.
- *
- * Both nestings work: the default provider sits in Pi's native `providers.litellm` slot, and aliases
- * mirror the settings.json shape `litellm.providers.<name>`. The native slot wins when a file sets both.
- *
- * Read from the global agent dir only. Project config is never consulted, so a cloned repository
- * cannot point this provider at a proxy of its own (see the README's OIDC note).
- */
+// Pi's own provider file. Only `providers` is read: `skills`/`mcp`/`budget` stay settings.json-only,
+// so a provider block here cannot switch a feature off. Aliases mirror settings.json's shape, and
+// the native `providers.litellm` slot wins when a file sets both. Global agent dir only.
 async function readModelsProviderSettings(): Promise<Record<string, unknown> | undefined> {
   try {
-    // Pi reads models.json as JSONC (comments and trailing commas), unlike settings.json. Parsing it
-    // strictly here would drop a config Pi itself accepts, which surfaces as a bogus auth failure.
+    // models.json is JSONC, unlike settings.json; a strict parse would drop a config Pi accepts.
     const raw = await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8");
     const parsed = JSON.parse(stripJsonComments(stripBom(raw))) as Record<string, unknown>;
     const providers: Record<string, unknown> = {};
@@ -158,11 +145,8 @@ async function readModelsProviderSettings(): Promise<Record<string, unknown> | u
   }
 }
 
-/**
- * A provider block may live in either file, so merge them per field with models.json winning.
- * settings.json's non-provider keys are carried through untouched, which is what keeps
- * `skills`/`mcp`/`budget` coming from settings.json alone.
- */
+// A provider block may live in either file; merge per field with models.json winning. Non-provider
+// settings.json keys pass through untouched, which is what keeps `skills`/`mcp`/`budget` working.
 function mergeProviderSettings(
   settings: Record<string, unknown> | undefined,
   models: Record<string, unknown> | undefined,
