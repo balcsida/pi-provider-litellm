@@ -110,9 +110,36 @@ export LITELLM_API_KEY="sk-..."
 
 Stored pi credentials for `litellm` take precedence over `LITELLM_API_KEY`; the environment key is used when no saved credential exists. `LITELLM_BASE_URL` is used when no saved login base URL exists. Chat Completions and Responses models use the proxy root plus `/v1`; native Messages uses the proxy root directly.
 
+### Option C — `models.json`
+
+For a long-lived API key, put the provider block in Pi's own `~/.pi/agent/models.json` instead of running `/login litellm`. No login is needed, and Pi injects the discovered models, so the block carries only `baseUrl` and `apiKey`:
+
+```json
+{
+  "providers": {
+    "litellm": {
+      "baseUrl": "https://litellm.your-domain.com",
+      "apiKey": "$LITELLM_API_KEY"
+    }
+  }
+}
+```
+
+`apiKey` is a Pi config value, so `$ENV_VAR`, `${ENV_VAR}`, `!command`, and a literal key all work, with a literal `$` escaped as `$$`. Prefer `$ENV_VAR` over a literal key: a key written literally here is exactly as readable on disk as one in `auth.json`.
+
+Only the global `~/.pi/agent/models.json` is read. A project-level file is never consulted, so a cloned repository cannot point this provider at a proxy of its own — the same rule [Direct OIDC login](#direct-oidc-login) states for `settings.json`.
+
+This covers long-lived tokens. SSO and other short-lived OAuth credentials still need `/login litellm`, because they require a browser round trip and refresh.
+
+#### Precedence
+
+A provider block may live in `models.json` or `settings.json`. The two merge per field, with `models.json` winning, and `skills`, `mcp`, and `budget` are read from `settings.json` only. `models.json` also accepts the default provider as `litellm.providers.litellm`, the same shape `settings.json` uses.
+
+A stored `/login` credential still takes precedence over a configured `apiKey`, and so does a Google ADC token for the default provider. To move a provider that already has a stored credential over to `models.json`, run `/logout litellm` first.
+
 ### Multiple LiteLLM provider aliases
 
-Add alias providers in `~/.pi/agent/settings.json` under `litellm.providers`. Each alias is registered as a separate Pi provider name, so models appear as `litellm/model-id` and `litellm-anthropic/model-id`.
+Add alias providers in `~/.pi/agent/settings.json` under `litellm.providers`, or in `~/.pi/agent/models.json` under the same shape. Each alias is registered as a separate Pi provider name, so models appear as `litellm/model-id` and `litellm-anthropic/model-id`. In `models.json`, the default provider is usually written as the top-level `providers.litellm` shown in Option C instead.
 
 ```json
 {

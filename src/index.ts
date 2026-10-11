@@ -36,6 +36,8 @@ import type {
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
+const SETTINGS_FILENAME = "settings.json";
+const MODELS_FILENAME = "models.json";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_DISPLAY_NAME = "LITELLM_DISPLAY_NAME";
@@ -95,7 +97,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | undefined> {
   try {
-    const raw = await readFile(join(getAgentDir(), "settings.json"), "utf8");
+    const raw = await readFile(join(getAgentDir(), SETTINGS_FILENAME), "utf8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const settings = parsed[SETTINGS_KEY];
     return settings && typeof settings === "object" && !Array.isArray(settings)
@@ -104,6 +106,54 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Pi's own provider-config file, read raw for the same reason as settings.json: its typed schema
+ * does not surface this plugin's keys. Only `providers` is taken from it — feature flags
+ * (`skills`/`mcp`/`budget`) stay in settings.json, so a provider block here cannot switch them off.
+ *
+ * Both nestings work: the default provider sits in Pi's native `providers.litellm` slot, and aliases
+ * mirror the settings.json shape `litellm.providers.<name>`. The native slot wins when a file sets both.
+ *
+ * Read from the global agent dir only. Project config is never consulted, so a cloned repository
+ * cannot point this provider at a proxy of its own (see the README's OIDC note).
+ */
+async function readModelsProviderSettings(): Promise<Record<string, unknown> | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8")) as Record<string, unknown>;
+    const providers: Record<string, unknown> = {};
+    const aliases = isPlainObject(parsed[SETTINGS_KEY]) ? parsed[SETTINGS_KEY].providers : undefined;
+    if (isPlainObject(aliases)) Object.assign(providers, aliases);
+    const native = isPlainObject(parsed.providers) ? parsed.providers[PROVIDER_NAME] : undefined;
+    if (isPlainObject(native)) {
+      const existing = providers[PROVIDER_NAME];
+      providers[PROVIDER_NAME] = isPlainObject(existing) ? { ...existing, ...native } : native;
+    }
+    return Object.keys(providers).length > 0 ? { providers } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A provider block may live in either file, so merge them per field with models.json winning.
+ * settings.json's non-provider keys are carried through untouched, which is what keeps
+ * `skills`/`mcp`/`budget` coming from settings.json alone.
+ */
+function mergeProviderSettings(
+  settings: Record<string, unknown> | undefined,
+  models: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const modelsProviders = isPlainObject(models?.providers) ? models.providers : undefined;
+  if (!modelsProviders) return settings;
+  const settingsProviders = isPlainObject(settings?.providers) ? settings.providers : undefined;
+  const providers: Record<string, unknown> = { ...settingsProviders };
+  for (const [name, raw] of Object.entries(modelsProviders)) {
+    const base = settingsProviders?.[name];
+    providers[name] = isPlainObject(base) && isPlainObject(raw) ? { ...base, ...raw } : raw;
+  }
+  return { ...settings, providers };
 }
 
 function cleanConfig(raw: string | undefined): string | undefined {
@@ -1883,7 +1933,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         "Update Pi, or install the last release for older Pi: pi install npm:pi-provider-litellm@3.4.0",
     );
   }
-  const settings = await readGlobalLiteLLMSettings();
+  const settings = mergeProviderSettings(await readGlobalLiteLLMSettings(), await readModelsProviderSettings());
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");
