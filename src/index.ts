@@ -36,6 +36,8 @@ import type {
 
 const PROVIDER_NAME = "litellm";
 const SETTINGS_KEY = "litellm";
+const SETTINGS_FILENAME = "settings.json";
+const MODELS_FILENAME = "models.json";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_DISPLAY_NAME = "LITELLM_DISPLAY_NAME";
@@ -93,10 +95,25 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Remove a leading UTF-8 byte order mark, as Pi's own `stripBom` does. */
+function stripBom(content: string): string {
+  return content.startsWith("\uFEFF") ? content.slice(1) : content;
+}
+
+/** Pi's `stripJsonComments`, mirrored so a file Pi accepts is never silently ignored here. */
+function stripJsonComments(input: string): string {
+  return input
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match[0] === '"' ? match : ""))
+    .replace(
+      /"(?:\\.|[^"\\])*"|,(\s*[}\]])/g,
+      (match, tail: string | undefined) => tail ?? (match[0] === '"' ? match : ""),
+    );
+}
+
 async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | undefined> {
   try {
-    const raw = await readFile(join(getAgentDir(), "settings.json"), "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const raw = await readFile(join(getAgentDir(), SETTINGS_FILENAME), "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as Record<string, unknown>;
     const settings = parsed[SETTINGS_KEY];
     return settings && typeof settings === "object" && !Array.isArray(settings)
       ? (settings as Record<string, unknown>)
@@ -104,6 +121,45 @@ async function readGlobalLiteLLMSettings(): Promise<Record<string, unknown> | un
   } catch {
     return undefined;
   }
+}
+
+// Pi's own provider file. Only `providers` is read: `skills`/`mcp`/`budget` stay settings.json-only,
+// so a provider block here cannot switch a feature off. Aliases mirror settings.json's shape, and
+// the native `providers.litellm` slot wins when a file sets both. Global agent dir only.
+async function readModelsProviderSettings(): Promise<Record<string, unknown> | undefined> {
+  try {
+    // models.json is JSONC, unlike settings.json; a strict parse would drop a config Pi accepts.
+    const raw = await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8");
+    const parsed = JSON.parse(stripJsonComments(stripBom(raw))) as Record<string, unknown>;
+    const providers: Record<string, unknown> = {};
+    const aliases = isPlainObject(parsed[SETTINGS_KEY]) ? parsed[SETTINGS_KEY].providers : undefined;
+    if (isPlainObject(aliases)) Object.assign(providers, aliases);
+    const native = isPlainObject(parsed.providers) ? parsed.providers[PROVIDER_NAME] : undefined;
+    if (isPlainObject(native)) {
+      const existing = providers[PROVIDER_NAME];
+      providers[PROVIDER_NAME] = isPlainObject(existing) ? { ...existing, ...native } : native;
+    }
+    return Object.keys(providers).length > 0 ? { providers } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// A provider block may live in either file; merge per field with models.json winning. Non-provider
+// settings.json keys pass through untouched, which is what keeps `skills`/`mcp`/`budget` working.
+function mergeProviderSettings(
+  settings: Record<string, unknown> | undefined,
+  models: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const modelsProviders = isPlainObject(models?.providers) ? models.providers : undefined;
+  if (!modelsProviders) return settings;
+  const settingsProviders = isPlainObject(settings?.providers) ? settings.providers : undefined;
+  const providers: Record<string, unknown> = { ...settingsProviders };
+  for (const [name, raw] of Object.entries(modelsProviders)) {
+    const base = settingsProviders?.[name];
+    providers[name] = isPlainObject(base) && isPlainObject(raw) ? { ...base, ...raw } : raw;
+  }
+  return { ...settings, providers };
 }
 
 function cleanConfig(raw: string | undefined): string | undefined {
@@ -1883,7 +1939,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         "Update Pi, or install the last release for older Pi: pi install npm:pi-provider-litellm@3.4.0",
     );
   }
-  const settings = await readGlobalLiteLLMSettings();
+  const settings = mergeProviderSettings(await readGlobalLiteLLMSettings(), await readModelsProviderSettings());
   const definitions = getProviderDefinitions(settings);
   const skillsEnabled = isFeatureEnabled(settings, "skills");
   const mcpEnabled = isFeatureEnabled(settings, "mcp");

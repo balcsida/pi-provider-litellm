@@ -57,7 +57,8 @@
 - `/litellm-refresh` is the explicit refresh that Pi's `PI_OFFLINE` otherwise blocks. It passes `allowNetwork: true`
   but keeps the `LITELLM_OFFLINE=1` and zero-timeout gates, and models.dev stays off under `PI_OFFLINE`; do not widen it
   past the configured proxies.
-- Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY`.
+- Provider config is read from `models.json` and `settings.json`, merged per field with `models.json` winning. `models.json` takes the default provider from Pi's native `providers.litellm` slot and aliases from `litellm.providers.<name>`; `settings.json` keeps `litellm.providers.<name>` for both. Only `providers` is taken from `models.json`, so `skills`/`mcp`/`budget` stay settings.json-only and a provider block there cannot switch a feature off. Both files are read from the global agent dir only — never a project-level copy, which is what stops a cloned repository pointing this provider at a proxy of its own.
+- Stored Pi `/login litellm` credentials take precedence over `LITELLM_API_KEY` and over a configured `apiKey`; Google ADC likewise outranks a configured `apiKey` for the default provider. Keep `resolveApiKeyAuth`'s stored-first branch ahead of the `definition.apiKeyConfig` fallback when touching either.
 - Bump `LITELLM_DISCOVERY_VERSION` (and its pin in `tests/backend-identity.test.ts`) whenever discovery adds or changes persisted model metadata such as a `litellmPolicy` field. Pi keeps a same-version stored entry over what startup discovery just proved, so older caches would otherwise mask the change.
 - Pi stores discovered models in `models-store.json`; models.dev enrichment is opt-in with `LITELLM_MODELS_DEV=1` and
   uses `litellm-models-dev.json` with a 28-day cache window under the Pi agent dir. When it is off, discovery must not
