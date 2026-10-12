@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
 )
@@ -363,6 +364,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 type mcpCheck struct {
 	method, url, body string
 	header            http.Header
+	deadline          time.Time
 }
 
 // mcpProxy answers the access checks in-process, as the TypeScript fetch mock does, and records them.
@@ -375,7 +377,8 @@ func mcpProxy(t *testing.T, answer func(*http.Request) (*http.Response, error)) 
 		if r.Body != nil {
 			body, _ = io.ReadAll(r.Body)
 		}
-		*checks = append(*checks, mcpCheck{r.Method, r.URL.String(), string(body), r.Header.Clone()})
+		deadline, _ := r.Context().Deadline()
+		*checks = append(*checks, mcpCheck{r.Method, r.URL.String(), string(body), r.Header.Clone(), deadline})
 		return answer(r)
 	})
 	t.Cleanup(func() { mcpTransport = previous })
@@ -416,6 +419,8 @@ func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheChe
 		if r.Method != http.MethodPost {
 			return mcpAnswer(200, nil)
 		}
+		// Long enough for a cleanup on its own clock to show a later deadline.
+		time.Sleep(5 * time.Millisecond)
 		return mcpAnswer(200, map[string]string{"mcp-session-id": "check-session"})
 	})
 	defaultEnv(t, "https://proxy.example.com")
@@ -438,6 +443,10 @@ func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheChe
 	if closing.method != http.MethodDelete || closing.header.Get("mcp-session-id") != "check-session" ||
 		closing.header.Get("Authorization") != "Bearer sk-default" {
 		t.Fatalf("close = %+v", closing)
+	}
+	// The cleanup runs on its own budget, so a slow initialize cannot starve it.
+	if !closing.deadline.After(check.deadline) {
+		t.Fatalf("close deadline %v is not after the check's %v", closing.deadline, check.deadline)
 	}
 }
 

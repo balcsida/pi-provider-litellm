@@ -156,7 +156,8 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 		(definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled()) {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seedTimeoutMsBudget())*time.Millisecond)
+	budget := time.Duration(seedTimeoutMsBudget()) * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	var apiKey, root string
 	if stored != nil && stored.Type == "oauth" {
@@ -202,7 +203,10 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 	response.Body.Close()
 	// The host opens its own session; end the one this check opened.
 	if session := response.Header.Get("mcp-session-id"); session != "" {
-		if closing, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil); err == nil {
+		// On its own budget, as in the TypeScript, so a slow initialize cannot starve the cleanup.
+		closeCtx, cancelClose := context.WithTimeout(context.Background(), budget)
+		defer cancelClose()
+		if closing, err := http.NewRequestWithContext(closeCtx, http.MethodDelete, url, nil); err == nil {
 			closing.Header = headers.Clone()
 			closing.Header.Set("mcp-session-id", session)
 			if closed, err := client.Do(closing); err == nil {
