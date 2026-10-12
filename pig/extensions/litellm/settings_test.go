@@ -3,7 +3,9 @@ package litellm
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +32,11 @@ func hermeticAgentDir(t *testing.T) string {
 	t.Setenv("PIG_CODING_AGENT_DIR", dir)
 	t.Setenv("HOME", t.TempDir())
 	resetGcloudTokenCache()
+	// No test reaches the network: an MCP access check a test does not answer fails, as with the TypeScript
+	// fetch mock, and registers the server enabled.
+	savedTransport := mcpTransport
+	mcpTransport = roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("no network in tests") })
+	t.Cleanup(func() { mcpTransport = savedTransport })
 	return dir
 }
 

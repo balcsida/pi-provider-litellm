@@ -88,7 +88,13 @@ jobs:
             grep -q "$model" <<<"$models"
           done
 
-          reply="$(pig -e ./pig/extensions/litellm \
-            --model litellm/mock-chat -p "say hi")"
-          echo "$reply"
-          grep -q 'mock reply to: say hi' <<<"$reply"
+          for model in mock-chat mock-responses mock-claude; do
+            reply="$(pig -e ./pig/extensions/litellm \
+              --model "litellm/$model" -p "say hi")"
+            echo "$reply"
+            grep -q 'mock reply to: say hi' <<<"$reply"
+          done
+          # Each model reached the proxy on its own protocol's endpoint.
+          for path in /v1/chat/completions /v1/responses /v1/messages; do
+            grep -q "POST $path" .tmp/mockproxy.log
+          done

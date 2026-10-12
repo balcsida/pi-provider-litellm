@@ -518,7 +518,8 @@ func awaitEnrichmentWithinBudget[T any](ctx context.Context, result <-chan T, bu
 
 // loadDiscoveryPublicCatalog loads the public catalog within its budget. The load itself is not
 // cancelled when the budget elapses or ctx ends, as the TypeScript promise keeps running: it is bounded
-// by the catalog's own timeout and refreshes the cache for the next discovery.
+// by the catalog's own timeout and refreshes the cache for the next discovery, and catalog.Drain waits
+// for it at session shutdown.
 func loadDiscoveryPublicCatalog(ctx context.Context, options Options) (catalog.PublicCatalog, error) {
 	loadOptions := catalog.LoadPublicCatalogOptions{
 		CachePath: options.ModelsDevCachePath,
@@ -530,7 +531,7 @@ func loadDiscoveryPublicCatalog(ctx context.Context, options Options) (catalog.P
 	}
 	result := make(chan catalog.PublicCatalog, 1)
 	detached := context.WithoutCancel(ctx)
-	go func() { result <- catalog.LoadPublicCatalog(detached, loadOptions) }()
+	catalog.Go(func() { result <- catalog.LoadPublicCatalog(detached, loadOptions) })
 	return awaitEnrichmentWithinBudget(ctx, result, min(options.timeout(), publicCatalogBudget))
 }
 

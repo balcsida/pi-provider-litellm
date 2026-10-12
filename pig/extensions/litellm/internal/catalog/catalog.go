@@ -411,15 +411,13 @@ var (
 	backgroundInFlight = map[*refreshCall]struct{}{}
 )
 
-// backgroundRefresh is `void refreshCatalog(...)`: the caller does not wait, and the stale cache
-// keeps serving. The fetch outlives ctx's cancellation but is bounded by options.Timeout, and
-// Drain waits for it.
-func backgroundRefresh(ctx context.Context, key string, options LoadPublicCatalogOptions) {
+// Go runs fn on a goroutine that Drain waits for: every detached catalog fetch gets the shutdown hook as
+// its owner, although the fetch's own timeout, not that hook, ends it.
+func Go(fn func()) {
 	call := &refreshCall{done: make(chan struct{})}
 	backgroundMu.Lock()
 	backgroundInFlight[call] = struct{}{}
 	backgroundMu.Unlock()
-	ctx = context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			backgroundMu.Lock()
@@ -427,12 +425,20 @@ func backgroundRefresh(ctx context.Context, key string, options LoadPublicCatalo
 			backgroundMu.Unlock()
 			close(call.done)
 		}()
-		refreshCatalog(ctx, key, options)
+		fn()
 	}()
 }
 
-// Drain waits for in-flight background refreshes, returning ctx.Err() if ctx ends first.
-// The extension calls it on session shutdown.
+// backgroundRefresh is `void refreshCatalog(...)`: the caller does not wait, and the stale cache
+// keeps serving. The fetch outlives ctx's cancellation but is bounded by options.Timeout, and
+// Drain waits for it.
+func backgroundRefresh(ctx context.Context, key string, options LoadPublicCatalogOptions) {
+	ctx = context.WithoutCancel(ctx)
+	Go(func() { refreshCatalog(ctx, key, options) })
+}
+
+// Drain waits for the fetches Go started, returning ctx.Err() if ctx ends first. The extension calls it
+// on session shutdown.
 func Drain(ctx context.Context) error {
 	backgroundMu.Lock()
 	pending := make([]*refreshCall, 0, len(backgroundInFlight))

@@ -386,25 +386,33 @@ func normalizeEffort(level string) (ai.ThinkingLevel, bool) {
 	return "", false
 }
 
-// levelFlag reads the LiteLLM support flag for a level. It follows thinking.Definitions.
-func levelFlag(info *types.ModelInfoDetails, level ai.ThinkingLevel) *bool {
-	switch level {
-	case ai.ThinkingOff:
-		return info.SupportsNoneReasoningEffort
-	case ai.ThinkingMinimal:
-		return info.SupportsMinimalReasoningEffort
-	case ai.ThinkingLow:
-		return info.SupportsLowReasoningEffort
-	case ai.ThinkingMedium:
-		return info.SupportsMediumReasoningEffort
-	case ai.ThinkingHigh:
-		return info.SupportsHighReasoningEffort
-	case ai.ThinkingXHigh:
-		return info.SupportsXHighReasoningEffort
-	case ai.ThinkingMax:
-		return info.SupportsMaxReasoningEffort
+// levelFlagFields maps each thinking.Definitions level to the ModelInfoDetails field its LiteLLM support flag
+// decodes into, found by JSON tag, so the table is derived from the one definition rather than restated. A
+// definition without a field fails here, at init, before any level could go unread.
+var levelFlagFields = func() map[ai.ThinkingLevel]int {
+	fields := map[ai.ThinkingLevel]int{}
+	details := reflect.TypeFor[types.ModelInfoDetails]()
+	for _, definition := range thinking.Definitions {
+		for i := range details.NumField() {
+			if name, _, _ := strings.Cut(details.Field(i).Tag.Get("json"), ","); name == definition.Flag {
+				fields[definition.Level] = i
+			}
+		}
+		if _, ok := fields[definition.Level]; !ok {
+			panic("model_info has no field for " + definition.Flag)
+		}
 	}
-	return nil
+	return fields
+}()
+
+// levelFlag reads the LiteLLM support flag thinking.Definitions names for a level.
+func levelFlag(info *types.ModelInfoDetails, level ai.ThinkingLevel) *bool {
+	index, ok := levelFlagFields[level]
+	if !ok {
+		return nil
+	}
+	flag, _ := reflect.ValueOf(info).Elem().Field(index).Interface().(*bool)
+	return flag
 }
 
 func boolPtr(value bool) *bool { return &value }

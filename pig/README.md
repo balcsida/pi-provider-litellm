@@ -99,6 +99,9 @@ pig -e ./pig/extensions/litellm --list-models
 pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"
 ```
 
+Repeat the prompt with `mock-responses` and `mock-claude`; the mock logs `POST /v1/responses` and `POST /v1/messages`
+when each model reaches its own protocol's endpoint.
+
 The mock also plays the proxy's SSO endpoints (`-sso cli|pkce|paste`), and `pig/tools/login-smoke/login-smoke.mts`
 drives `/login litellm` through a real terminal against them:
 

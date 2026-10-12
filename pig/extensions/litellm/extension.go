@@ -20,6 +20,7 @@ import (
 	"github.com/MichaelKinsy/PiG/ai"
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/bridge"
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/catalog"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/discover"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/protocols"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
@@ -554,6 +555,10 @@ func setupSessionState(e hookRegistrar, s *extensionState) {
 		s.mu.Lock()
 		s.ui, s.sessionStarted, s.pendingMessages = nil, false, nil
 		s.mu.Unlock()
+		// The detached public-catalog fetches get the same bounded drain as the budget polls.
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainBudget)
+		defer cancel()
+		_ = catalog.Drain(ctx)
 		return nil, nil
 	})
 }

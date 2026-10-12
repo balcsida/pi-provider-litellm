@@ -95,6 +95,9 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
    pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"   # streams "mock reply to: ..."
    ```
 
+   Repeat the prompt with `mock-responses` and `mock-claude`: the mock logs `POST /v1/responses` and
+   `POST /v1/messages`, which proves each model reached its own protocol's endpoint.
+
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
 5. Login inside a session: `pig/tools/login-smoke/login-smoke.mts` drives `/login litellm` through a real terminal
@@ -134,8 +137,6 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   methods the handlers use; `sdkHost` adapts `sdk.Context`), so the wiring tests register into a recording fake and
   call the handlers with hand-built `data` maps (`TestHookRegistration`, `TestHookDataKeysAndScoping`).
 - `ctx.ui.setStatus(undefined)` has no SDK equivalent; an empty string clears the budget status.
-- A JSON `null` under `litellm.oidc` is treated as unset rather than rejected, because the decoded settings map
-  cannot distinguish null from absent.
 - Diagnostics the TypeScript writes to stderr go through one reporter; in a fused binary they still reach stderr.
 
 ## Known PiG 0.4.1 issues

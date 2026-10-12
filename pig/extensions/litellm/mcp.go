@@ -7,19 +7,27 @@ package litellm
 // or new headers change the registration.
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
 )
+
+// mcpTransport is the transport of the access check; nil means http.DefaultTransport. Tests inject one that
+// answers in-process.
+var mcpTransport http.RoundTripper
 
 // mcpRegistrar is the part of *sdk.Extension and sdk.Context that registers MCP servers.
 type mcpRegistrar interface {
@@ -42,7 +50,7 @@ type mcpSync struct {
 	settingsErr error
 
 	mu       sync.Mutex
-	attempts map[string]mcpAttempt
+	attempts map[string]*mcpAttempt
 	last     mcpRegistrar
 	// Headers can carry credentials, so a config is remembered as a keyed digest.
 	salt []byte
@@ -53,7 +61,7 @@ func newMcpSync(state *extensionState, settingsRaw []byte) (*mcpSync, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	m := &mcpSync{state: state, attempts: map[string]mcpAttempt{}, salt: salt}
+	m := &mcpSync{state: state, attempts: map[string]*mcpAttempt{}, salt: salt}
 	// The host validates exposure and toolExposure; an unusable value is reported when registering. The
 	// settings file is decoded again here because toolExposure patterns are ordered and the decoded map is not.
 	var top map[string]json.RawMessage
@@ -130,9 +138,79 @@ func (m *mcpSync) drop(registrar mcpRegistrar, definition providerDefinition) {
 func (m *mcpSync) dropLocked(registrar mcpRegistrar, definition providerDefinition) {
 	attempt := m.attempts[definition.Name]
 	delete(m.attempts, definition.Name)
-	if attempt.registered {
+	if attempt != nil && attempt.registered {
 		registrar.UnregisterMcpServer(definition.Name)
 	}
+}
+
+// mcpAccessRefused is mcpAccessRefused. LiteLLM 1.102.0 and later answer `initialize` with 403 when the key
+// has no MCP servers granted, and a host warns at every start about a server that fails to connect. Asking
+// first lets such a server be registered disabled: the host neither connects to it nor warns, and the user
+// can enable it once servers are granted.
+func mcpAccessRefused(definition providerDefinition, url string) bool {
+	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
+	// The check must send the credential the host will send. Like seeding, it runs no key helper and mints
+	// no ADC token, and resolving without them would fall through to another key.
+	if (stored != nil && stored.Type == "api_key" && strings.HasPrefix(stored.Key, "!")) ||
+		strings.HasPrefix(definition.APIKeyConfig, "!") ||
+		(definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled()) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seedTimeoutMsBudget())*time.Millisecond)
+	defer cancel()
+	var apiKey, root string
+	if stored != nil && stored.Type == "oauth" {
+		resolved, err := credentialRoot(definition, credentialInfoFromStored(stored))
+		if err != nil {
+			return false
+		}
+		apiKey, root = stored.Access, resolved
+	} else {
+		auth, err := resolveAPIKeyAuth(ctx, definition, processEnv, credentialFromStored(stored), false)
+		if err != nil || auth == nil {
+			return false
+		}
+		apiKey, root = auth.Auth.APIKey, auth.Auth.BaseURL
+	}
+	// The credential goes only to its own root.
+	if apiKey == "" || root+"/mcp" != url {
+		return false
+	}
+	// The credential and headers the host's client sends, so the proxy answers as it will answer the host.
+	headers := http.Header{}
+	for name, value := range resolveHeaders(definition) {
+		headers.Set(name, value)
+	}
+	headers.Set("Authorization", "Bearer "+apiKey)
+	client := &http.Client{
+		Transport:     mcpTransport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	// The proxy's answer does not depend on the client it is told about.
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"pig","version":"0"}}}`
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	request.Header = headers.Clone()
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	// The host opens its own session; end the one this check opened.
+	if session := response.Header.Get("mcp-session-id"); session != "" {
+		if closing, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil); err == nil {
+			closing.Header = headers.Clone()
+			closing.Header.Set("mcp-session-id", session)
+			if closed, err := client.Do(closing); err == nil {
+				closed.Body.Close()
+			}
+		}
+	}
+	return response.StatusCode == http.StatusForbidden
 }
 
 // sync is syncMcpServer.
@@ -140,27 +218,41 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 	config := m.config(definition)
 	identity := m.identity(config)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if previous, ok := m.attempts[definition.Name]; (ok && identity == previous.identity) || (!ok && config == nil) {
+		m.mu.Unlock()
 		return
 	}
 	// Close the old connection before opening one to a new root, and leave nothing behind when the host
 	// refuses the new config.
 	m.dropLocked(registrar, definition)
 	if config == nil {
+		m.mu.Unlock()
 		return
+	}
+	// Claimed before the access check, so the next turn does not repeat it, and a login that starts
+	// meanwhile drops the claim before this registration can land.
+	attempt := &mcpAttempt{identity: identity}
+	m.attempts[definition.Name] = attempt
+	m.mu.Unlock()
+	refused := m.settingsErr == nil && mcpAccessRefused(definition, config.URL)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.attempts[definition.Name] != attempt {
+		return
+	}
+	if refused {
+		config.Enabled = new(false)
 	}
 	err := m.settingsErr
 	if err == nil {
 		err = registrar.RegisterMcpServer(definition.Name, *config)
 	}
 	if err != nil {
-		// Remembered so the refusal is reported once rather than on every turn.
-		m.attempts[definition.Name] = mcpAttempt{identity: identity}
+		// The claim stays, so the refusal is reported once rather than on every turn.
 		m.state.notifyMcp(fmt.Sprintf("LiteLLM MCP (%s): %s", jsonString(definition.Name), err.Error()), "warning")
 		return
 	}
-	m.attempts[definition.Name] = mcpAttempt{identity: identity, registered: true}
+	attempt.registered = true
 }
 
 // lastRegistrar is the registrar of the latest sync, nil before the first one.

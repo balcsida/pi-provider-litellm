@@ -243,3 +243,61 @@ func TestResponseHeaders(t *testing.T) {
 		})
 	}
 }
+
+// deltaText is the text one streamed event carries, by protocol.
+func deltaText(event map[string]interface{}) string {
+	if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
+		delta, _ := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		text, _ := delta["content"].(string)
+		return text
+	}
+	switch event["type"] {
+	case "content_block_delta":
+		delta, _ := event["delta"].(map[string]interface{})
+		text, _ := delta["text"].(string)
+		return text
+	case "response.output_text.delta":
+		text, _ := event["delta"].(string)
+		return text
+	}
+	return ""
+}
+
+func TestStreamsCarryQuotedAndMultilinePrompts(t *testing.T) {
+	baseURL, testKey := startServer(t)
+	prompt := "say \"hi\"\\\nand ünïcode — 日本語"
+	messages := []map[string]string{{"role": "user", "content": prompt}}
+	for _, tc := range []struct {
+		path string
+		body map[string]interface{}
+	}{
+		{"/v1/chat/completions", map[string]interface{}{"model": "mock-chat", "stream": true, "messages": messages}},
+		{"/v1/messages", map[string]interface{}{"model": "mock-claude", "stream": true, "messages": messages}},
+		{"/v1/responses", map[string]interface{}{"model": "mock-responses", "input": messages}},
+	} {
+		bodyBytes, _ := json.Marshal(tc.body)
+		req, _ := http.NewRequest("POST", baseURL+tc.path, bytes.NewReader(bodyBytes))
+		req.Header.Set("Authorization", "Bearer "+testKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.path, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var got string
+		for _, line := range bytes.Split(raw, []byte("\n")) {
+			data, ok := bytes.CutPrefix(line, []byte("data: "))
+			if !ok || string(data) == "[DONE]" {
+				continue
+			}
+			var event map[string]interface{}
+			if err := json.Unmarshal(data, &event); err != nil {
+				t.Fatalf("%s: invalid stream data %s: %v", tc.path, data, err)
+			}
+			got += deltaText(event)
+		}
+		if want := "mock reply to: " + prompt; got != want {
+			t.Errorf("%s: streamed %q, want %q", tc.path, got, want)
+		}
+	}
+}

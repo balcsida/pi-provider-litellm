@@ -72,6 +72,8 @@ var defaultModels = []ModelInfo{
 			"supported_endpoints": []string{"/v1/messages", "/v1/chat/completions"},
 			"max_input_tokens":    200000,
 			"max_output_tokens":   64000,
+			// The cost-map adapter LiteLLM reports for an Anthropic route; native Messages discovery needs it.
+			"litellm_provider": "anthropic",
 		},
 	},
 }
@@ -168,6 +170,18 @@ func extractTextFromContent(content interface{}) string {
 	return ""
 }
 
+// jsonText JSON-encodes s, so quotes, backslashes and newlines in a prompt stay valid stream data.
+func jsonText(s string) string {
+	encoded, _ := json.Marshal(s)
+	return string(encoded)
+}
+
+// thirds splits s into three pieces on character boundaries.
+func thirds(s string) []string {
+	runes := []rune(s)
+	return []string{string(runes[:len(runes)/3]), string(runes[len(runes)/3 : 2*len(runes)/3]), string(runes[2*len(runes)/3:])}
+}
+
 func getLastUserMessage(msgs interface{}) string {
 	if arr, ok := msgs.([]interface{}); ok {
 		for i := len(arr) - 1; i >= 0; i-- {
@@ -207,11 +221,12 @@ func makeHandleChatCompletions(checkKey string) http.HandlerFunc {
 		if stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
+			parts := thirds(replyText)
 			chunks := []string{
 				`{"choices":[{"delta":{"role":"assistant"},"index":0}]}`,
-				fmt.Sprintf(`{"choices":[{"delta":{"content":"%s"},"index":0}]}`, replyText[:len(replyText)/3]),
-				fmt.Sprintf(`{"choices":[{"delta":{"content":"%s"},"index":0}]}`, replyText[len(replyText)/3:2*len(replyText)/3]),
-				fmt.Sprintf(`{"choices":[{"delta":{"content":"%s"},"index":0}]}`, replyText[2*len(replyText)/3:]),
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[0])),
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[1])),
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[2])),
 				`{"choices":[{"delta":{"content":""},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
 			}
 			for _, chunk := range chunks {
@@ -265,9 +280,8 @@ func makeHandleResponses(checkKey string) http.HandlerFunc {
 		}
 		lastMsg := getLastUserMessage(input)
 		replyText := "mock reply to: " + lastMsg
-		third := len(replyText) / 3
-		deltas := []string{replyText[:third], replyText[third : 2*third], replyText[2*third:]}
-		quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+		deltas := thirds(replyText)
+		quote := jsonText
 
 		// Real Responses API stream shape: top-level item/delta fields, not nested under "response".
 		item := fmt.Sprintf(`{"id":"msg_test","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}`, quote(replyText))
@@ -315,13 +329,14 @@ func makeHandleMessages(checkKey string) http.HandlerFunc {
 
 		lastMsg := getLastUserMessage(req["messages"])
 		replyText := "mock reply to: " + lastMsg
+		parts := thirds(replyText)
 
 		events := []string{
 			`{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
 			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%s"}}`, replyText[:len(replyText)/3]),
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%s"}}`, replyText[len(replyText)/3:2*len(replyText)/3]),
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%s"}}`, replyText[2*len(replyText)/3:]),
+			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[0])),
+			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[1])),
+			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[2])),
 			`{"type":"content_block_stop","index":0}`,
 			`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":20}}`,
 			`{"type":"message_stop"}`,

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -349,5 +351,156 @@ func TestMcpLoginStartDropsTheServerThroughTheSessionHost(t *testing.T) {
 	}
 	if _, ok := host.servers["litellm"]; ok {
 		t.Fatal("still registered while the login prompts")
+	}
+}
+
+// roundTripFunc adapts a function to http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// mcpCheck is one request the access check sent.
+type mcpCheck struct {
+	method, url, body string
+	header            http.Header
+}
+
+// mcpProxy answers the access checks in-process, as the TypeScript fetch mock does, and records them.
+func mcpProxy(t *testing.T, answer func(*http.Request) (*http.Response, error)) *[]mcpCheck {
+	t.Helper()
+	checks := &[]mcpCheck{}
+	previous := mcpTransport
+	mcpTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body []byte
+		if r.Body != nil {
+			body, _ = io.ReadAll(r.Body)
+		}
+		*checks = append(*checks, mcpCheck{r.Method, r.URL.String(), string(body), r.Header.Clone()})
+		return answer(r)
+	})
+	t.Cleanup(func() { mcpTransport = previous })
+	return checks
+}
+
+func mcpAnswer(status int, headers map[string]string) (*http.Response, error) {
+	response := &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}
+	for name, value := range headers {
+		response.Header.Set(name, value)
+	}
+	return response, nil
+}
+
+// noServersGranted is LiteLLM 1.102.0's answer to `initialize` for a key with no MCP servers granted.
+func noServersGranted(*http.Request) (*http.Response, error) { return mcpAnswer(403, nil) }
+
+func TestMcpRegistersTheServerDisabledWithoutANoticeWhenTheProxyRefusesTheKeyAtInitialize(t *testing.T) {
+	_, state, m := mcpFixture(t, "")
+	checks := mcpProxy(t, noServersGranted)
+	defaultEnv(t, "https://proxy.example.com")
+	diagnostics := collectDiagnostics(t)
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	m.syncAll(f)
+	want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, f); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+	if len(*checks) != 1 || len(*diagnostics) != 0 || len(state.pendingMessages) != 0 {
+		t.Fatalf("checks = %d, diagnostics = %q, pending = %v", len(*checks), *diagnostics, state.pendingMessages)
+	}
+}
+
+func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheCheckOpened(t *testing.T) {
+	_, _, m := mcpFixture(t, "")
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			return mcpAnswer(200, nil)
+		}
+		return mcpAnswer(200, map[string]string{"mcp-session-id": "check-session"})
+	})
+	defaultEnv(t, "https://proxy.example.com")
+	t.Setenv(envHeaders, `{"x-mcp-client":"pi"}`)
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	want := `{"litellm":{"type":"http","url":"https://proxy.example.com/mcp","headers":{"x-mcp-client":"pi"},"auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, f); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+	if len(*checks) != 2 {
+		t.Fatalf("checks = %+v", *checks)
+	}
+	check, closing := (*checks)[0], (*checks)[1]
+	if check.method != http.MethodPost || check.url != "https://proxy.example.com/mcp" ||
+		check.header.Get("Authorization") != "Bearer sk-default" || check.header.Get("x-mcp-client") != "pi" ||
+		!strings.Contains(check.body, `"method":"initialize"`) {
+		t.Fatalf("check = %+v", check)
+	}
+	if closing.method != http.MethodDelete || closing.header.Get("mcp-session-id") != "check-session" ||
+		closing.header.Get("Authorization") != "Bearer sk-default" {
+		t.Fatalf("close = %+v", closing)
+	}
+}
+
+func TestMcpRegistersTheServerEnabledWhenTheCheckGetsAnotherStatus(t *testing.T) {
+	for _, status := range []int{401, 404, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			_, _, m := mcpFixture(t, "")
+			mcpProxy(t, func(*http.Request) (*http.Response, error) { return mcpAnswer(status, nil) })
+			defaultEnv(t, "https://proxy.example.com")
+			f := newFakeRegistrar()
+			m.syncAll(f)
+			if config, ok := f.servers["litellm"]; !ok || config.Enabled != nil {
+				t.Fatalf("servers = %s", mcpJSON(t, f))
+			}
+		})
+	}
+}
+
+func TestMcpSkipsTheCheckForAKeyHelperAndRegistersEnabled(t *testing.T) {
+	_, _, m := mcpFixture(t, `{"litellm":{"apiKey":"!echo sk-helper"}}`)
+	checks := mcpProxy(t, noServersGranted)
+	t.Setenv(envBaseURL, "https://proxy.example.com")
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	if config, ok := f.servers["litellm"]; !ok || config.Enabled != nil || len(*checks) != 0 {
+		t.Fatalf("servers = %s, checks = %d", mcpJSON(t, f), len(*checks))
+	}
+}
+
+func TestMcpGivesUpACheckTheProxyDoesNotAnswerWithinTheDiscoveryBudget(t *testing.T) {
+	_, _, m := mcpFixture(t, "")
+	t.Setenv(envTimeout, "50")
+	mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+	defaultEnv(t, "https://proxy.example.com")
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	if config, ok := f.servers["litellm"]; !ok || config.Enabled != nil {
+		t.Fatalf("servers = %s", mcpJSON(t, f))
+	}
+}
+
+func TestMcpDropsACheckThatALoginOvertakesAndChecksAgainOnTheNextTurn(t *testing.T) {
+	_, state, m := mcpFixture(t, "")
+	f := newFakeRegistrar()
+	overtaken := false
+	checks := mcpProxy(t, func(*http.Request) (*http.Response, error) {
+		if !overtaken {
+			overtaken = true
+			// A login starts while the check is in flight.
+			m.drop(f, state.definitions[0])
+		}
+		return mcpAnswer(200, nil)
+	})
+	defaultEnv(t, "https://proxy.example.com")
+	m.syncAll(f)
+	if len(f.servers) != 0 || len(*checks) != 1 {
+		t.Fatalf("servers = %s, checks = %d", mcpJSON(t, f), len(*checks))
+	}
+	m.syncAll(f)
+	if _, ok := f.servers["litellm"]; !ok || len(*checks) != 2 {
+		t.Fatalf("servers = %s, checks = %d", mcpJSON(t, f), len(*checks))
 	}
 }
