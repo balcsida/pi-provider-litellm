@@ -376,10 +376,12 @@ func TestSkillsRequestsFollowTheHandlersContext(t *testing.T) {
 	}
 }
 
+// Budget is off here: its poll would reach the same server from its own goroutine and make the request
+// counts below racy.
 func TestSkillsThroughTheHooks(t *testing.T) {
 	t.Run("disables LiteLLM skills through settings", func(t *testing.T) {
 		server, seen := skillsServer(t, scriptedReply{200, `{"data":[]}`})
-		hooks, _, host := wire(t, `{"litellm":{"skills":{"enabled":false}}}`)
+		hooks, _, host := wire(t, `{"litellm":{"skills":{"enabled":false},"budget":{"enabled":false}}}`)
 		host.setAuth(providerName, &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"})
 		if slices.Contains(hooks.tools, "litellm_skill_list") || len(hooks.tools) != 0 {
 			t.Fatalf("tools = %v", hooks.tools)
@@ -396,7 +398,7 @@ func TestSkillsThroughTheHooks(t *testing.T) {
 
 	t.Run("clears cached Skills auth when the host reports revoked credentials", func(t *testing.T) {
 		server, seen := skillsServer(t, scriptedReply{200, `[]`})
-		hooks, state, host := wire(t, "")
+		hooks, state, host := wire(t, `{"litellm":{"budget":{"enabled":false}}}`)
 		host.setAuth(providerName, &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "active-key"})
 		data := map[string]any{"systemPrompt": "Base prompt"}
 		hooks.emit(t, sdk.EventBeforeAgentStart, host, data)
