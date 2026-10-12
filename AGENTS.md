@@ -14,6 +14,19 @@
 - Pi 0.99 persists models of every type in `models-store.json`; `refreshModels` narrows stored models to chat models
   before reading chat-only fields.
 
+## PiG Port
+
+- `pig/` holds the Go port for PiG (the Go reimplementation of Pi): the factory extension in `pig/extensions/litellm`,
+  a mock LiteLLM proxy in `pig/tools/mockproxy`, the PiG package manifest and an example fused Piglet. Read
+  `pig/PORTING.md` before touching it; it records the design decisions, the port map, the conventions and the two
+  PiG 0.4.1 issues the port exposed. `pig/README.md` is the user-facing documentation.
+- The Go module depends on `github.com/MichaelKinsy/PiG` and its `extensions/sdk` at the same version as the `pig`
+  binary in use; bump both together.
+- Verify with `go test -race ./...` in `pig/extensions/litellm`, `pig package validate ./pig`, and the live smoke
+  against the mock proxy described in `pig/PORTING.md` (`.github/workflows/pig.yml` runs the same steps).
+- Behavior changes to the TypeScript extension need the same change in the Go port, and both test suites stay
+  derived from the same Vitest cases and `tests/fixtures`.
+
 ## Commands
 
 - Use `npm ci` when reinstalling dependencies from the lockfile.

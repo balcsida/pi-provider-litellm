@@ -1,0 +1,23 @@
+{
+  "name": "pig-provider-litellm",
+  "version": "4.2.0",
+  "description": "LiteLLM proxy provider extension for PiG",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/balcsida/pi-provider-litellm.git",
+    "directory": "pig"
+  },
+  "homepage": "https://github.com/balcsida/pi-provider-litellm/tree/main/pig",
+  "keywords": [
+    "pig-package",
+    "pig",
+    "litellm",
+    "provider"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/litellm"
+    ]
+  }
+}
