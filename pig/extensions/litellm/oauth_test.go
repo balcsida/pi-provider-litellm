@@ -1323,7 +1323,7 @@ func TestDirectOIDCLogin(t *testing.T) {
 			t.Errorf("callback = %+v", run.callbackResp)
 		}
 		credential := run.credential
-		if credential.Access != run.issued[0] || credential.Refresh != "refresh-new" || credential.ExpiresMillis() != float64(exp*1000-5*60*1000) {
+		if credential.Access != run.issued[0] || credential.Refresh != "refresh-new" || credential.ExpiresMillis() != float64(exp*1000) {
 			t.Errorf("credential = %+v", credential)
 		}
 		for name, want := range map[string]string{"baseUrl": "https://proxy.example.com", "flow": oidcFlow, "issuer": issuer, "clientId": "example-client-id", "tokenEndpoint": issuer + "/token", "subject": "user-123"} {
@@ -1508,7 +1508,7 @@ func TestOIDCRefresh(t *testing.T) {
 		token := fresh(issuer, "user-123", 3600)
 		idp.handle("/token", jsonHandler(200, map[string]any{"id_token": token, "refresh_token": "refresh-new", "token_type": "Bearer", "expires_in": 3600}))
 		refreshed, err := refreshOf(t, credentialFor(issuer))
-		if err != nil || refreshed.Access != token || refreshed.Refresh != "refresh-new" || refreshed.ExpiresMillis() != float64(exp*1000-300_000) {
+		if err != nil || refreshed.Access != token || refreshed.Refresh != "refresh-new" || refreshed.ExpiresMillis() != float64(exp*1000) {
 			t.Fatalf("refreshed = %+v, %v", refreshed, err)
 		}
 		if extra(t, refreshed, "subject") != "user-123" || extra(t, refreshed, "flow") != oidcFlow || extra(t, refreshed, "baseUrl") != "https://proxy.example.com" {
@@ -1535,10 +1535,10 @@ func TestOIDCRefresh(t *testing.T) {
 		lifetime int64
 		expires  int64
 	}{
-		"a long-lived":  {3600, testNow + 3_600_000 - 300_000},
-		"a short-lived": {120, testNow + 60_000},
+		"a long-lived":  {3600, testNow + 3_600_000},
+		"a short-lived": {120, testNow + 120_000},
 	} {
-		t.Run("schedules the next refresh of "+name+" id_token before it expires", func(t *testing.T) {
+		t.Run("stores the exact expiry of "+name+" id_token", func(t *testing.T) {
 			idp, issuer := setup(t)
 			idp.handle("/token", jsonHandler(200, map[string]any{"id_token": fresh(issuer, "user-123", c.lifetime)}))
 			refreshed, err := refreshOf(t, credentialFor(issuer))

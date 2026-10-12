@@ -1100,9 +1100,9 @@ async function requestOidcToken(
       access: idToken,
       // The refresh token is optional, and an IdP that does not rotate it keeps the existing one valid.
       refresh: isAuthToken(refreshToken) ? refreshToken : existingRefreshToken,
-      // Refresh ahead of expiry, but by at most half the remaining lifetime, so a short-lived id_token is
-      // still used rather than treated as already expired.
-      expires: expiresAt - Math.ceil(Math.min(TOKEN_REFRESH_LEAD_MS, (expiresAt - Date.now()) / 2)),
+      // The exact expiry, as for PKCE: Pi already refreshes five minutes before it, and a transient refresh
+      // failure then keeps the id_token until it actually expires.
+      expires: expiresAt,
       subject: claims.sub,
     },
   };

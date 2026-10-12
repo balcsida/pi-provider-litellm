@@ -2869,7 +2869,7 @@ describe("direct OIDC login", () => {
       type: "oauth",
       access: issued[0],
       refresh: "refresh-new",
-      expires: exp * 1000 - 5 * 60 * 1000,
+      expires: exp * 1000,
       baseUrl: proxyUrl,
       flow: "oidc_pkce",
       issuer,
@@ -3088,7 +3088,7 @@ describe("direct OIDC login", () => {
         ...credential,
         access: fresh,
         refresh: "refresh-new",
-        expires: exp * 1000 - 300_000,
+        expires: exp * 1000,
       });
       expect(fetchMock).toHaveBeenCalledOnce();
       const [input, init] = fetchMock.mock.calls[0]!;
@@ -3107,15 +3107,16 @@ describe("direct OIDC login", () => {
       const fresh = freshIdToken();
       const { refreshed } = await refreshOidc(credential, () => jsonResponse(200, { id_token: fresh }));
 
-      expect(refreshed).toEqual({ ...credential, access: fresh, expires: exp * 1000 - 300_000 });
+      expect(refreshed).toEqual({ ...credential, access: fresh, expires: exp * 1000 });
     });
 
+    // Pi refreshes five minutes before `expires` itself, so a lead subtracted here would end the reuse of a
+    // still-valid id_token after a transient failure early.
     it.each([
-      ["a long-lived", 3600, now + 3_600_000 - 300_000],
-      // Less than twice the five-minute lead left: refresh halfway rather than treat it as already expired.
-      ["a short-lived", 120, now + 60_000],
-      ["a fractional-expiry", 3600.0004, now + 3_600_000 - 300_000],
-    ])("schedules the next refresh of %s id_token before it expires", async (_name, lifetime, expires) => {
+      ["a long-lived", 3600, now + 3_600_000],
+      ["a short-lived", 120, now + 120_000],
+      ["a fractional-expiry", 3600.0004, now + 3_600_000],
+    ])("stores the exact expiry of %s id_token", async (_name, lifetime, expires) => {
       const fresh = idToken({ iss: issuer, aud: clientId, sub: "user-123", exp: now / 1000 + lifetime });
       const { refreshed, error } = await refreshOidc(oidcCredential(), () => jsonResponse(200, { id_token: fresh }));
 
