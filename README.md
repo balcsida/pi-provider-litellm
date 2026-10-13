@@ -124,14 +124,14 @@ You can configure additional LiteLLM provider aliases directly through environme
 
 ##### Per-provider environment variables (`LITELLM_PROVIDER_<NAME>_*`)
 
-Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identifier (e.g., `TEAM_A`, `CORP_EAST`):
+Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identifier (e.g., `TEAM_A`, `CORP_EAST`). `<NAME>` `LITELLM` is reserved for the default `litellm` provider, which reads only `LITELLM_PROVIDER_LITELLM_ENABLE_MCP` / `_MCP_ENABLED` and otherwise uses the [single-provider variables](#single-provider):
 
 | Variable | Effect |
 |---|---|
 | `LITELLM_PROVIDER_<NAME>_BASE_URL` | LiteLLM proxy base URL for this provider (e.g. `https://team-a.example.com`) |
 | `LITELLM_PROVIDER_<NAME>_API_KEY` | API key / bearer token for this provider |
 | `LITELLM_PROVIDER_<NAME>_API_KEY_HELPER` | Shell command that prints a fresh token for this provider |
-| `LITELLM_PROVIDER_<NAME>_HEADERS` | JSON string of extra request headers for this provider |
+| `LITELLM_PROVIDER_<NAME>_HEADERS` | JSON string of extra request headers for this provider. Unlike `LITELLM_HEADERS`, `$VAR` and `${VAR}` inside the value are expanded, so write a literal `$` as `$$`; a reference to an unset variable drops all of this provider's headers |
 | `LITELLM_PROVIDER_<NAME>_DISPLAY_NAME` | Custom display name shown in Pi UI |
 | `LITELLM_PROVIDER_<NAME>_NAME` | Explicit provider ID override (e.g. `custom-name`) |
 | `LITELLM_PROVIDER_<NAME>_ALLOW_INSECURE_HTTP` | Set `"1"` or `"true"` to permit plaintext HTTP for non-loopback hosts |
@@ -148,7 +148,7 @@ Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identif
 
 - **Default naming:** The uppercase token `<NAME>` in `LITELLM_PROVIDER_<NAME>_*` is automatically converted to lowercase kebab-case (e.g., `TEAM_A` becomes `team-a`, `CORP_EAST` becomes `corp-east`, and `DEV` becomes `dev`).
 - **Explicit override:** Set `LITELLM_PROVIDER_<NAME>_NAME` to specify an explicit provider ID (e.g., `LITELLM_PROVIDER_TEAM_A_NAME="custom-team"`).
-- **Canonical IDs:** Provider IDs specified in `LITELLM_PROVIDERS` or keys in `LITELLM_PROVIDERS_JSON` preserve their declared IDs.
+- **Canonical IDs:** Provider IDs specified in `LITELLM_PROVIDERS` or keys in `LITELLM_PROVIDERS_JSON` preserve their declared IDs and read the `LITELLM_PROVIDER_<NAME>_*` variables whose `<NAME>` is the ID uppercased with `-` read as `_`, so `team_a` and `team-a` both read `TEAM_A`. When two declared IDs share a `<NAME>`, the one listed first in `LITELLM_PROVIDERS`, then in `LITELLM_PROVIDERS_JSON`, reads those variables and the other reads none.
 - **Validation:** Provider IDs must match `/^[a-z0-9][a-z0-9_-]{0,63}$/` (1–64 characters, lowercase alphanumeric with `-` or `_`, starting with an alphanumeric character).
 - **Reserved names:** Tool and command names (`mcp`, `skills`, `codemode`, `tool_search`, and `litellm` as an alias) cannot be used as secondary provider IDs.
 
@@ -202,8 +202,8 @@ Provider fields:
 | `enabled` | `true` | Set `false` to skip or disable an alias |
 | `oidc` | unset | `litellm` only, in global settings. Sign in directly with an OpenID Connect identity provider instead of the LiteLLM-hosted flows; see [Direct OIDC login](#direct-oidc-login) |
 | `allowInsecureHttp` | `false` | Set `true` to permit plaintext HTTP for this provider, for example `http://host.docker.internal`. Credentials and request data will not be encrypted. Loopback HTTP works without this setting. |
-| `useGcloudTokenAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable Google Application Default Credentials (ADC) token authentication for this provider. |
-| `enableOAuth` | `true` for `litellm`; `false` for aliases | Set `true` to enable LiteLLM SSO/OAuth browser login for this provider. |
+| `useGcloudTokenAuth` | `false` | Aliases only. Set `true` to use Google Application Default Credentials (ADC) as this alias's bearer token. `litellm` ignores this field and uses ADC only when `LITELLM_GCLOUD_TOKEN_AUTH` is enabled. |
+| `enableOAuth` | `false` | Aliases only. Set `true` to offer LiteLLM SSO browser login for this alias. `litellm` ignores this field and always offers it. |
 
 #### Configuration & credential precedence
 
@@ -213,10 +213,12 @@ Provider fields:
   2. Discovered environment variables (`LITELLM_PROVIDER_<NAME>_*` and canonical list in `LITELLM_PROVIDERS`)
   3. Disk settings from `~/.pi/agent/settings.json` under `litellm.providers`. Disk settings override environment definitions, and setting `"enabled": false` removes or skips the provider.
 
+  Each later source overrides `displayName`, `allowInsecureHttp`, `useGcloudTokenAuth`, `enableOAuth`, and the MCP toggle. `baseUrl`, `apiKey`, and `headers` work differently: a value configured in `settings.json` or `LITELLM_PROVIDERS_JSON` always wins, and `LITELLM_PROVIDER_<NAME>_BASE_URL`, `_API_KEY_HELPER`, `_API_KEY`, and `_HEADERS` apply only when neither sets that field.
+
 - **Credential resolution precedence:**
   When authenticating requests for any provider:
   1. Saved interactive credentials in `~/.pi/agent/auth.json` (from `/login <provider>` or OAuth SSO)
-  2. Google Application Default Credentials (when `useGcloudTokenAuth` / `_USE_GCLOUD_AUTH` / `LITELLM_GCLOUD_TOKEN_AUTH` is active)
+  2. Google Application Default Credentials (for an alias with `useGcloudTokenAuth` or `_USE_GCLOUD_AUTH`; for `litellm` when `LITELLM_GCLOUD_TOKEN_AUTH` is enabled)
   3. Configured `apiKey` from settings (`settings.json` or `LITELLM_PROVIDERS_JSON`, including `$ENV_VAR` and `!command`)
   4. Provider-scoped API key helper (`LITELLM_PROVIDER_<NAME>_API_KEY_HELPER`)
   5. Provider-scoped API key (`LITELLM_PROVIDER_<NAME>_API_KEY`)
@@ -250,7 +252,7 @@ LiteLLM Skills, MCP integration, and the budget footer are enabled by default. D
 
 Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Setting `budget.enabled` to `false` registers no budget footer, polls, or `/litellm-budget` command; `budget.display` is described under [Budget status](#budget-status). Restart Pi after changing these settings.
 
-MCP can also be enabled or disabled per provider:
+MCP can also be enabled or disabled per provider, though a provider setting cannot turn it on while `mcp.enabled` is `false`:
 - In `~/.pi/agent/settings.json`: set `providers.<name>.mcp.enabled` (or `providers.<name>.enableMcp`) to `false` (or `true`).
 - In environment variables: set `LITELLM_PROVIDER_<NAME>_ENABLE_MCP` or `LITELLM_PROVIDER_<NAME>_MCP_ENABLED` to `"0"` or `"false"` to disable MCP for a specific provider.
 
