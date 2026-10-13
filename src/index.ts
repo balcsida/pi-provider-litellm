@@ -738,10 +738,14 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   // 2. Scan env vars
   const claimedTokens = new Set<string>([PROVIDER_NAME.toUpperCase()]);
 
-  // 3. Declared IDs claim their env token before step 4 derives new IDs: LITELLM_PROVIDERS first, then JSON keys
+  // 3. Declared IDs claim their env token before step 4 derives new IDs: LITELLM_PROVIDERS first, then JSON keys,
+  // then settings.json aliases that have scoped variables (step 5 still applies their settings on top)
   const canonicalList = parseCanonicalProviderList(process.env[ENV_PROVIDERS]);
+  const settingsIds = Object.entries(providerSettings ?? {})
+    .filter(([name, raw]) => normalizeProviderSettings(raw) && parsedEnv[name.toUpperCase().replace(/-/g, "_")])
+    .map(([name]) => name);
   const tokenOwners = new Map<string, string>([[PROVIDER_NAME.toUpperCase(), PROVIDER_NAME]]);
-  for (const canonicalId of new Set([...canonicalList, ...secondaryProviders.keys()])) {
+  for (const canonicalId of new Set([...canonicalList, ...secondaryProviders.keys(), ...settingsIds])) {
     if (!isValidProviderName(canonicalId)) continue;
     if (disabledProviders.has(canonicalId)) continue;
     const token = canonicalId.toUpperCase().replace(/-/g, "_");

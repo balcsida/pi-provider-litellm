@@ -148,7 +148,7 @@ Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identif
 
 - **Default naming:** The uppercase token `<NAME>` in `LITELLM_PROVIDER_<NAME>_*` is automatically converted to lowercase kebab-case (e.g., `TEAM_A` becomes `team-a`, `CORP_EAST` becomes `corp-east`, and `DEV` becomes `dev`).
 - **Explicit override:** Set `LITELLM_PROVIDER_<NAME>_NAME` to specify an explicit provider ID (e.g., `LITELLM_PROVIDER_TEAM_A_NAME="custom-team"`).
-- **Canonical IDs:** Provider IDs specified in `LITELLM_PROVIDERS` or keys in `LITELLM_PROVIDERS_JSON` preserve their declared IDs and read the `LITELLM_PROVIDER_<NAME>_*` variables whose `<NAME>` is the ID uppercased with `-` read as `_`, so `team_a` and `team-a` both read `TEAM_A`. When two declared IDs share a `<NAME>`, the one listed first in `LITELLM_PROVIDERS`, then in `LITELLM_PROVIDERS_JSON`, reads those variables and the other reads none.
+- **Canonical IDs:** Provider IDs specified in `LITELLM_PROVIDERS`, keys in `LITELLM_PROVIDERS_JSON`, and `settings.json` aliases that follow these naming rules preserve their declared IDs and read the `LITELLM_PROVIDER_<NAME>_*` variables whose `<NAME>` is the ID uppercased with `-` read as `_`, so `team_a` and `team-a` both read `TEAM_A`. When two declared IDs share a `<NAME>`, the one listed first in `LITELLM_PROVIDERS`, then `LITELLM_PROVIDERS_JSON`, then `settings.json`, reads those variables and the other reads none.
 - **Validation:** Provider IDs must match `/^[a-z0-9][a-z0-9_-]{0,63}$/` (1–64 characters, lowercase alphanumeric with `-` or `_`, starting with an alphanumeric character).
 - **Reserved names:** Tool and command names (`mcp`, `skills`, `codemode`, `tool_search`, and `litellm` as an alias) cannot be used as secondary provider IDs.
 
