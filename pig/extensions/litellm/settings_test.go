@@ -19,12 +19,19 @@ var hermeticVars = []string{
 	envBaseURL, envAPIKey, envAPIKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
 	envVerboseDiscovery, envModelsDev, envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
 	envPIOffline, envPIGOffline, "PIG_USE_PI_DIRS", "PIG_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
+	envProviders, envProvidersJSON,
 }
 
 // hermeticAgentDir clears every variable the extension reads and points the agent dir at a temp dir.
 func hermeticAgentDir(t *testing.T) string {
 	t.Helper()
-	for _, name := range hermeticVars {
+	names := append([]string{}, hermeticVars...)
+	for _, entry := range os.Environ() {
+		if name, _, _ := strings.Cut(entry, "="); strings.HasPrefix(name, "LITELLM_PROVIDER_") {
+			names = append(names, name)
+		}
+	}
+	for _, name := range names {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
 	}

@@ -396,28 +396,24 @@ func (s *extensionState) loginGenerationNow() int {
 
 // newProvider builds the native provider of one definition, with the refresh bookkeeping around it.
 func (s *extensionState) newProvider(definition providerDefinition, seed []types.DiscoveredModel) (*ai.ModelsProvider, error) {
-	var hooks *loginHooks
-	if definition.Name == providerName {
-		flows := defaultLoginFlows
-		// Start drops anything bound to the old proxy root before the login can store a new credential.
-		flows.Start = func() {
-			s.mu.Lock()
-			callbacks := append([]func(providerDefinition){}, s.onLoginStart...)
-			s.mu.Unlock()
-			for _, callback := range callbacks {
-				callback(definition)
-			}
+	flows := defaultLoginFlows
+	// Start drops anything bound to the old proxy root before the login can store a new credential.
+	flows.Start = func() {
+		s.mu.Lock()
+		callbacks := append([]func(providerDefinition){}, s.onLoginStart...)
+		s.mu.Unlock()
+		for _, callback := range callbacks {
+			callback(definition)
 		}
-		flows.Complete = func() {
-			s.mu.Lock()
-			s.loginGeneration++
-			s.mu.Unlock()
-		}
-		hooks = &flows
+	}
+	flows.Complete = func() {
+		s.mu.Lock()
+		s.loginGeneration++
+		s.mu.Unlock()
 	}
 	auth := createProviderAuth(definition,
 		func() { s.mu.Lock(); delete(s.oauthRoots, definition.Name); s.mu.Unlock() },
-		hooks,
+		&flows,
 		func() (string, string, bool) {
 			s.mu.Lock()
 			defer s.mu.Unlock()

@@ -440,12 +440,12 @@ func TestCreateProviderAuthHooks(t *testing.T) {
 		}
 	})
 
-	t.Run("aliases get no API-key login", func(t *testing.T) {
+	t.Run("aliases get an API-key login but no OAuth", func(t *testing.T) {
 		hooks := &loginHooks{LoginAPIKey: func(context.Context, ai.AuthInteraction, providerDefinition) (ai.Credential, error) {
 			return ai.Credential{}, nil
 		}}
 		auth := createProviderAuth(providerDefinition{Name: "alias", DisplayName: "Alias"}, nil, hooks, nil)
-		if auth.APIKey.Login != nil || auth.OAuth != nil {
+		if auth.APIKey.Login == nil || auth.OAuth != nil {
 			t.Fatalf("auth = %+v", auth)
 		}
 	})

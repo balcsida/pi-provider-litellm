@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,8 @@ const (
 	envDisplayName              = "LITELLM_DISPLAY_NAME"
 	envAPIKeyHelper             = "LITELLM_API_KEY_HELPER"
 	envHeaders                  = "LITELLM_HEADERS"
+	envProviders                = "LITELLM_PROVIDERS"
+	envProvidersJSON            = "LITELLM_PROVIDERS_JSON"
 	envTimeout                  = "LITELLM_DISCOVERY_TIMEOUT_MS"
 	envCLIJWTExpirationHours    = "LITELLM_CLI_JWT_EXPIRATION_HOURS"
 	envOffline                  = "LITELLM_OFFLINE"
@@ -73,6 +77,129 @@ type providerDefinition struct {
 	OIDC any
 	// HasOIDC is set when the key is present, so a JSON null is rejected rather than read as absent.
 	HasOIDC bool
+	// EnvPrefix is the LITELLM_PROVIDER_<TOKEN> prefix whose scoped variables back this definition.
+	EnvPrefix string
+	// EnableMCP is nil when nothing set it; MCP is skipped only for an explicit false.
+	EnableMCP *bool
+}
+
+var reservedProviderNames = map[string]bool{"mcp": true, "skills": true, "codemode": true, "tool_search": true, "litellm": true}
+
+var (
+	providerNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	providerEnvVarPattern = regexp.MustCompile(`^LITELLM_PROVIDER_([A-Z0-9_]+?)_(BASE_URL|API_KEY_HELPER|API_KEY|HEADERS|DISPLAY_NAME|NAME|ALLOW_INSECURE_HTTP|USE_GCLOUD_AUTH|ENABLE_OAUTH|ENABLE_MCP|MCP_ENABLED)$`)
+)
+
+func isValidProviderName(name string) bool {
+	return providerNamePattern.MatchString(name) && !reservedProviderNames[name]
+}
+
+// parseCanonicalProviderList splits LITELLM_PROVIDERS on commas and whitespace.
+func parseCanonicalProviderList(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+}
+
+// parseProvidersJson parses LITELLM_PROVIDERS_JSON into its object-valued entries, keeping the key order.
+// It returns nil providers when the value is unset, invalid, not an object, or has no object entry.
+func parseProvidersJson(raw string) (order []string, providers map[string]map[string]any) {
+	trimmed := strings.TrimSpace(raw)
+	var parsed map[string]any
+	if trimmed == "" || json.Unmarshal([]byte(trimmed), &parsed) != nil || parsed == nil {
+		return nil, nil
+	}
+	providers = map[string]map[string]any{}
+	for _, key := range objectKeys(json.RawMessage(trimmed)) {
+		if value, ok := parsed[key].(map[string]any); ok && value != nil {
+			if _, seen := providers[key]; !seen {
+				order = append(order, key)
+			}
+			providers[key] = value
+		}
+	}
+	if len(providers) == 0 {
+		return nil, nil
+	}
+	return order, providers
+}
+
+func parseBooleanSetting(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		trimmed := strings.ToLower(strings.TrimSpace(typed))
+		return trimmed == "1" || trimmed == "true"
+	}
+	return false
+}
+
+// parsedProviderEnv is ParsedProviderEnv: the scoped variables of one LITELLM_PROVIDER_<TOKEN> prefix. The
+// boolean fields are nil until their variable is set.
+type parsedProviderEnv struct {
+	Token              string
+	EnvPrefix          string
+	Name               string
+	DisplayName        string
+	BaseURL            string
+	APIKey             string
+	APIKeyHelper       string
+	Headers            string
+	AllowInsecureHTTP  *bool
+	UseGcloudTokenAuth *bool
+	EnableOAuth        *bool
+	EnableMCP          *bool
+}
+
+// parseProviderEnvVars scans environ ("NAME=value" entries) for LITELLM_PROVIDER_<TOKEN>_<FIELD> variables.
+// tokens lists the tokens in first-seen order, which step 4 of getProviderDefinitions depends on.
+func parseProviderEnvVars(environ []string) (tokens []string, byToken map[string]*parsedProviderEnv) {
+	byToken = map[string]*parsedProviderEnv{}
+	for _, entry := range environ {
+		key, val, _ := strings.Cut(entry, "=")
+		match := providerEnvVarPattern.FindStringSubmatch(key)
+		if match == nil {
+			continue
+		}
+		token, field := match[1], match[2]
+		parsed := byToken[token]
+		if parsed == nil {
+			parsed = &parsedProviderEnv{Token: token, EnvPrefix: "LITELLM_PROVIDER_" + token}
+			byToken[token] = parsed
+			tokens = append(tokens, token)
+		}
+		flag := func() *bool { return new(parseBooleanSetting(val)) }
+		switch field {
+		case "BASE_URL":
+			parsed.BaseURL = cleanConfig(val)
+		case "API_KEY":
+			parsed.APIKey = cleanConfig(val)
+		case "API_KEY_HELPER":
+			parsed.APIKeyHelper = cleanConfig(val)
+		case "HEADERS":
+			parsed.Headers = cleanConfig(val)
+		case "DISPLAY_NAME":
+			parsed.DisplayName = cleanConfig(val)
+		case "NAME":
+			parsed.Name = cleanConfig(val)
+		case "ALLOW_INSECURE_HTTP":
+			parsed.AllowInsecureHTTP = flag()
+		case "USE_GCLOUD_AUTH":
+			parsed.UseGcloudTokenAuth = flag()
+		case "ENABLE_OAUTH":
+			parsed.EnableOAuth = flag()
+		case "ENABLE_MCP", "MCP_ENABLED":
+			parsed.EnableMCP = flag()
+		}
+	}
+	return tokens, byToken
+}
+
+// usesGcloudToken is the ADC condition: the default provider also needs the LITELLM_GCLOUD_TOKEN_AUTH switch.
+func usesGcloudToken(definition providerDefinition) bool {
+	if definition.UseDefaultEnv {
+		return definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled()
+	}
+	return definition.UseGcloudTokenAuth
 }
 
 // litellmSettings is the global `litellm` settings block. Go maps lose key order, so the provider
@@ -433,13 +560,26 @@ func parseCustomHeaders(raw string) map[string]string {
 	return parseHeaderRecord(parsed)
 }
 
-// resolveHeadersFrom resolves the definition's headers; a string template reads variables through env.
+// resolveHeadersFrom resolves the definition's headers; a string template reads variables through env. Its own
+// headers win, then the scoped <prefix>_HEADERS, then LITELLM_HEADERS for the default provider; the variable's
+// value is itself the template.
 func resolveHeadersFrom(definition providerDefinition, env envLookup) map[string]string {
-	if template, ok := definition.Headers.(string); ok {
+	raw := definition.Headers
+	if raw == nil && definition.EnvPrefix != "" {
+		if value, ok := env(definition.EnvPrefix + "_HEADERS"); ok {
+			raw = value
+		}
+	}
+	if raw == nil && definition.UseDefaultEnv {
+		if value, ok := env(envHeaders); ok {
+			raw = value
+		}
+	}
+	if template, ok := raw.(string); ok {
 		resolved, _ := resolveTemplateConfigValue(template, env)
 		return parseCustomHeaders(resolved)
 	}
-	return parseHeaderRecord(definition.Headers)
+	return parseHeaderRecord(raw)
 }
 
 func resolveHeaders(definition providerDefinition) map[string]string {
@@ -450,16 +590,14 @@ func resolveHeaders(definition providerDefinition) map[string]string {
 // Google ADC. With executeHelpers false no `!command` and no ADC exchange runs.
 func resolveCredentials(ctx context.Context, definition providerDefinition, executeHelpers bool) (types.ResolvedCredentials, error) {
 	configuredBase := cleanConfig(definition.BaseURL)
+	if configuredBase == "" && definition.EnvPrefix != "" {
+		configuredBase = cleanConfig(os.Getenv(definition.EnvPrefix + "_BASE_URL"))
+	}
 	if configuredBase == "" && definition.UseDefaultEnv {
 		configuredBase = cleanConfig(os.Getenv(envBaseURL))
 	}
-	var envKey, envHelperCommand string
-	if definition.UseDefaultEnv {
-		envKey = cleanConfig(os.Getenv(envAPIKey))
-		envHelperCommand = apiKeyHelperCommand()
-	}
 	var gcloudKey string
-	if executeHelpers && definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled() {
+	if executeHelpers && usesGcloudToken(definition) {
 		gcloudKey = strings.TrimSpace(getGcloudToken(ctx))
 	}
 	// Resolved lazily so a `!command` key is not executed when a higher-precedence credential already won.
@@ -475,13 +613,34 @@ func resolveCredentials(ctx context.Context, definition providerDefinition, exec
 			warnUnresolvedAPIKeyConfig(definition.Name, definition.APIKeyConfig)
 		}
 	}
-	var helperKey string
-	if gcloudKey == "" && configuredKey == "" && executeHelpers && envHelperCommand != "" {
-		value, err := executeAPIKeyCommand(ctx, envHelperCommand)
-		if err != nil {
+
+	var helperKey, helperCommand, envKey, envKeySource string
+	// fromEnv reads the helper, then the key, of one variable family.
+	fromEnv := func(helperName, keyName string) error {
+		helperCommand = normalizeCommand(os.Getenv(helperName))
+		if helperCommand != "" && executeHelpers {
+			value, err := executeAPIKeyCommand(ctx, helperCommand)
+			if err != nil {
+				return err
+			}
+			helperKey = value
+		}
+		if helperCommand == "" {
+			if envKey = cleanConfig(os.Getenv(keyName)); envKey != "" {
+				envKeySource = "$" + keyName
+			}
+		}
+		return nil
+	}
+	if gcloudKey == "" && configuredKey == "" && definition.EnvPrefix != "" {
+		if err := fromEnv(definition.EnvPrefix+"_API_KEY_HELPER", definition.EnvPrefix+"_API_KEY"); err != nil {
 			return types.ResolvedCredentials{}, err
 		}
-		helperKey = value
+	}
+	if gcloudKey == "" && configuredKey == "" && helperKey == "" && helperCommand == "" && envKey == "" && definition.UseDefaultEnv {
+		if err := fromEnv(envAPIKeyHelper, envAPIKey); err != nil {
+			return types.ResolvedCredentials{}, err
+		}
 	}
 	apiKey := firstNonEmpty(gcloudKey, configuredKey, helperKey, envKey)
 
@@ -491,12 +650,12 @@ func resolveCredentials(ctx context.Context, definition providerDefinition, exec
 		apiKeyConfig = definition.APIKeyConfig
 	case !executeHelpers && strings.HasPrefix(definition.APIKeyConfig, "!"):
 		apiKeyConfig = definition.APIKeyConfig
-	case helperKey != "" && envHelperCommand != "":
-		apiKeyConfig = envHelperCommand
-	case !executeHelpers && envHelperCommand != "":
-		apiKeyConfig = envHelperCommand
+	case helperKey != "" && helperCommand != "":
+		apiKeyConfig = helperCommand
+	case !executeHelpers && helperCommand != "":
+		apiKeyConfig = helperCommand
 	case envKey != "":
-		apiKeyConfig = "$" + envAPIKey
+		apiKeyConfig = envKeySource
 	}
 	resolved := types.ResolvedCredentials{APIKey: apiKey, APIKeyConfig: apiKeyConfig, APIKeyFromGcloudADC: gcloudKey != ""}
 	if configuredBase != "" {
@@ -576,13 +735,28 @@ func piLiteral(value string) string {
 	return escaped
 }
 
-// normalizeProviderSettings returns the provider's raw settings, or nil when absent, not an object, or disabled.
+// normalizeProviderSettings returns a copy of the provider's raw settings with enableMcp derived from
+// enableMcp, else mcp.enabled, else mcp itself; nil when absent, not an object, or disabled. A present JSON
+// null counts as present, so it reads as false.
 func normalizeProviderSettings(raw any) map[string]any {
 	record, ok := raw.(map[string]any)
 	if !ok || record == nil || record["enabled"] == false {
 		return nil
 	}
-	return record
+	normalized := make(map[string]any, len(record)+1)
+	for key, value := range record {
+		normalized[key] = value
+	}
+	if value, ok := record["enableMcp"]; ok {
+		normalized["enableMcp"] = parseBooleanSetting(value)
+	} else if mcp, ok := record["mcp"].(map[string]any); ok && mcp != nil {
+		if value, ok := mcp["enabled"]; ok {
+			normalized["enableMcp"] = parseBooleanSetting(value)
+		}
+	} else if value, ok := record["mcp"]; ok {
+		normalized["enableMcp"] = parseBooleanSetting(value)
+	}
+	return normalized
 }
 
 // isFeatureEnabled reports whether the "skills", "mcp" or "budget" block is not disabled.
@@ -594,7 +768,65 @@ func isFeatureEnabled(settings *litellmSettings, feature string) bool {
 	return !ok || block["enabled"] != false
 }
 
-// getProviderDefinitions builds the default `litellm` definition first, then each alias in settings order.
+// intermediateProvider is IntermediateProvider; the boolean fields are nil until something sets them.
+type intermediateProvider struct {
+	Name               string
+	DisplayName        string
+	BaseURL            string
+	APIKeyConfig       string
+	Headers            any
+	AllowInsecureHTTP  *bool
+	UseGcloudTokenAuth *bool
+	EnableOAuth        *bool
+	EnvPrefix          string
+	EnableMCP          *bool
+}
+
+// secondaryProviders is a Map: it keeps insertion order, and a re-set keeps the original position.
+type secondaryProviders struct {
+	order   []string
+	entries map[string]*intermediateProvider
+}
+
+func (p *secondaryProviders) set(name string, entry *intermediateProvider) {
+	if _, ok := p.entries[name]; !ok {
+		p.order = append(p.order, name)
+	}
+	p.entries[name] = entry
+}
+
+func (p *secondaryProviders) delete(name string) {
+	if _, ok := p.entries[name]; !ok {
+		return
+	}
+	delete(p.entries, name)
+	p.order = slices.DeleteFunc(p.order, func(item string) bool { return item == name })
+}
+
+// firstBool is `a ?? b` for tri-state booleans.
+func firstBool(a, b *bool) *bool {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
+// settingBool is a settings value that is a JSON boolean, else nil.
+func settingBool(value any) *bool {
+	if typed, ok := value.(bool); ok {
+		return &typed
+	}
+	return nil
+}
+
+// tokenForProvider is the environment token a provider id maps to.
+func tokenForProvider(id string) string {
+	return strings.ReplaceAll(strings.ToUpper(id), "-", "_")
+}
+
+// getProviderDefinitions builds the default `litellm` definition first, then the aliases: those from
+// LITELLM_PROVIDERS_JSON, LITELLM_PROVIDERS, the LITELLM_PROVIDER_<TOKEN>_* variables, and settings.json, in
+// insertion order. Settings override the environment, and an alias disabled in either place is dropped.
 func getProviderDefinitions(settings *litellmSettings) []providerDefinition {
 	var providers map[string]any
 	var order []string
@@ -607,48 +839,202 @@ func getProviderDefinitions(settings *litellmSettings) []providerDefinition {
 			order = append(order, name)
 		}
 	}
+	defaultSettings := normalizeProviderSettings(providers[providerName])
 	defaultDisplayName := firstNonEmpty(cleanConfig(os.Getenv(envDisplayName)), "LiteLLM")
+	tokens, parsedEnv := parseProviderEnvVars(os.Environ())
+	primaryToken := strings.ToUpper(providerName)
 
-	makeDefinition := func(name string, raw map[string]any, isDefault bool) providerDefinition {
-		displayName := stringSetting(raw["displayName"])
-		if displayName == "" {
-			displayName = name
-			if isDefault {
-				displayName = defaultDisplayName
-			}
-		}
-		headers := raw["headers"]
-		if headers == nil && isDefault {
-			headers = "$" + envHeaders
-		}
-		definition := providerDefinition{
-			Name:               name,
-			DisplayName:        displayName,
-			BaseURL:            stringSetting(raw["baseUrl"]),
-			APIKeyConfig:       stringSetting(raw["apiKey"]),
-			Headers:            headers,
-			UseDefaultEnv:      isDefault,
-			UseGcloudTokenAuth: isDefault,
-			EnableOAuth:        isDefault,
-			AllowInsecureHTTP:  raw["allowInsecureHttp"] == true,
-		}
-		if isDefault {
-			definition.OIDC = raw["oidc"]
-			_, definition.HasOIDC = raw["oidc"]
-		}
-		return definition
+	primaryHeaders := defaultSettings["headers"]
+	if primaryHeaders == nil {
+		primaryHeaders = "$" + envHeaders
+	}
+	primary := providerDefinition{
+		Name:               providerName,
+		DisplayName:        firstNonEmpty(stringSetting(defaultSettings["displayName"]), defaultDisplayName),
+		BaseURL:            stringSetting(defaultSettings["baseUrl"]),
+		APIKeyConfig:       stringSetting(defaultSettings["apiKey"]),
+		Headers:            primaryHeaders,
+		UseDefaultEnv:      true,
+		UseGcloudTokenAuth: true,
+		EnableOAuth:        true,
+		AllowInsecureHTTP:  defaultSettings["allowInsecureHttp"] == true,
+		OIDC:               defaultSettings["oidc"],
+		EnableMCP:          settingBool(defaultSettings["enableMcp"]),
+	}
+	_, primary.HasOIDC = defaultSettings["oidc"]
+	if primary.EnableMCP == nil && parsedEnv[primaryToken] != nil {
+		primary.EnableMCP = parsedEnv[primaryToken].EnableMCP
 	}
 
-	definitions := []providerDefinition{makeDefinition(providerName, normalizeProviderSettings(providers[providerName]), true)}
-	for _, name := range order {
-		if name == providerName {
+	secondary := &secondaryProviders{entries: map[string]*intermediateProvider{}}
+	disabled := map[string]bool{}
+
+	// 1. Incorporate LITELLM_PROVIDERS_JSON
+	jsonOrder, jsonProviders := parseProvidersJson(os.Getenv(envProvidersJSON))
+	for _, name := range jsonOrder {
+		if !isValidProviderName(name) {
 			continue
 		}
-		if normalized := normalizeProviderSettings(providers[name]); normalized != nil {
-			definitions = append(definitions, makeDefinition(name, normalized, false))
+		raw := jsonProviders[name]
+		if raw["enabled"] == false {
+			disabled[name] = true
+			continue
+		}
+		normalized := normalizeProviderSettings(raw)
+		if normalized == nil {
+			continue
+		}
+		secondary.set(name, &intermediateProvider{
+			Name:               name,
+			DisplayName:        stringSetting(normalized["displayName"]),
+			BaseURL:            stringSetting(normalized["baseUrl"]),
+			APIKeyConfig:       stringSetting(normalized["apiKey"]),
+			Headers:            normalized["headers"],
+			AllowInsecureHTTP:  new(parseBooleanSetting(normalized["allowInsecureHttp"])),
+			UseGcloudTokenAuth: new(parseBooleanSetting(normalized["useGcloudTokenAuth"])),
+			EnableOAuth:        new(parseBooleanSetting(normalized["enableOAuth"])),
+			EnableMCP:          settingBool(normalized["enableMcp"]),
+		})
+	}
+
+	// 2. The scanned tokens; the default provider's is never an alias
+	claimedTokens := map[string]bool{primaryToken: true}
+
+	// 3. Declared ids claim their env token before step 4 derives new ids: LITELLM_PROVIDERS first, then JSON keys
+	tokenOwners := map[string]string{primaryToken: providerName}
+	var declared []string
+	seen := map[string]bool{}
+	for _, id := range append(parseCanonicalProviderList(os.Getenv(envProviders)), secondary.order...) {
+		if !seen[id] {
+			seen[id] = true
+			declared = append(declared, id)
 		}
 	}
+	for _, canonicalID := range declared {
+		if !isValidProviderName(canonicalID) || disabled[canonicalID] {
+			continue
+		}
+		token := tokenForProvider(canonicalID)
+		owner, owned := tokenOwners[token]
+		hasCollision := owned && owner != canonicalID
+		if !hasCollision && !owned {
+			tokenOwners[token] = canonicalID
+		}
+		var envData *parsedProviderEnv
+		if !hasCollision {
+			envData = parsedEnv[token]
+		}
+		if envData != nil {
+			claimedTokens[token] = true
+		}
+		secondary.set(canonicalID, mergeEnvProvider(canonicalID, envData, secondary.entries[canonicalID]))
+	}
+
+	// 4. Incorporate remaining unlisted prefix-scanned tokens
+	for _, token := range tokens {
+		envData := parsedEnv[token]
+		if claimedTokens[token] {
+			continue
+		}
+		providerID := envData.Name
+		if providerID == "" {
+			providerID = strings.ReplaceAll(strings.ToLower(token), "_", "-")
+		}
+		if !isValidProviderName(providerID) || disabled[providerID] || disabled[strings.ToLower(token)] {
+			continue
+		}
+		tokenOwners[token] = providerID
+		secondary.set(providerID, mergeEnvProvider(providerID, envData, secondary.entries[providerID]))
+	}
+
+	// 5. Merge with settings.json (disk settings override env vars; enabled === false excludes)
+	for _, name := range order {
+		if name == providerName || name == "" || reservedProviderNames[name] {
+			continue
+		}
+		raw := normalizeProviderSettings(providers[name])
+		if raw == nil {
+			secondary.delete(name)
+			continue
+		}
+		existing := secondary.entries[name]
+		token := tokenForProvider(name)
+		var matchingEnvPrefix string
+		if existing != nil {
+			matchingEnvPrefix = existing.EnvPrefix
+		} else {
+			owner, owned := tokenOwners[token]
+			if (!owned || owner == name) && !claimedTokens[token] && parsedEnv[token] != nil {
+				matchingEnvPrefix = "LITELLM_PROVIDER_" + token
+				tokenOwners[token] = name
+				claimedTokens[token] = true
+			}
+		}
+		if existing == nil {
+			existing = &intermediateProvider{}
+		}
+		secondary.set(name, &intermediateProvider{
+			Name:               name,
+			DisplayName:        firstNonEmpty(stringSetting(raw["displayName"]), existing.DisplayName),
+			BaseURL:            firstNonEmpty(stringSetting(raw["baseUrl"]), existing.BaseURL),
+			APIKeyConfig:       firstNonEmpty(stringSetting(raw["apiKey"]), existing.APIKeyConfig),
+			Headers:            firstAny(raw["headers"], existing.Headers),
+			AllowInsecureHTTP:  firstBool(settingBool(raw["allowInsecureHttp"]), existing.AllowInsecureHTTP),
+			UseGcloudTokenAuth: firstBool(settingBool(raw["useGcloudTokenAuth"]), existing.UseGcloudTokenAuth),
+			EnableOAuth:        firstBool(settingBool(raw["enableOAuth"]), existing.EnableOAuth),
+			EnvPrefix:          matchingEnvPrefix,
+			EnableMCP:          firstBool(settingBool(raw["enableMcp"]), existing.EnableMCP),
+		})
+	}
+
+	definitions := []providerDefinition{primary}
+	for _, name := range secondary.order {
+		entry := secondary.entries[name]
+		definitions = append(definitions, providerDefinition{
+			Name:               name,
+			DisplayName:        firstNonEmpty(entry.DisplayName, name),
+			BaseURL:            entry.BaseURL,
+			APIKeyConfig:       entry.APIKeyConfig,
+			Headers:            entry.Headers,
+			UseGcloudTokenAuth: entry.UseGcloudTokenAuth != nil && *entry.UseGcloudTokenAuth,
+			EnableOAuth:        entry.EnableOAuth != nil && *entry.EnableOAuth,
+			AllowInsecureHTTP:  entry.AllowInsecureHTTP != nil && *entry.AllowInsecureHTTP,
+			EnvPrefix:          entry.EnvPrefix,
+			EnableMCP:          entry.EnableMCP,
+		})
+	}
 	return definitions
+}
+
+// mergeEnvProvider layers a token's scanned variables over an earlier definition of the same id (steps 3 and 4).
+// envData and existing may be nil.
+func mergeEnvProvider(id string, envData *parsedProviderEnv, existing *intermediateProvider) *intermediateProvider {
+	if envData == nil {
+		envData = &parsedProviderEnv{}
+	}
+	if existing == nil {
+		existing = &intermediateProvider{}
+	}
+	return &intermediateProvider{
+		Name:               id,
+		DisplayName:        firstNonEmpty(envData.DisplayName, existing.DisplayName),
+		BaseURL:            existing.BaseURL,
+		APIKeyConfig:       existing.APIKeyConfig,
+		Headers:            existing.Headers,
+		AllowInsecureHTTP:  firstBool(envData.AllowInsecureHTTP, existing.AllowInsecureHTTP),
+		UseGcloudTokenAuth: firstBool(envData.UseGcloudTokenAuth, existing.UseGcloudTokenAuth),
+		EnableOAuth:        firstBool(envData.EnableOAuth, existing.EnableOAuth),
+		EnvPrefix:          firstNonEmpty(envData.EnvPrefix, existing.EnvPrefix),
+		EnableMCP:          firstBool(envData.EnableMCP, existing.EnableMCP),
+	}
+}
+
+// firstAny is `a ?? b`: a JSON null counts as absent.
+func firstAny(a, b any) any {
+	if a != nil {
+		return a
+	}
+	return b
 }
 
 // storedCredential is an auth.json entry. types.AuthFileEntry has no api_key `env`, so it is added here.
@@ -688,7 +1074,10 @@ func readStoredCredential(provider, path string) *storedCredential {
 // knownBaseURL offers the proxy URL already known for a re-login: settings, environment, or the previous login.
 func knownBaseURL(definition providerDefinition) (url, source string, ok bool) {
 	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
-	var envURL, previous string
+	var scopedURL, envURL, previous string
+	if definition.EnvPrefix != "" {
+		scopedURL = cleanConfig(os.Getenv(definition.EnvPrefix + "_BASE_URL"))
+	}
 	if definition.UseDefaultEnv {
 		envURL = cleanConfig(os.Getenv(envBaseURL))
 	}
@@ -701,6 +1090,7 @@ func knownBaseURL(definition providerDefinition) (url, source string, ok bool) {
 	}
 	candidates := [][2]string{
 		{cleanConfig(definition.BaseURL), "configured"},
+		{scopedURL, "$" + definition.EnvPrefix + "_BASE_URL"},
 		{envURL, "$" + envBaseURL},
 		{previous, "previous login"},
 	}

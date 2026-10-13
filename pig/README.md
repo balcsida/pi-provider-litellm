@@ -1,8 +1,9 @@
 # pig-provider-litellm
 
 Go port of the [LiteLLM provider extension](../README.md) for [PiG](https://github.com/MichaelKinsy/PiG). It
-registers the same `litellm` native provider (plus aliases from settings), discovers models from your LiteLLM
-proxy, and adds LiteLLM MCP, Skill Hub, budget status and Google ADC support.
+registers the same `litellm` native provider (plus aliases from settings and from the `LITELLM_PROVIDERS`,
+`LITELLM_PROVIDERS_JSON` and `LITELLM_PROVIDER_<NAME>_*` environment variables, as in the root README), discovers
+models from your LiteLLM proxy, and adds LiteLLM MCP, Skill Hub, budget status and Google ADC support.
 
 ## Relation to the TypeScript extension
 

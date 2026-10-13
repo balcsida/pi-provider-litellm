@@ -88,6 +88,9 @@ func newMcpSync(state *extensionState, settingsRaw []byte) (*mcpSync, error) {
 
 // config is mcpServerConfig: nil when MCP is off, offline, or the provider has no usable proxy root.
 func (m *mcpSync) config(definition providerDefinition) *sdk.McpServerConfig {
+	if definition.EnableMCP != nil && !*definition.EnableMCP {
+		return nil
+	}
 	if discoveryDisabledReason() != "" || isHostOffline() {
 		return nil
 	}
@@ -153,7 +156,7 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 	// no ADC token, and resolving without them would fall through to another key.
 	if (stored != nil && stored.Type == "api_key" && strings.HasPrefix(stored.Key, "!")) ||
 		strings.HasPrefix(definition.APIKeyConfig, "!") ||
-		(definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled()) {
+		usesGcloudToken(definition) {
 		return false
 	}
 	budget := time.Duration(seedTimeoutMsBudget()) * time.Millisecond
