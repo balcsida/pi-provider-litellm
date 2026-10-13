@@ -31,7 +31,7 @@ pig/
 ```
 
 The extension identity is `litellm` (PiG derives it from the directory name). The provider id stays `litellm`,
-aliases come from settings as in the TypeScript version.
+aliases come from settings and from the multi-provider environment variables, as in the TypeScript version.
 
 ## Design decisions
 

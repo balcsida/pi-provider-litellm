@@ -1773,8 +1773,8 @@ func TestLoginStartup(t *testing.T) {
 			t.Errorf("auth = %+v", auth)
 		}
 		alias := providerDefinition{Name: "other", DisplayName: "Other"}
-		if aliasAuth := createProviderAuth(alias, nil, &defaultLoginFlows, nil); aliasAuth.OAuth != nil || aliasAuth.APIKey.Login != nil {
-			t.Error("an alias offers interactive login")
+		if aliasAuth := createProviderAuth(alias, nil, &defaultLoginFlows, nil); aliasAuth.OAuth != nil || aliasAuth.APIKey.Login == nil {
+			t.Error("an alias offers API-key login only")
 		}
 	})
 

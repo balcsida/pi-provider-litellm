@@ -73,6 +73,9 @@ func resolveCredentialRoot(definition providerDefinition, credential *credential
 		}
 	}
 	baseURL = firstNonEmpty(baseURL, cleanConfig(requestBaseURL), cleanConfig(definition.BaseURL))
+	if baseURL == "" && definition.EnvPrefix != "" {
+		baseURL = cleanConfig(processEnvValue(definition.EnvPrefix + "_BASE_URL"))
+	}
 	if baseURL == "" && definition.UseDefaultEnv {
 		baseURL = cleanConfig(processEnvValue(envBaseURL))
 	}
@@ -98,7 +101,8 @@ func requireCredentialRoot(root, name string) (string, error) {
 	return root, nil
 }
 
-// configuredBaseURL is the unnormalized base URL: credential env, settings, then the context environment.
+// configuredBaseURL is the unnormalized base URL: credential env, settings, the scoped variable, then the
+// default one, the last two read through the context environment.
 func configuredBaseURL(definition providerDefinition, env envLookup, credential *ai.Credential) string {
 	if credential != nil {
 		if value := cleanConfig(credential.Env[envBaseURL]); value != "" {
@@ -108,11 +112,17 @@ func configuredBaseURL(definition providerDefinition, env envLookup, credential 
 	if value := cleanConfig(definition.BaseURL); value != "" {
 		return value
 	}
+	var scoped string
+	if definition.EnvPrefix != "" {
+		value, _ := env(definition.EnvPrefix + "_BASE_URL")
+		scoped = cleanConfig(value)
+	}
+	var fallback string
 	if definition.UseDefaultEnv {
 		value, _ := env(envBaseURL)
-		return cleanConfig(value)
+		fallback = cleanConfig(value)
 	}
-	return ""
+	return firstNonEmpty(scoped, fallback)
 }
 
 func providerHeaders(headers map[string]string) ai.ProviderHeaders {
@@ -145,17 +155,20 @@ func resolveAPIKeyAuth(ctx context.Context, definition providerDefinition, env e
 	if stored != "" {
 		source, apiKey = "stored credential", stored
 	} else {
-		stripped := definition
-		stripped.APIKeyConfig, stripped.UseDefaultEnv = "", false
-		creds, err := resolveCredentials(ctx, stripped, executeHelpers)
-		if err != nil {
-			return nil, err
+		// 1) Google ADC
+		if executeHelpers && usesGcloudToken(definition) {
+			apiKey = strings.TrimSpace(getGcloudToken(ctx))
+			if apiKey != "" {
+				source, fromGcloud = gcloudADCSource, true
+			}
 		}
-		apiKey, apiKeyConfig, fromGcloud = creds.APIKey, creds.APIKeyConfig, creds.APIKeyFromGcloudADC
+
+		// 2) definition.APIKeyConfig
 		if apiKey == "" && definition.APIKeyConfig != "" {
 			var configured string
 			if strings.HasPrefix(definition.APIKeyConfig, "!") {
 				if executeHelpers {
+					var err error
 					if configured, err = executeAPIKeyCommand(ctx, definition.APIKeyConfig); err != nil {
 						return nil, err
 					}
@@ -164,25 +177,40 @@ func resolveAPIKeyAuth(ctx context.Context, definition providerDefinition, env e
 				configured, _ = resolveTemplateConfigValue(definition.APIKeyConfig, env)
 			}
 			if configured != "" {
-				apiKey, apiKeyConfig = configured, definition.APIKeyConfig
+				apiKey, apiKeyConfig, source = configured, definition.APIKeyConfig, definition.APIKeyConfig
 			} else if !strings.HasPrefix(definition.APIKeyConfig, "!") {
 				warnUnresolvedAPIKeyConfig(definition.Name, definition.APIKeyConfig)
 			}
 		}
-		if apiKey == "" && definition.UseDefaultEnv {
-			helperValue, _ := env(envAPIKeyHelper)
+
+		// 3) Scoped envPrefix, then 4) default env: each its _API_KEY_HELPER, then its _API_KEY
+		fromEnv := func(helperName, keyName, sigil string) error {
+			helperValue, _ := env(helperName)
 			if helper := normalizeCommand(helperValue); helper != "" {
 				if executeHelpers {
-					if apiKey, err = executeAPIKeyCommand(ctx, helper); err != nil {
-						return nil, err
+					value, err := executeAPIKeyCommand(ctx, helper)
+					if err != nil {
+						return err
 					}
+					apiKey = value
 				}
-				apiKeyConfig, source = helper, envAPIKeyHelper
-			} else {
-				keyValue, _ := env(envAPIKey)
-				if envKey := cleanConfig(keyValue); envKey != "" {
-					apiKey, apiKeyConfig, source = envKey, envAPIKey, envAPIKey
-				}
+				apiKeyConfig, source = helper, sigil+helperName
+				return nil
+			}
+			keyValue, _ := env(keyName)
+			if envKey := cleanConfig(keyValue); envKey != "" {
+				apiKey, apiKeyConfig, source = envKey, sigil+keyName, sigil+keyName
+			}
+			return nil
+		}
+		if apiKey == "" && definition.EnvPrefix != "" {
+			if err := fromEnv(definition.EnvPrefix+"_API_KEY_HELPER", definition.EnvPrefix+"_API_KEY", "$"); err != nil {
+				return nil, err
+			}
+		}
+		if apiKey == "" && definition.UseDefaultEnv {
+			if err := fromEnv(envAPIKeyHelper, envAPIKey, ""); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -253,7 +281,7 @@ func createProviderAuth(
 	}
 
 	apiKey := &ai.APIKeyAuth{Name: definition.DisplayName + " API key"}
-	if definition.Name == providerName && hooks.LoginAPIKey != nil {
+	if hooks.LoginAPIKey != nil {
 		apiKey.Login = func(ctx context.Context, interaction ai.AuthInteraction) (ai.Credential, error) {
 			start()
 			return complete(hooks.LoginAPIKey(ctx, interaction, definition))
@@ -268,6 +296,9 @@ func createProviderAuth(
 		if baseURL == "" {
 			baseURL = definition.BaseURL
 		}
+		if baseURL == "" && definition.EnvPrefix != "" {
+			baseURL, _ = env(definition.EnvPrefix + "_BASE_URL")
+		}
 		if baseURL == "" && definition.UseDefaultEnv {
 			baseURL, _ = env(envBaseURL)
 		}
@@ -280,7 +311,7 @@ func createProviderAuth(
 		// Mirror the precedence in resolveCredentials, where ADC outranks the config key, the helper and the
 		// environment key. Whether the refresh token still mints is only knowable at request time, and this
 		// must not make a network call; if it fails, Resolve falls back and reports what it used.
-		if definition.UseGcloudTokenAuth && isGcloudTokenAuthEnabled() && hasGcloudADCCredentials() {
+		if usesGcloudToken(definition) && hasGcloudADCCredentials() {
 			return &ai.AuthCheck{Type: ai.CredentialAPIKey, Source: gcloudADCSource}, nil
 		}
 		if definition.APIKeyConfig != "" {
@@ -290,6 +321,14 @@ func createProviderAuth(
 			}
 			if configured != "" {
 				return &ai.AuthCheck{Type: ai.CredentialAPIKey, Source: definition.APIKeyConfig}, nil
+			}
+		}
+		if definition.EnvPrefix != "" {
+			if value, _ := env(definition.EnvPrefix + "_API_KEY_HELPER"); cleanConfig(value) != "" {
+				return &ai.AuthCheck{Type: ai.CredentialAPIKey, Source: "$" + definition.EnvPrefix + "_API_KEY_HELPER"}, nil
+			}
+			if value, _ := env(definition.EnvPrefix + "_API_KEY"); cleanConfig(value) != "" {
+				return &ai.AuthCheck{Type: ai.CredentialAPIKey, Source: "$" + definition.EnvPrefix + "_API_KEY"}, nil
 			}
 		}
 		if definition.UseDefaultEnv {
