@@ -350,6 +350,22 @@ func TestGetProviderDefinitionsWithEnvironmentVariables(t *testing.T) {
 		}
 	})
 
+	t.Run("attaches scoped env vars to a settings.json alias instead of deriving a second provider", func(t *testing.T) {
+		hermeticAgentDir(t)
+		t.Setenv("LITELLM_PROVIDER_TEAM_A_API_KEY", "sk-team-a")
+		t.Setenv("LITELLM_PROVIDER_TEAM_A_ENABLE_MCP", "0")
+		definitions := definitionsFor(`{"providers":{"team_a":{"baseUrl":"https://team.example.com"}}}`)
+		expectNames(t, definitions, "litellm", "team_a")
+		teamA := mustFindDefinition(t, definitions, "team_a")
+		if teamA.EnvPrefix != "LITELLM_PROVIDER_TEAM_A" || teamA.EnableMCP == nil || *teamA.EnableMCP {
+			t.Fatalf("team_a = %+v", teamA)
+		}
+		creds, err := resolveCredentials(context.Background(), teamA, true)
+		if err != nil || creds.BaseURL != "https://team.example.com" || creds.APIKey != "sk-team-a" {
+			t.Fatalf("creds = %+v, %v", creds, err)
+		}
+	})
+
 	t.Run("merges settings.json with env vars: disk settings override matching fields", func(t *testing.T) {
 		hermeticAgentDir(t)
 		t.Setenv("LITELLM_PROVIDER_CORP_BASE_URL", "https://env.example.com")

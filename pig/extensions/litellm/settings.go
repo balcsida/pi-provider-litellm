@@ -900,11 +900,18 @@ func getProviderDefinitions(settings *litellmSettings) []providerDefinition {
 	// 2. The scanned tokens; the default provider's is never an alias
 	claimedTokens := map[string]bool{primaryToken: true}
 
-	// 3. Declared ids claim their env token before step 4 derives new ids: LITELLM_PROVIDERS first, then JSON keys
+	// 3. Declared ids claim their env token before step 4 derives new ids: LITELLM_PROVIDERS first, then JSON keys,
+	// then settings.json aliases that have scoped variables (step 5 still applies their settings on top)
 	tokenOwners := map[string]string{primaryToken: providerName}
+	candidates := append(parseCanonicalProviderList(os.Getenv(envProviders)), secondary.order...)
+	for _, name := range order {
+		if normalizeProviderSettings(providers[name]) != nil && parsedEnv[tokenForProvider(name)] != nil {
+			candidates = append(candidates, name)
+		}
+	}
 	var declared []string
 	seen := map[string]bool{}
-	for _, id := range append(parseCanonicalProviderList(os.Getenv(envProviders)), secondary.order...) {
+	for _, id := range candidates {
 		if !seen[id] {
 			seen[id] = true
 			declared = append(declared, id)
