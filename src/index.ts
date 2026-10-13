@@ -738,10 +738,10 @@ export function getProviderDefinitions(settings: Record<string, unknown> | undef
   // 2. Scan env vars
   const claimedTokens = new Set<string>([PROVIDER_NAME.toUpperCase()]);
 
-  // 3. Incorporate canonical list LITELLM_PROVIDERS
+  // 3. Declared IDs claim their env token before step 4 derives new IDs: LITELLM_PROVIDERS first, then JSON keys
   const canonicalList = parseCanonicalProviderList(process.env[ENV_PROVIDERS]);
   const tokenOwners = new Map<string, string>([[PROVIDER_NAME.toUpperCase(), PROVIDER_NAME]]);
-  for (const canonicalId of canonicalList) {
+  for (const canonicalId of new Set([...canonicalList, ...secondaryProviders.keys()])) {
     if (!isValidProviderName(canonicalId)) continue;
     if (disabledProviders.has(canonicalId)) continue;
     const token = canonicalId.toUpperCase().replace(/-/g, "_");

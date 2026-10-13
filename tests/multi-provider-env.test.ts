@@ -335,6 +335,30 @@ describe("getProviderDefinitions with environment variables", () => {
     });
   });
 
+  it("attaches scoped env vars to a LITELLM_PROVIDERS_JSON id instead of deriving a second provider", async () => {
+    process.env.LITELLM_PROVIDERS_JSON = JSON.stringify({ team_a: { baseUrl: "https://team.example.com" } });
+    process.env.LITELLM_PROVIDER_TEAM_A_API_KEY = "sk-team-a";
+
+    const defs = getProviderDefinitions(undefined);
+    expect(defs.map((d) => d.name)).toEqual(["litellm", "team_a"]);
+    const teamA = defs.find((d) => d.name === "team_a");
+    expect(teamA?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
+    const creds = await resolveCredentials(teamA!);
+    expect(creds.baseUrl).toBe("https://team.example.com");
+    expect(creds.apiKey).toBe("sk-team-a");
+  });
+
+  it("gives a token shared by LITELLM_PROVIDERS and LITELLM_PROVIDERS_JSON ids to the LITELLM_PROVIDERS id", () => {
+    process.env.LITELLM_PROVIDERS = "team-a";
+    process.env.LITELLM_PROVIDERS_JSON = JSON.stringify({ team_a: { baseUrl: "https://json.example.com" } });
+    process.env.LITELLM_PROVIDER_TEAM_A_API_KEY = "sk-team-a";
+
+    const defs = getProviderDefinitions(undefined);
+    expect(defs.map((d) => d.name)).toEqual(["litellm", "team_a", "team-a"]);
+    expect(defs.find((d) => d.name === "team-a")?.envPrefix).toBe("LITELLM_PROVIDER_TEAM_A");
+    expect(defs.find((d) => d.name === "team_a")?.envPrefix).toBeUndefined();
+  });
+
   it("merges settings.json with env vars: disk settings override matching fields", () => {
     process.env.LITELLM_PROVIDER_CORP_BASE_URL = "https://env.example.com";
     process.env.LITELLM_PROVIDER_CORP_API_KEY = "sk-env";
