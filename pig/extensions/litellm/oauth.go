@@ -914,10 +914,9 @@ func requestOidcToken(ctx context.Context, endpoint string, form url.Values, exp
 	if isAuthToken(data["refresh_token"]) {
 		refresh = data["refresh_token"].(string)
 	}
-	// Refresh ahead of expiry, but by at most half the remaining lifetime, so a short-lived id_token is still
-	// used rather than treated as already expired.
-	lead := math.Ceil(math.Min(tokenRefreshLeadMs, (expiresAt-current)/2))
-	return &oidcToken{access: idToken, refresh: refresh, expires: int64(expiresAt - lead), subject: subject}, nil, nil
+	// The exact expiry, as for PKCE: PiG already refreshes five minutes before it, and a transient refresh
+	// failure then keeps the id_token until it actually expires.
+	return &oidcToken{access: idToken, refresh: refresh, expires: int64(expiresAt), subject: subject}, nil, nil
 }
 
 func loginOidc(ctx context.Context, interaction ai.AuthInteraction, baseURL string, config oidcConfig) (ai.Credential, error) {
