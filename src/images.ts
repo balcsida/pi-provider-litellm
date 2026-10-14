@@ -152,11 +152,14 @@ function requestHeaders(
   apiKey: string,
   ...sources: (Record<string, string | null | undefined> | undefined)[]
 ): Record<string, string> {
+  // Header names are case-insensitive: `fetch` would join `X-Tenant` and `x-tenant` into one
+  // comma-separated value, and a capitalized `Authorization` would merge with the bearer below.
   const headers: Record<string, string> = {};
   for (const source of sources) {
     for (const [name, value] of Object.entries(source ?? {})) {
-      if (typeof value === "string") headers[name] = value;
-      else delete headers[name];
+      const normalizedName = name.toLowerCase();
+      if (typeof value === "string") headers[normalizedName] = value;
+      else delete headers[normalizedName];
     }
   }
   headers.authorization = `Bearer ${apiKey}`;

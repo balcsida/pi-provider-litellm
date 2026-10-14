@@ -200,6 +200,21 @@ describe("generateImages", () => {
     expect(result.usage!.cost.input + result.usage!.cost.output).toBeCloseTo(0.034935, 9);
   });
 
+  it("merges header overrides case-insensitively and keeps its own bearer", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse(200, { data: [{ b64_json: PNG_B64 }] }));
+    await generateImages(
+      imageModel({ headers: { "X-Tenant": "old", "X-Drop": "gone", Authorization: "Bearer model" } }),
+      { input: [{ type: "text", text: "x" }] },
+      { apiKey: "secret", headers: { "x-tenant": "new", "x-drop": null } },
+    );
+    const sent = new Headers(fetchSpy.mock.calls[0]![1]?.headers);
+    expect(sent.get("x-tenant")).toBe("new");
+    expect(sent.has("x-drop")).toBe(false);
+    expect(sent.get("authorization")).toBe("Bearer secret");
+  });
+
   it("estimates cost from discovered rates when the proxy sends no cost header", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, { data: [{ b64_json: PNG_B64 }], usage: { input_tokens: 10, output_tokens: 1000 } }),
