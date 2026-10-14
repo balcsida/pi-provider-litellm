@@ -22,8 +22,15 @@ import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
+import type { LiteLLMImageModel } from "./images.js";
 import { readStoredModels } from "./models-store.js";
-import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost, toNativeModels } from "./provider.js";
+import {
+  createLiteLLMProvider,
+  DEFAULT_LITELLM_BASE_URL,
+  isPlaceholderHost,
+  toNativeImageModels,
+  toNativeModels,
+} from "./provider.js";
 import { parseProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
 import type {
@@ -2577,7 +2584,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // critical path of every start -- is replaced by reading that catalog while it is fresh (models-store.ts). Nothing is
   // written: Pi owns the file. The stored models are handed over rather than an empty list, so that a store Pi keeps
   // somewhere else cannot leave the provider with nothing.
-  async function seedModels(definition: ProviderDefinition): Promise<Model<LiteLLMApi>[]> {
+  async function seedModels(definition: ProviderDefinition): Promise<(Model<LiteLLMApi> | LiteLLMImageModel)[]> {
     const disabledReason = discoveryDisabledReason() ?? (isHostOffline() ? "PI_OFFLINE" : null);
     if (disabledReason) {
       if (isVerboseDiscovery()) {
@@ -2606,7 +2613,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return storedModels;
       }
       const result = await runDiscovery(auth, AbortSignal.timeout(getSeedTimeoutMs()));
-      return toNativeModels(definition.name, result.baseUrl, result.models, definition.allowInsecureHttp);
+      return [
+        ...toNativeModels(definition.name, result.baseUrl, result.models, definition.allowInsecureHttp),
+        ...toNativeImageModels(definition.name, result.baseUrl, result.imageModels ?? [], definition.allowInsecureHttp),
+      ];
     } catch (error) {
       // No credentials yet is the normal unconfigured case; anything else is worth one line.
       if (isVerboseDiscovery()) {

@@ -8,6 +8,7 @@ import {
   resolveCatalogProvider,
   routesOnlyThrough,
 } from "./backend-identity.js";
+import { type DiscoveredImageModel, mapFromImageModelInfoGroup } from "./images.js";
 import {
   type CatalogResolution,
   catalogResolution,
@@ -1297,7 +1298,16 @@ export async function discoverModels(
           "set model_info.max_input_tokens on every deployment in each route",
       );
     }
-    return { source: "model_info", models, ...(proxyVersion ? { proxyVersion } : {}) };
+    // Image routes are a separate operation in Pi; the chat reducer above withholds them.
+    const imageModels = [...groups.entries()]
+      .map(([route, group]) => mapFromImageModelInfoGroup(route, group))
+      .filter((model): model is DiscoveredImageModel => model !== undefined);
+    return {
+      source: "model_info",
+      models,
+      ...(imageModels.length > 0 ? { imageModels } : {}),
+      ...(proxyVersion ? { proxyVersion } : {}),
+    };
   }
   if (!infoResult.ok && ![401, 403, 404].includes(infoResult.status)) {
     throw new Error(`/model/info returned ${infoResult.status}`);

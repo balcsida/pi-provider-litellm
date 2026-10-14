@@ -348,6 +348,30 @@ A `/model/info` route group uses native Anthropic `/v1/messages` only when every
 
 Native Messages authenticates with `x-api-key`; every transport carries the `x-litellm-session-id` header described above. Strict JSON-schema tools are enabled separately from Messages transport and thinking compatibility: every deployment must affirm support for the actual route/API. Generic `supports_response_schema` and `supports_native_structured_output` metadata does not grant strict tools. Only deployments that LiteLLM reports with the `anthropic` adapter carry that evidence today. Claude served through Bedrock or Vertex therefore uses ordinary tool serialization, and a tool that requires strict sampling fails before the request is sent.
 
+## Image generation
+
+Routes whose every deployment reports `mode: "image_generation"` in `/model/info` are published as Pi image models
+(for example `litellm/gemini-nano-banana-2.1`). Like Pi's other image models they do not appear in `/model`; scripts
+reach them through Pi's `codemode` tool:
+
+```js
+const painter = await models.getModelOfType("image", "litellm", "gemini-nano-banana-2.1");
+const result = await models.generateImages(painter, {
+  input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
+});
+if (result.stopReason !== "stop") return result.errorMessage;
+for (const block of result.output) if (block.type === "image") image(block);
+```
+
+Requests go to the proxy's OpenAI-compatible `/v1/images/generations` with the provider's own credential and
+headers, so they work for any LiteLLM image deployment (`gpt-image-*`, `dall-e-*`, Gemini image models and others)
+and are budgeted and logged by the proxy like chat requests. Usage cost comes from LiteLLM's `x-litellm-response-cost`
+header when present; otherwise it is estimated from `input_cost_per_token` and `output_cost_per_image_token` (or
+`output_cost_per_token`). Only routes found through `/model/info` qualify: `/v1/models` and `/health` carry no mode,
+and groups that mix image and other modes, or wildcard routes, are withheld. The prompt is text only; reference images
+need `/v1/images/edits`, which this provider does not call, and backends that answer with image URLs instead of
+base64 data are reported as errors rather than fetched.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |

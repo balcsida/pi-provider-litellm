@@ -61,6 +61,11 @@
   publishes nothing until `/v1/models` expands it, so its probe waits for the expansion. `scripts/probe-proxy.ts`
   reuses `DiscoveryResult.proxyVersion` and never probes. The version is proxy-supplied; keep only the parsed numbers
   and never print the raw header.
+- Image routes live in `src/images.ts`, outside the chat reducer: a `/model/info` group becomes a `litellm-images` image
+  model only when every deployment reports `mode: "image_generation"` (never from `/v1/models`, `/health`, or a
+  wildcard). Requests use the credential's root like chat, return base64 blocks only (backend image URLs are never
+  fetched), and prefer the `x-litellm-response-cost` header over the token-rate estimate. The PiG bridge cannot map
+  `GenerateImages`, so the Go port withholds these groups (see `pig/PORTING.md`).
 - Evidence-free `/v1/models` and wholly health-only `/health` groups take protocol and presentation metadata from
   the bounded Pi catalog lookup. `openai-responses` selects Responses; other or missing catalog APIs select Chat.
   A health-only row mixed with deployment details grants no catalog authority to that group.

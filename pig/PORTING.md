@@ -151,6 +151,10 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   call the handlers with hand-built `data` maps (`TestHookRegistration`, `TestHookDataKeysAndScoping`).
 - `ctx.ui.setStatus(undefined)` has no SDK equivalent; an empty string clears the budget status.
 - Diagnostics the TypeScript writes to stderr go through one reporter; in a fused binary they still reach stderr.
+- Image generation is not ported. The TypeScript extension publishes `mode: "image_generation"` route groups as Pi
+  image models served through `/v1/images/generations` (`src/images.ts`), but `internal/bridge` maps neither
+  `GenerateImages` nor `GetAllModels`, so a PiG native provider cannot surface image models. The Go discovery keeps
+  withholding those groups like any other non-chat mode; port `src/images.ts` once the SDK exposes both callbacks.
 
 ## Known PiG 0.4.1 issues
 
