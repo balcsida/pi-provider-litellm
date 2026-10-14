@@ -110,16 +110,6 @@ describe("supply-chain guard", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("authorizes models-store, and requires the file to ship", async () => {
-    // AGENTS.md: the guard "requires every allowlisted source file to ship; update tests before changing that policy".
-    // The generic test below covers this in both directions, but names no module; this one names the module the policy
-    // gained, so a reader does not have to infer the coverage.
-    expect(allowedSourceModules).toContain("models-store");
-
-    const shipped = await readdir(join(repoRoot, "src"));
-    expect(shipped).toContain("models-store.ts");
-  });
-
   it("authorizes exactly the source modules the package ships", async () => {
     const shipped = (await readdir(join(repoRoot, "src")))
       .filter((file) => file.endsWith(".ts"))
