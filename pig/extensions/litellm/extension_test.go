@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -261,6 +262,137 @@ func TestSeedModels(t *testing.T) {
 		if seed := state.seedModels(definition); seed != nil || len(*diagnostics) != 0 {
 			t.Fatalf("seed=%v diagnostics=%q", seed, *diagnostics)
 		}
+	})
+	t.Run("stored catalog", func(t *testing.T) {
+		// storedSetup writes models-store.json for the proxy, with one stored-model record and the sidecar at version.
+		type storedSetup struct {
+			state      *extensionState
+			definition providerDefinition
+			calls      *atomic.Int32
+			root       string
+			dir        string
+		}
+		setup := func(t *testing.T) storedSetup {
+			state, definition := startup(t)
+			server, calls := proxy(t, 200, nil)
+			t.Setenv(envBaseURL, server.URL)
+			t.Setenv(envAPIKey, "sk-test")
+			return storedSetup{state, definition, calls, server.URL, agentDir()}
+		}
+		record := func(t *testing.T, root string) string {
+			model := discoveredModel("stored-model")
+			model.Provider, model.BaseURL = "litellm", root+"/v1"
+			data, err := json.Marshal(model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+		writeStore := func(t *testing.T, dir, entry string) {
+			writeFileIn(t, dir, "models-store.json", `{"litellm":`+entry+`}`)
+		}
+		entryOf := func(checkedAt time.Time, records ...string) string {
+			return fmt.Sprintf(`{"checkedAt":%d,"models":[%s]}`, checkedAt.UnixMilli(), strings.Join(records, ","))
+		}
+		current := func(t *testing.T, s storedSetup) {
+			if err := s.state.policies.replace("litellm", []types.DiscoveredModel{discoveredModel("stored-model")}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		discovers := func(t *testing.T, s storedSetup) {
+			t.Helper()
+			seed := s.state.seedModels(s.definition)
+			if len(seed) != 1 || seed[0].ID != "fresh-model" || s.calls.Load() != 1 {
+				t.Fatalf("seed=%+v calls=%d", seed, s.calls.Load())
+			}
+		}
+
+		t.Run("skips discovery when PiG already has a stored catalog", func(t *testing.T) {
+			s := setup(t)
+			diagnostics := collectDiagnostics(t)
+			t.Setenv(envVerboseDiscovery, "1")
+			stored := discoveredModel("stored-model")
+			stored.LiteLLMBackendFamily = types.BackendFamily("kimi")
+			if err := s.state.policies.replace("litellm", []types.DiscoveredModel{stored}); err != nil {
+				t.Fatal(err)
+			}
+			sidecar := filepath.Join(s.dir, policiesFilename)
+			before, err := os.ReadFile(sidecar)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeStore(t, s.dir, entryOf(time.Now(), record(t, s.root)))
+			seed := s.state.seedModels(s.definition)
+			if len(seed) != 1 || seed[0].ID != "stored-model" || seed[0].LiteLLMBackendFamily != "kimi" || s.calls.Load() != 0 {
+				t.Fatalf("seed=%+v calls=%d", seed, s.calls.Load())
+			}
+			after, err := os.ReadFile(sidecar)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("sidecar rewritten: %v", err)
+			}
+			if len(*diagnostics) != 1 || !strings.Contains((*diagnostics)[0], "LiteLLM (litellm): startup discovery skipped (1 model(s) from PiG's store).") {
+				t.Fatalf("diagnostics = %q", *diagnostics)
+			}
+		})
+		t.Run("stays quiet about the skip when not verbose", func(t *testing.T) {
+			s := setup(t)
+			diagnostics := collectDiagnostics(t)
+			current(t, s)
+			writeStore(t, s.dir, entryOf(time.Now(), record(t, s.root)))
+			if seed := s.state.seedModels(s.definition); len(seed) != 1 || len(*diagnostics) != 0 {
+				t.Fatalf("seed=%+v diagnostics=%q", seed, *diagnostics)
+			}
+		})
+		t.Run("discovers when PiG cannot restore a stored model", func(t *testing.T) {
+			s := setup(t)
+			current(t, s)
+			bad := strings.Replace(record(t, s.root), `"contextWindow":128000`, `"contextWindow":"big"`, 1)
+			writeStore(t, s.dir, entryOf(time.Now(), record(t, s.root), bad))
+			discovers(t, s)
+		})
+		t.Run("discovers when the stored catalog is older than four hours", func(t *testing.T) {
+			s := setup(t)
+			current(t, s)
+			writeStore(t, s.dir, entryOf(time.Now().Add(-4*time.Hour), record(t, s.root)))
+			discovers(t, s)
+		})
+		t.Run("discovers when the stored catalog is for another proxy", func(t *testing.T) {
+			s := setup(t)
+			current(t, s)
+			writeStore(t, s.dir, entryOf(time.Now(), record(t, "https://other.example")))
+			discovers(t, s)
+		})
+		t.Run("discovers when the stored catalog is from an older discovery version", func(t *testing.T) {
+			for name, version := range map[string]int{"older": types.DiscoveryVersion - 1, "missing": 0} {
+				t.Run(name, func(t *testing.T) {
+					s := setup(t)
+					if version != 0 {
+						old := discoveredModel("stored-model")
+						old.LiteLLMDiscoveryVersion = version
+						if err := s.state.policies.replace("litellm", []types.DiscoveredModel{old}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					writeStore(t, s.dir, entryOf(time.Now(), record(t, s.root)))
+					discovers(t, s)
+				})
+			}
+		})
+		t.Run("discovers when the stored catalog is empty, unreadable, or for another provider", func(t *testing.T) {
+			for name, content := range map[string]string{
+				"empty object":   `{}`,
+				"not json":       `not json`,
+				"no models":      `{"litellm":{"models":[]}}`,
+				"other provider": `{"other":{}}`,
+			} {
+				t.Run(name, func(t *testing.T) {
+					s := setup(t)
+					current(t, s)
+					writeFileIn(t, s.dir, "models-store.json", content)
+					discovers(t, s)
+				})
+			}
+		})
 	})
 	t.Run("never runs an API key helper", func(t *testing.T) {
 		state, definition := startup(t)

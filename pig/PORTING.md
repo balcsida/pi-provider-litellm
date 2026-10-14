@@ -14,6 +14,7 @@ pig/
     ├── go.mod                      requires github.com/MichaelKinsy/PiG v0.4.1 and .../extensions/sdk v0.4.1
     ├── extension.go                factory: func Extension() *sdk.Extension      ← src/index.ts
     ├── provider.go                 LiteLLM native provider                       ← src/provider.ts
+    ├── models_store.go             stored-catalog seed                           ← src/models-store.ts
     ├── auth.go, oauth.go           credential resolution, login flows            ← src/index.ts
     ├── request_policy.go           request/response hooks                        ← src/index.ts, src/cost.ts
     ├── budget.go, skills.go, mcp.go, gcloud.go, settings.go                      ← src/budget.ts, skills.ts, index.ts, gcloud-token.ts
@@ -124,6 +125,8 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 
 - Extension-only model fields live in the `litellm-model-policies.json` sidecar (see Design decisions), and the
   discovery-version staleness gate reads the sidecar instead of the stored model.
+- The stored-catalog seed (`models_store.go`) reads the discovery version from the sidecar, and treats an undecodable
+  stored record as the restore failure, because Go's `EnrichCachedModel` cannot fail where the TypeScript one throws.
 - PiG 0.4.1 emits `model_select` (from `SetModel`, with the Pi-shaped model in `data["model"]`), although its
   parity table still lists it as planned. The budget status line follows the provider in `data["model"]["provider"]`;
   `before_agent_start`, `turn_end` and `session_start` remain as a fallback through `ctx.ModelProvider()` for a host
