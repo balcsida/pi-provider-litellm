@@ -7,10 +7,10 @@ import { LITELLM_DISCOVERY_VERSION } from "../src/backend-identity.js";
 import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
 /** A catalog in the shape Pi persists: `{ <provider>: { models, checkedAt } }`, with per-protocol baseUrls. */
-function storedCatalog(overrides: { baseUrl?: string; version?: number } = {}) {
+function storedCatalog(overrides: { baseUrl?: string; version?: number; checkedAt?: number } = {}) {
   return {
     litellm: {
-      checkedAt: 1_700_000_000_000,
+      checkedAt: overrides.checkedAt ?? Date.now(),
       models: [
         {
           id: "stored-model",
@@ -141,13 +141,31 @@ describe("cold start discovery (issue #137)", () => {
     expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
   });
 
-  it("discovers when a stored model is missing a field a session needs", async () => {
+  it("discovers when Pi cannot restore a stored model", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-short-model-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
     const catalog = storedCatalog();
-    // These models go straight to Pi now, so a short entry must discover rather than reach a session.
-    delete (catalog.litellm.models[0] as Record<string, unknown>).maxTokens;
+    // enrichCachedModel throws on it, so Pi's restore publishes nothing and the seed is the whole catalog.
+    delete (catalog.litellm.models[0] as Record<string, unknown>).name;
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["fresh-model"]);
+  });
+
+  it("discovers when the stored catalog is older than four hours", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stale-store-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    const catalog = storedCatalog({ checkedAt: Date.now() - 4 * 60 * 60 * 1000 });
     await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       if (String(input).endsWith("/model/info")) {

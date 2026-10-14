@@ -2518,9 +2518,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   //
   // That is true on a first run. Once Pi has persisted the catalog it is not: with discovery off and a populated store,
   // Pi offers the stored models and a request works. So the round trip -- about 1.8 s against a real proxy, on the
-  // critical path of every start -- is replaced by reading that catalog (models-store.ts). Nothing is written: Pi owns
-  // the file. The stored models are handed over rather than an empty list, so that a store Pi keeps somewhere else
-  // cannot leave the provider with nothing.
+  // critical path of every start -- is replaced by reading that catalog while it is fresh (models-store.ts). Nothing is
+  // written: Pi owns the file. The stored models are handed over rather than an empty list, so that a store Pi keeps
+  // somewhere else cannot leave the provider with nothing.
   async function seedModels(definition: ProviderDefinition): Promise<Model<LiteLLMApi>[]> {
     const disabledReason = discoveryDisabledReason() ?? (isHostOffline() ? "PI_OFFLINE" : null);
     if (disabledReason) {

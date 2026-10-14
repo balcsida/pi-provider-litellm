@@ -7,8 +7,8 @@
  * Pi offers the stored models and a request works, measured at a 5 ms factory against 1.8 s to discover.
  *
  * So the seed reads the stored catalog and hands those models over, instead of discovering them again. It only reads, and
- * only the file Pi names in AGENTS.md. Nothing here writes a model cache; the removed `litellm-models.json` is what that
- * rule is about.
+ * only `models-store.json`, which this repository's AGENTS.md assigns to Pi. Nothing here writes a model cache; the removed
+ * `litellm-models.json` is what that rule is about.
  *
  * The models are returned rather than an empty list on purpose. Pi restores its own catalog, so an empty list would do in
  * the ordinary case. It would not do when Pi's active store is somewhere else: `ModelRuntime` takes a `modelsStorePath`, and
@@ -17,22 +17,29 @@
  * empty, and the provider would have no models at all -- the very fault the seed exists to prevent. Returning the models
  * costs nothing and cannot fail that way.
  *
- * Three things make a stored entry unusable, and all are checked here rather than left to Pi:
+ * Four things make a stored entry unusable, and all are checked here rather than left to Pi:
  *
+ *   - Age. Only a network refresh writes the store, and `pi -p` never runs one, so without a limit print mode would keep
+ *     whatever catalog an interactive session last left. Pi's own remote catalogs skip the network for 4 hours after
+ *     `checkedAt`, and so does this.
  *   - A different proxy. Stored models carry the `baseUrl` they were discovered from, so a changed root must still discover.
  *   - An older `litellmDiscoveryVersion`. Pi keeps a same-version stored entry over what startup discovery just proved
  *     (AGENTS.md), so skipping discovery for an older entry would hide the metadata a new version adds.
- *   - A field a model needs to be used. These models go straight to Pi, so a short entry must discover, not reach a session.
+ *   - An entry Pi cannot restore. Pi's no-network restore publishes the stored models over the seed, so the seed cannot keep
+ *     a short entry out of a session; it decides the catalog only when that restore fails. The restore runs
+ *     `enrichCachedModel` (provider.ts), and when that throws Pi restores nothing, so the seed makes the same call and
+ *     discovers instead.
  *
  * What is deliberately not checked is the credential. Nothing in Pi's store records which key discovered it, and a key scopes
- * which models a LiteLLM proxy shows. A key swapped on the same proxy therefore shows the stored catalog until Pi's own
- * network refresh runs. That is the behaviour Pi already gives every provider, and recording a key fingerprint would mean
- * writing a file of our own, which is the thing the rule forbids.
+ * which models a LiteLLM proxy shows. Within those 4 hours, a key swapped on the same proxy, or a model added to it, therefore
+ * shows the stored catalog until Pi's own network refresh runs: interactive and RPC sessions run one in the background,
+ * `pi -p` does not. Recording a key fingerprint would mean writing a file of our own, which is the thing the rule forbids.
  */
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
+import { enrichCachedModel } from "./discover.js";
 import { isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
 import type { LiteLLMModel } from "./types.js";
 
@@ -47,32 +54,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const isNumber = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value);
+/** Pi's own remote catalogs skip the network for 4 hours after `checkedAt` (`REMOTE_CATALOG_REFRESH_INTERVAL_MS`). */
+const STORE_FRESH_MS = 4 * 60 * 60 * 1000;
 
-/** The cost rates Pi expects on every model. */
-function hasCost(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isNumber(value.input) &&
-    isNumber(value.output) &&
-    isNumber(value.cacheRead) &&
-    isNumber(value.cacheWrite)
-  );
-}
-
-/**
- * Whether a stored entry can be handed to Pi as it is. The fields are the required ones of `Model`: anything short of them
- * would reach a session as a model that cannot be used, so it discovers instead.
- */
 function isUsableModel(value: unknown, provider: string, baseUrl: string, allowInsecureHttp?: boolean): boolean {
-  if (!isRecord(value)) return false;
-  if (typeof value.id !== "string" || value.id.length === 0) return false;
-  if (typeof value.name !== "string" || value.name.length === 0) return false;
-  if (value.provider !== provider) return false;
-  if (typeof value.reasoning !== "boolean") return false;
-  if (!isNumber(value.contextWindow) || !isNumber(value.maxTokens)) return false;
-  if (!Array.isArray(value.input) || value.input.length === 0) return false;
-  if (!hasCost(value.cost)) return false;
+  if (!isRecord(value) || value.provider !== provider) return false;
   if (value.litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION) return false;
   // `api` indexes LITELLM_PROTOCOLS in resolveModelBaseUrl, so an unknown one is a TypeError, not a bad model.
   if (!isLiteLLMApi(value.api)) return false;
@@ -107,8 +93,15 @@ export async function readStoredModels(options: {
 }): Promise<LiteLLMModel[] | undefined> {
   const entry = (await readStore(options.agentDir))?.[options.provider];
   if (!isRecord(entry) || !Array.isArray(entry.models) || entry.models.length === 0) return undefined;
+  if (typeof entry.checkedAt !== "number" || Date.now() - entry.checkedAt >= STORE_FRESH_MS) return undefined;
   const usable = entry.models.every((model) =>
     isUsableModel(model, options.provider, options.baseUrl, options.allowInsecureHttp),
   );
-  return usable ? (entry.models as LiteLLMModel[]) : undefined;
+  if (!usable) return undefined;
+  try {
+    // Pi's restore path (provider.ts) runs the same call; when it throws, nothing is restored and the seed is the catalog.
+    return entry.models.map((model) => enrichCachedModel(model)) as LiteLLMModel[];
+  } catch {
+    return undefined;
+  }
 }
