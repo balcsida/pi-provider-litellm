@@ -427,6 +427,8 @@ LiteLLM's `/model/info` is the metadata authority, so models.dev enrichment is a
 
 Opening `/model` refreshes configured provider catalogs in the background using Pi's native model lifecycle when network discovery is enabled.
 
+Startup reuses that stored catalog instead of discovering again while the provider's entry is under 4 hours old and comes from the active proxy and the current discovery version. Interactive and RPC sessions still refresh it in the background; `pi -p` does not. For up to 4 hours after the last refresh, print mode can therefore miss a model added on the proxy or granted to your key, and after a key change on the same proxy it can list the previous key's models. Run `/litellm-refresh` or start an interactive session to update it sooner.
+
 Pi documents `PI_OFFLINE` and `--offline` as disabling automatic network activity, including model catalog refreshes. Pi 0.87.1 adopted that wording to resolve [earendil-works/pi#8684](https://github.com/earendil-works/pi/issues/8684), without changing the behavior. Pi still checks only whether the variable is set, so `PI_OFFLINE=0` and an empty value also disable model refreshes. With `LITELLM_VERBOSE_DISCOVERY=1`, disabled startup discovery reports its reason, for example `startup discovery skipped (PI_OFFLINE)`. To discover models while keeping `PI_OFFLINE`, run `/litellm-refresh`. To allow all discovery for one invocation, use `env -u PI_OFFLINE pi` and do not pass `--offline`. If you only want to disable Pi's version check, use `PI_SKIP_VERSION_CHECK=1` instead; it does not apply offline mode's other network restrictions. See [#155](https://github.com/balcsida/pi-provider-litellm/issues/155).
 
 ### Model host enforcement
