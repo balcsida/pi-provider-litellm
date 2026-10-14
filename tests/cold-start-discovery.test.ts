@@ -1,9 +1,34 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LITELLM_DISCOVERY_VERSION } from "../src/backend-identity.js";
 import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
+
+/** A catalog in the shape Pi persists: `{ <provider>: { models, checkedAt } }`, with per-protocol baseUrls. */
+function storedCatalog(overrides: { baseUrl?: string; version?: number; checkedAt?: number } = {}) {
+  return {
+    litellm: {
+      checkedAt: overrides.checkedAt ?? Date.now(),
+      models: [
+        {
+          id: "stored-model",
+          name: "stored-model",
+          api: "openai-completions",
+          provider: "litellm",
+          baseUrl: overrides.baseUrl ?? "https://proxy.example.com/v1",
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128000,
+          maxTokens: 16384,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          litellmDiscoveryVersion: overrides.version ?? LITELLM_DISCOVERY_VERSION,
+        },
+      ],
+    },
+  };
+}
 
 vi.unmock("@earendil-works/pi-coding-agent");
 
@@ -14,10 +39,11 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 /** Replays createAgentSessionServices(): every startup refresh runs with allowNetwork:false. */
-async function startup(agentDir: string): Promise<ModelRuntime> {
+async function startup(agentDir: string, modelsStorePath?: string): Promise<ModelRuntime> {
   const runtime = await ModelRuntime.create({
     authPath: join(agentDir, "auth.json"),
     modelsPath: join(agentDir, "models.json"),
+    ...(modelsStorePath ? { modelsStorePath } : {}),
   });
   const pi = createPi();
   pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
@@ -72,6 +98,153 @@ describe("cold start discovery (issue #137)", () => {
 
     expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["sonnet"]);
     expect(seen).toContain("https://stored.example.com/model/info");
+  });
+
+  it("skips discovery when Pi already has a stored catalog for the provider", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    // Pi persists its own catalog. Once it has one, the session gets its models from Pi, so the seed's round trip is
+    // not needed; this is the 1.8 s the change removes.
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(storedCatalog()), "utf8");
+    const requested: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requested.push(String(input));
+      throw new Error("no discovery should be needed when Pi has a stored catalog");
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["stored-model"]);
+  });
+
+  it("still supplies the models when Pi's active store is somewhere else", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-other-store-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    // ModelRuntime takes a modelsStorePath. Every caller inside Pi passes an agent-directory path, but an SDK embedder
+    // need not. The catalog in the default file must then not make the seed hand back nothing, or the provider would be
+    // empty -- the fault the seed exists to prevent.
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(storedCatalog()), "utf8");
+    const elsewhere = join(agentDir, "elsewhere", "models-store.json");
+    await mkdir(dirname(elsewhere), { recursive: true });
+    const requested: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requested.push(String(input));
+      throw new Error("no discovery should be needed when a stored catalog is readable");
+    });
+
+    const runtime = await startup(agentDir, elsewhere);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["stored-model"]);
+    expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
+  });
+
+  it("discovers when Pi cannot restore a stored model", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-short-model-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    const catalog = storedCatalog();
+    // enrichCachedModel throws on it, so Pi's restore publishes nothing and the seed is the whole catalog.
+    delete (catalog.litellm.models[0] as Record<string, unknown>).name;
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["fresh-model"]);
+  });
+
+  it("discovers when the stored catalog is older than four hours", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stale-store-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    const catalog = storedCatalog({ checkedAt: Date.now() - 4 * 60 * 60 * 1000 });
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toContain("fresh-model");
+  });
+
+  it("discovers when the stored catalog is for another proxy", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-other-proxy-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    await writeFile(
+      join(agentDir, "models-store.json"),
+      JSON.stringify(storedCatalog({ baseUrl: "https://elsewhere.example.com/v1" })),
+      "utf8",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toContain("fresh-model");
+  });
+
+  it("discovers when the stored catalog is from an older discovery version", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-old-version-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    // Pi keeps a same-version stored entry over what startup discovery proves, so an older one must not be trusted:
+    // skipping here would hide the metadata the new version adds.
+    await writeFile(
+      join(agentDir, "models-store.json"),
+      JSON.stringify(storedCatalog({ version: LITELLM_DISCOVERY_VERSION - 1 })),
+      "utf8",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "fresh-model", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    const runtime = await startup(agentDir);
+
+    expect(runtime.getModels("litellm").map((model) => model.id)).toContain("fresh-model");
+  });
+
+  it("discovers when the store is empty, unreadable, or for another provider", async () => {
+    for (const body of ["{}", "not json", JSON.stringify({ litellm: { models: [] } }), JSON.stringify({ other: {} })]) {
+      const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-unusable-"));
+      process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+      process.env.LITELLM_API_KEY = "env-key";
+      await writeFile(join(agentDir, "models-store.json"), body, "utf8");
+      const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        if (String(input).endsWith("/model/info")) {
+          return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
+        }
+        throw new Error(`unexpected URL: ${String(input)}`);
+      });
+
+      const runtime = await startup(agentDir);
+
+      expect(
+        runtime.getModels("litellm").map((model) => model.id),
+        body,
+      ).toEqual(["gpt-4o"]);
+      spy.mockRestore();
+      vi.resetModules();
+    }
   });
 
   it("stays offline when PI_OFFLINE is set", async () => {

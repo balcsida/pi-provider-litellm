@@ -74,6 +74,7 @@ export const allowedSourceModules = [
   "index",
   "protocols",
   "model-groups",
+  "models-store",
   "provider",
   "proxy-version",
   "public-catalog",

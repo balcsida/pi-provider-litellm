@@ -347,7 +347,8 @@ func (s *extensionState) runDiscovery(ctx context.Context, auth types.LiteLLMRun
 }
 
 // seedModels discovers a provider's catalog at activation, the way 1.x did, because the host's startup
-// refresh never allows network access.
+// refresh never allows network access. A fresh, restorable catalog in PiG's own store is handed over instead
+// (readStoredModels).
 func (s *extensionState) seedModels(definition providerDefinition) []types.DiscoveredModel {
 	skip := func(reason string) []types.DiscoveredModel {
 		if isVerboseDiscovery() {
@@ -373,6 +374,14 @@ func (s *extensionState) seedModels(definition providerDefinition) []types.Disco
 	auth, err := s.authForCredential(ctx, definition, credentialFromStored(stored), false)
 	if err != nil {
 		return skip(err.Error())
+	}
+	if root, err := protocols.NormalizeBaseURL(auth.BaseURL, auth.AllowInsecureHTTP); err == nil {
+		if models := readStoredModels(agentDir(), definition.Name, root, definition.AllowInsecureHTTP, s.policies); models != nil {
+			if isVerboseDiscovery() {
+				reportDiagnostic(fmt.Sprintf("LiteLLM (%s): startup discovery skipped (%d model(s) from PiG's store).", definition.Name, len(models)))
+			}
+			return models
+		}
 	}
 	result, err := s.runDiscovery(ctx, auth)
 	if err != nil {

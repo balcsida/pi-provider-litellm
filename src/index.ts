@@ -22,6 +22,7 @@ import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
+import { readStoredModels } from "./models-store.js";
 import { createLiteLLMProvider, DEFAULT_LITELLM_BASE_URL, isPlaceholderHost, toNativeModels } from "./provider.js";
 import { parseProxyVersion, proxyVersionAtLeast } from "./proxy-version.js";
 import { createSkillsPromptSection, createSkillToolDefinitions, listSkills } from "./skills.js";
@@ -2514,6 +2515,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // Pi's startup path only ever refreshes with allowNetwork:false, and it returns before the
   // network phase, so the provider would stay empty until the user opens /model. Discover here
   // instead, the way 1.x did, and hand the catalog over as the provider's baseline models.
+  //
+  // That is true on a first run. Once Pi has persisted the catalog it is not: with discovery off and a populated store,
+  // Pi offers the stored models and a request works. So the round trip -- about 1.8 s against a real proxy, on the
+  // critical path of every start -- is replaced by reading that catalog while it is fresh (models-store.ts). Nothing is
+  // written: Pi owns the file. The stored models are handed over rather than an empty list, so that a store Pi keeps
+  // somewhere else cannot leave the provider with nothing.
   async function seedModels(definition: ProviderDefinition): Promise<Model<LiteLLMApi>[]> {
     const disabledReason = discoveryDisabledReason() ?? (isHostOffline() ? "PI_OFFLINE" : null);
     if (disabledReason) {
@@ -2522,11 +2529,26 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       }
       return [];
     }
+    const agentDir = getAgentDir();
     try {
-      const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
+      const stored = readStoredCredential(definition.name, join(agentDir, "auth.json"));
       // executeHelpers:false — activation must never run the user's key helper as a side effect,
       // so helper-backed setups keep waiting for Pi's own refresh.
       const auth = await authForCredential(definition, stored, false);
+      const storedModels = await readStoredModels({
+        agentDir,
+        provider: definition.name,
+        baseUrl: normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp),
+        allowInsecureHttp: definition.allowInsecureHttp,
+      });
+      if (storedModels) {
+        if (isVerboseDiscovery()) {
+          process.stderr.write(
+            `LiteLLM (${definition.name}): startup discovery skipped (${storedModels.length} model(s) from Pi's store).\n`,
+          );
+        }
+        return storedModels;
+      }
       const result = await runDiscovery(auth, AbortSignal.timeout(getSeedTimeoutMs()));
       return toNativeModels(definition.name, result.baseUrl, result.models, definition.allowInsecureHttp);
     } catch (error) {
