@@ -49,7 +49,7 @@ function isLiteLLMImageModel(model: AnyModel): model is LiteLLMImageModel {
   return model.type === "image" && model.api === LITELLM_IMAGES_API;
 }
 
-function imageBaseUrl(root: string, allowInsecureHttp = false): string {
+export function imageBaseUrl(root: string, allowInsecureHttp = false): string {
   return `${normalizeBaseUrl(root, allowInsecureHttp)}/v1`;
 }
 

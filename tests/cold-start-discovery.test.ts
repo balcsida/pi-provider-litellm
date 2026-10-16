@@ -141,6 +141,40 @@ describe("cold start discovery (issue #137)", () => {
     expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
   });
 
+  it("hands stored image models over too, without discovering", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-images-"));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "env-key";
+    // Pi persists every model type, so a proxy with image routes stores them beside its chat models. The store is read
+    // from elsewhere so that only the seed, not Pi's own restore, can supply them.
+    const catalog = storedCatalog();
+    (catalog.litellm.models as Record<string, unknown>[]).push({
+      type: "image",
+      id: "stored-image",
+      name: "stored-image",
+      api: "litellm-images",
+      provider: "litellm",
+      baseUrl: "https://proxy.example.com/v1",
+      input: ["text"],
+      output: ["image"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
+    });
+    await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
+    const elsewhere = join(agentDir, "elsewhere", "models-store.json");
+    await mkdir(dirname(elsewhere), { recursive: true });
+    const requested: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requested.push(String(input));
+      throw new Error("no discovery should be needed when a stored catalog is readable");
+    });
+
+    const runtime = await startup(agentDir, elsewhere);
+
+    expect(runtime.getAllModels("litellm").map((model) => model.id)).toEqual(["stored-model", "stored-image"]);
+    expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
+  });
+
   it("discovers when Pi cannot restore a stored model", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-short-model-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

@@ -40,7 +40,9 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 import { enrichCachedModel } from "./discover.js";
+import { LITELLM_IMAGES_API, type LiteLLMImageModel } from "./images.js";
 import { isLiteLLMApi, resolveModelBaseUrl } from "./protocols.js";
+import { imageBaseUrl } from "./provider.js";
 import type { LiteLLMModel } from "./types.js";
 
 /**
@@ -57,15 +59,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Pi's own remote catalogs skip the network for 4 hours after `checkedAt` (`REMOTE_CATALOG_REFRESH_INTERVAL_MS`). */
 const STORE_FRESH_MS = 4 * 60 * 60 * 1000;
 
+function isImageModel(value: Record<string, unknown>): boolean {
+  return value.type === "image" && value.api === LITELLM_IMAGES_API;
+}
+
 function isUsableModel(value: unknown, provider: string, baseUrl: string, allowInsecureHttp?: boolean): boolean {
   if (!isRecord(value) || value.provider !== provider) return false;
   if (value.litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION) return false;
-  // `api` indexes LITELLM_PROTOCOLS in resolveModelBaseUrl, so an unknown one is a TypeError, not a bad model.
-  if (!isLiteLLMApi(value.api)) return false;
   try {
-    // A stored baseUrl is per protocol -- `/v1` for the OpenAI APIs, the bare root for Messages -- so the root goes through
-    // the same resolution rather than being compared to it.
-    return value.baseUrl === resolveModelBaseUrl(baseUrl, value.api, allowInsecureHttp);
+    // A stored baseUrl is per protocol -- `/v1` for the OpenAI APIs and images, the bare root for Messages -- so the root
+    // goes through the same resolution rather than being compared to it.
+    if (isImageModel(value)) return value.baseUrl === imageBaseUrl(baseUrl, allowInsecureHttp);
+    // `api` indexes LITELLM_PROTOCOLS in resolveModelBaseUrl, so an unknown one is a TypeError, not a bad model.
+    return isLiteLLMApi(value.api) && value.baseUrl === resolveModelBaseUrl(baseUrl, value.api, allowInsecureHttp);
   } catch {
     return false;
   }
@@ -90,7 +96,7 @@ export async function readStoredModels(options: {
   provider: string;
   baseUrl: string;
   allowInsecureHttp?: boolean;
-}): Promise<LiteLLMModel[] | undefined> {
+}): Promise<(LiteLLMModel | LiteLLMImageModel)[] | undefined> {
   const entry = (await readStore(options.agentDir))?.[options.provider];
   if (!isRecord(entry) || !Array.isArray(entry.models) || entry.models.length === 0) return undefined;
   if (typeof entry.checkedAt !== "number" || Date.now() - entry.checkedAt >= STORE_FRESH_MS) return undefined;
@@ -100,7 +106,11 @@ export async function readStoredModels(options: {
   if (!usable) return undefined;
   try {
     // Pi's restore path (provider.ts) runs the same call; when it throws, nothing is restored and the seed is the catalog.
-    return entry.models.map((model) => enrichCachedModel(model)) as LiteLLMModel[];
+    // Image models carry no request policy, so that path restores them as stored.
+    return entry.models.map((model) => (isImageModel(model) ? model : enrichCachedModel(model))) as (
+      | LiteLLMModel
+      | LiteLLMImageModel
+    )[];
   } catch {
     return undefined;
   }
