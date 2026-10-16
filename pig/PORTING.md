@@ -104,6 +104,11 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
    Repeat the prompt with `mock-responses` and `mock-claude`: the mock logs `POST /v1/responses` and
    `POST /v1/messages`, which proves each model reached its own protocol's endpoint.
 
+   Run the same steps once more with no `LITELLM_*` variables and only
+   `{"providers":{"litellm":{"baseUrl":"http://127.0.0.1:48417","apiKey":"test-key"}}}` in
+   `$PIG_CODING_AGENT_DIR/models.json`. PiG composes that block over the registered provider itself, so this proves
+   its composition keeps each model's route; it stands in for the Vitest case that drives Pi's real ModelRuntime.
+
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
 5. Login inside a session: `pig/tools/login-smoke/login-smoke.mts` drives `/login litellm` through a real terminal

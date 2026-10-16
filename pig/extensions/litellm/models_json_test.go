@@ -1,5 +1,9 @@
 package litellm
 
+// Ports the "models.json provider config" cases of tests/index.test.ts as unit tests of the settings readers. The
+// case that drives Pi's real ModelRuntime has no Go harness; the models.json live smoke in pig/PORTING.md covers
+// PiG's own composition of providers.litellm.
+
 import (
 	"encoding/json"
 	"reflect"
@@ -8,8 +12,6 @@ import (
 	"github.com/MichaelKinsy/PiG/ai"
 )
 
-// TestModelsJSONProviderConfig ports describe("models.json provider config") from tests/index.test.ts. The case
-// that drives Pi's real ModelRuntime has no Go harness; the live smoke in pig/PORTING.md covers it.
 func TestModelsJSONProviderConfig(t *testing.T) {
 	writeModels := func(t *testing.T, dir string, value any) {
 		t.Helper()
