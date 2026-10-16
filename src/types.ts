@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { BackendFamily, LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
+import type { DiscoveredImageModel } from "./images.js";
 import type { ProxyVersion } from "./proxy-version.js";
 
 export type DiscoverySource = "model_info" | "models_list" | "health";
@@ -64,6 +65,8 @@ export type LiteLLMModel = Model<LiteLLMApi> & {
 
 export interface DiscoveryResult {
   models: DiscoveredModel[];
+  /** `mode: "image_generation"` routes from `/model/info`; absent when there are none. */
+  imageModels?: DiscoveredImageModel[];
   source: DiscoverySource;
   // Present only when a `/model/info` discovery had to read it and the proxy
   // answered. Absent means unknown, not old: discovery asks only when it must.
@@ -98,6 +101,7 @@ export interface ModelInfoEntry {
     supported_openai_params?: string[];
     input_cost_per_token?: number;
     output_cost_per_token?: number;
+    output_cost_per_image_token?: number;
     cache_read_input_token_cost?: number;
     cache_creation_input_token_cost?: number;
     max_input_tokens?: number;

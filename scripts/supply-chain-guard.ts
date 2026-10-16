@@ -71,6 +71,7 @@ export const allowedSourceModules = [
   "cost",
   "discover",
   "gcloud-token",
+  "images",
   "index",
   "protocols",
   "model-groups",

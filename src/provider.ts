@@ -2,9 +2,14 @@ import {
   type AnyModel,
   type Api,
   type ApiStreamOptions,
+  type AssistantImages,
   type Credential,
   createProvider,
   getCurrentTools,
+  type ImageApi,
+  type ImageModel,
+  type ImagesContext,
+  type ImagesOptions,
   type Model,
   type Provider,
   type ProviderAuth,
@@ -13,6 +18,12 @@ import {
 } from "@earendil-works/pi-ai";
 import { LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
 import { enrichCachedModel, normalizeBaseUrl, restoreCachedModelPolicy } from "./discover.js";
+import {
+  createLiteLLMImageApis,
+  type DiscoveredImageModel,
+  LITELLM_IMAGES_API,
+  type LiteLLMImageModel,
+} from "./images.js";
 import { createLiteLLMProtocolApis, isLiteLLMApi, LITELLM_API_NAMES, resolveModelBaseUrl } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, LiteLLMModel } from "./types.js";
 
@@ -23,7 +34,7 @@ export type LiteLLMProviderOptions = {
   auth: ProviderAuth;
   /** Catalog discovered during activation. Pi's startup refresh never allows network access, so
    * without a seed the provider stays empty until the user opens /model. */
-  models?: readonly LiteLLMModel[];
+  models?: readonly (LiteLLMModel | LiteLLMImageModel)[];
   allowInsecureHttp?: boolean;
   resolveCredentialRoot: (credential?: Credential, requestBaseUrl?: string, apiKey?: string) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
@@ -32,6 +43,23 @@ export type LiteLLMProviderOptions = {
 // Chat models may omit `type`.
 function isChatModel(model: AnyModel): model is Model<Api> {
   return (model.type ?? "chat") === "chat";
+}
+
+function isLiteLLMImageModel(model: AnyModel): model is LiteLLMImageModel {
+  return model.type === "image" && model.api === LITELLM_IMAGES_API;
+}
+
+export function imageBaseUrl(root: string, allowInsecureHttp = false): string {
+  return `${normalizeBaseUrl(root, allowInsecureHttp)}/v1`;
+}
+
+export function toNativeImageModels(
+  provider: string,
+  baseUrl: string,
+  models: readonly DiscoveredImageModel[],
+  allowInsecureHttp = false,
+): LiteLLMImageModel[] {
+  return models.map((model) => ({ ...model, provider, baseUrl: imageBaseUrl(baseUrl, allowInsecureHttp) }));
 }
 
 export function toNativeModels(
@@ -117,6 +145,27 @@ function modelRootError(
   }
 }
 
+function imageRootError(
+  model: ImageModel<ImageApi>,
+  active: { root: string; canonical: string; hostname: string },
+  allowInsecureHttp = false,
+): Error | undefined {
+  let stored: { root: string; canonical: string; hostname: string };
+  try {
+    stored = proxyRoot(model.baseUrl, "Cached image model", allowInsecureHttp);
+  } catch (error) {
+    return error instanceof Error ? error : refreshRequired("Cached image model has an invalid LiteLLM model URL");
+  }
+  if (isPlaceholderHost(stored.hostname)) {
+    return refreshRequired("Cached image model uses a placeholder LiteLLM model host");
+  }
+  if (stored.canonical !== active.canonical) {
+    return refreshRequired(
+      `Cached image model has stale LiteLLM model root ${stored.root}; active credentials use ${active.root}`,
+    );
+  }
+}
+
 function requestModel(
   provider: string,
   model: Model<LiteLLMApi>,
@@ -148,6 +197,40 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     reportedAvailabilityDiagnostics.add(message);
     process.stderr.write(`LiteLLM (${options.id}): ${message}\n`);
   };
+  type ActiveRoot = { root: string; canonical: string; hostname: string };
+  const resolveActiveRoot = (credential: Credential | undefined, hiddenCount: number): ActiveRoot | undefined => {
+    try {
+      const root = options.resolveCredentialRoot(credential);
+      if (!root) {
+        if (hiddenCount > 0) {
+          reportUnavailable(
+            `${hiddenCount} model(s) hidden because no LiteLLM base URL is configured; ` +
+              "set LITELLM_BASE_URL or run /login litellm",
+          );
+        }
+        return undefined;
+      }
+      return activeCredentialRoot(root, options.allowInsecureHttp);
+    } catch (error) {
+      reportUnavailable(error instanceof Error ? error.message : String(error));
+      return undefined;
+    }
+  };
+  const availableChat = (models: readonly Model<LiteLLMApi>[], active: ActiveRoot): Model<LiteLLMApi>[] => {
+    const available: Model<LiteLLMApi>[] = [];
+    for (const model of models) {
+      const error = modelRootError(model, active, options.allowInsecureHttp);
+      if (error) {
+        reportUnavailable(error.message);
+        continue;
+      }
+      available.push({
+        ...model,
+        baseUrl: resolveModelBaseUrl(active.root, model.api, options.allowInsecureHttp),
+      });
+    }
+    return available;
+  };
   const provider = createProvider<LiteLLMApi>({
     id: options.id,
     name: options.name,
@@ -157,41 +240,34 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     async fetchModels(context) {
       if (!context.credential) throw new Error("LiteLLM model discovery requires a credential");
       const result = await options.discover(context.credential, context.signal);
-      return toNativeModels(options.id, result.baseUrl ?? options.baseUrl, result.models, options.allowInsecureHttp);
+      const root = result.baseUrl ?? options.baseUrl;
+      return [
+        ...toNativeModels(options.id, root, result.models, options.allowInsecureHttp),
+        ...toNativeImageModels(options.id, root, result.imageModels ?? [], options.allowInsecureHttp),
+      ];
     },
     filterModels(models, credential) {
-      let active: { root: string; canonical: string; hostname: string };
-      try {
-        const root = options.resolveCredentialRoot(credential);
-        if (!root) {
-          if (models.length > 0) {
-            reportUnavailable(
-              `${models.length} model(s) hidden because no LiteLLM base URL is configured; ` +
-                "set LITELLM_BASE_URL or run /login litellm",
-            );
-          }
-          return [];
-        }
-        active = activeCredentialRoot(root, options.allowInsecureHttp);
-      } catch (error) {
-        reportUnavailable(error instanceof Error ? error.message : String(error));
-        return [];
-      }
-      const available: Model<LiteLLMApi>[] = [];
-      for (const model of models) {
-        const error = modelRootError(model, active, options.allowInsecureHttp);
+      const active = resolveActiveRoot(credential, models.length);
+      return active ? availableChat(models, active) : [];
+    },
+    filterAllModels(models, credential) {
+      const active = resolveActiveRoot(credential, models.length);
+      if (!active) return [];
+      const chat = availableChat(models.filter(isChatModel) as Model<LiteLLMApi>[], active);
+      // Image models follow the same rule as chat: a cached root that no longer matches the
+      // active credential is hidden until a network refresh proves the new proxy's catalog.
+      const images = models.filter(isLiteLLMImageModel).flatMap((model) => {
+        const error = imageRootError(model, active, options.allowInsecureHttp);
         if (error) {
           reportUnavailable(error.message);
-          continue;
+          return [];
         }
-        available.push({
-          ...model,
-          baseUrl: resolveModelBaseUrl(active.root, model.api, options.allowInsecureHttp),
-        });
-      }
-      return available;
+        return [{ ...model, baseUrl: imageBaseUrl(active.root, options.allowInsecureHttp) }];
+      });
+      return [...chat, ...images];
     },
     api: createLiteLLMProtocolApis(),
+    images: createLiteLLMImageApis(),
   });
   const refreshModels = provider.refreshModels;
   const guardedProvider: Provider<LiteLLMApi> = {
@@ -220,6 +296,38 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         context,
         requestOptions,
       ),
+    // Same request-time guard as chat: the credential's root, never a cached model URL, picks the
+    // host, so an off-catalog or stale entry cannot send this credential to another proxy.
+    generateImages: async (model: ImageModel<ImageApi>, context: ImagesContext, requestOptions?: ImagesOptions) => {
+      try {
+        const root = options.resolveCredentialRoot(
+          undefined,
+          requestOptions?.env?.LITELLM_BASE_URL,
+          requestOptions?.apiKey,
+        );
+        if (!root) throw refreshRequired("Active credentials do not identify a LiteLLM model host");
+        const active = activeCredentialRoot(root, options.allowInsecureHttp);
+        const error = imageRootError(model, active, options.allowInsecureHttp);
+        if (error) throw error;
+        return await provider.generateImages!(
+          { ...model, provider: options.id, baseUrl: imageBaseUrl(active.root, options.allowInsecureHttp) },
+          context,
+          requestOptions,
+        );
+      } catch (error) {
+        // `Provider.generateImages` never rejects.
+        const failed: AssistantImages = {
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          output: [],
+          stopReason: requestOptions?.signal?.aborted ? "aborted" : "error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          timestamp: Date.now(),
+        };
+        return failed;
+      }
+    },
   };
   if (!refreshModels) return guardedProvider;
   const seedKey = (model: { id: string; baseUrl: string }) => `${model.id}\0${model.baseUrl}`;
@@ -227,16 +335,23 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   return {
     ...guardedProvider,
     refreshModels: async (context) => {
-      // Pi 0.99 persists models of every type; this provider only publishes chat models, and the
-      // policy helpers below read chat-only fields.
+      // Pi 0.99 persists models of every type; the policy helpers below read chat-only fields, so
+      // chat and image entries are restored separately. Other types are not this provider's.
       const storedModels = (context.stored?.models ?? []).filter(isChatModel);
+      const storedImageModels = (context.stored?.models ?? []).filter(isLiteLLMImageModel).flatMap((model) => {
+        if (model.litellmDiscoveryVersion === LITELLM_DISCOVERY_VERSION) return [model];
+        // An image entry carries no request policy to restore; a stale one is only kept when
+        // startup discovery proved the same route, otherwise the network refresh replaces it.
+        const fresh = seeded.get(seedKey(model));
+        return fresh && isLiteLLMImageModel(fresh) ? [fresh] : [];
+      });
       let legacyCount = 0;
       const models = storedModels.map((model) => {
         if ((model as LiteLLMModel).litellmDiscoveryVersion !== LITELLM_DISCOVERY_VERSION) {
           // Pi applies stored models over the seed, so a stale entry would otherwise mask what
           // startup discovery just proved for the same route.
           const fresh = seeded.get(seedKey(model));
-          if (fresh) return fresh;
+          if (fresh && isChatModel(fresh)) return fresh;
           legacyCount++;
           return restoreCachedModelPolicy(model);
         }
@@ -247,7 +362,7 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
           ...context,
           // The current pi-ai provider has no freshness gate, but force is the documented refresh contract field.
           force: context.force || (context.allowNetwork && legacyCount > 0),
-          stored: context.stored && { ...context.stored, models },
+          stored: context.stored && { ...context.stored, models: [...models, ...storedImageModels] },
         });
       } catch (error) {
         if (context.allowNetwork && legacyCount > 0) {
