@@ -17,6 +17,7 @@ import {
   type Provider,
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
@@ -3616,6 +3617,54 @@ describe("models.json provider config", () => {
     await expect(resolveApiKey(pi.providers[0]!, { type: "api_key", key: "sk-stored" })).resolves.toMatchObject({
       auth: { apiKey: "sk-stored" },
     });
+  });
+
+  it("keeps the stored credential and the /v1 route when Pi itself reads the models.json block", async () => {
+    const agentDir = await makeAgentDir();
+    // Pi composes this block over the registered provider itself: it rewrites every model's baseUrl to the bare
+    // value and offers the apiKey as a credential, which createPi() never exercises.
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "$MODELS_JSON_KEY" } },
+    });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "sk-stored" } }),
+      "utf8",
+    );
+    process.env.MODELS_JSON_KEY = "sk-models";
+    const requests: string[][] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      requests.push([request.url, request.headers.get("authorization") ?? ""]);
+      if (request.url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-model", model_info: { mode: "chat" } }] });
+      }
+      if (request.url.endsWith("/chat/completions")) {
+        return new Response(
+          'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"chat-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      throw new Error(`unexpected URL: ${request.url}`);
+    });
+
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    const pi = createPi();
+    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
+    await (await loadExtension(agentDir))(pi);
+    await runtime.refresh({ allowNetwork: false });
+
+    expect(runtime.getError()).toBeUndefined();
+    expect(await new ModelRegistry(runtime).getApiKeyForProvider("litellm")).toBe("sk-stored");
+    const available = await runtime.getAvailable("litellm");
+    expect(available.map((model) => model.id)).toEqual(["chat-model"]);
+    await runtime.completeSimple(available[0]!, { messages: [] });
+
+    expect(requests).toContainEqual(["https://models.example.com/model/info", "Bearer sk-stored"]);
+    expect(requests).toContainEqual(["https://models.example.com/v1/chat/completions", "Bearer sk-stored"]);
   });
 
   it("keeps skills/mcp/budget flags in settings.json when models.json supplies providers", async () => {
