@@ -3521,7 +3521,9 @@ describe("models.json provider config", () => {
 
   it("registers aliases from models.json litellm.providers", async () => {
     const agentDir = await makeAgentDir();
+    // Pi rejects a models.json without a top-level `providers` object, so an aliases-only file still carries one.
     await writeModels(agentDir, {
+      providers: {},
       litellm: {
         providers: {
           "litellm-anthropic": {
@@ -3546,6 +3548,7 @@ describe("models.json provider config", () => {
   it("accepts the default provider through models.json litellm.providers.litellm", async () => {
     const agentDir = await makeAgentDir();
     await writeModels(agentDir, {
+      providers: {},
       litellm: { providers: { litellm: { baseUrl: "https://nested.example.com", apiKey: "sk-nested" } } },
     });
     process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
