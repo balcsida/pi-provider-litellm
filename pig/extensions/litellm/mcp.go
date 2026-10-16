@@ -283,6 +283,7 @@ func setupMCP(e hookRegistrar, state *extensionState) {
 		return
 	}
 	raw, _ := os.ReadFile(filepath.Join(agentDir(), "settings.json"))
+	raw = stripBOM(raw)
 	m, err := newMcpSync(state, raw)
 	if err != nil {
 		reportDiagnostic("LiteLLM MCP: " + err.Error())
