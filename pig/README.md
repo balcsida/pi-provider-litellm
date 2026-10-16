@@ -41,6 +41,13 @@ pig piglet build pig/litellm-example.yaml --format binary --out ./pig-litellm
 
 The first build downloads the PiG source and needs a Go toolchain (`pig setup go`).
 
+## Configuration
+
+Besides the `LITELLM_*` variables and the `litellm` block of `settings.json`, providers can be configured in
+`models.json` in the PiG agent directory (`providers.litellm` for the default provider, `litellm.providers.<name>`
+for aliases). It is read as JSONC like PiG's own reader (BOM, `//` comments, trailing commas) and wins per field
+over `settings.json`; only providers are taken from it.
+
 ## Known PiG 0.4.1 issues
 
 ### Fused builds and third-party Go modules
@@ -57,8 +64,8 @@ library.
 validate host does not bind the native provider registry, and this extension registers one. Use
 `pig package validate ./pig` to validate the package, and a real load (`pig -e ...`) to prove the extension works.
 The same inspection host backs `pig login --list` and the CLI `pig login litellm`, which report
-`extension "litellm" inspection failed` on 0.4.1; configure credentials through the environment or
-`settings.json`, or log in inside a session, where the registry is bound.
+`extension "litellm" inspection failed` on 0.4.1; configure credentials through the environment,
+`settings.json` or `models.json`, or log in inside a session, where the registry is bound.
 
 ### Logging in inside a session
 
@@ -68,7 +75,7 @@ provider's registration without its account login method, answers a flow's `sele
 and does not run a provider's own API-key login ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)).
 The fork branch `fix/native-provider-login` of `balcsida/PiG` fixes all of it without any change here; with that build the login smoke in `pig/tools/login-smoke` passes for CLI
 SSO, PKCE with refresh, pasted token and API key. Until PiG ships the fix, configure credentials through
-`LITELLM_API_KEY` and `LITELLM_BASE_URL` or `settings.json`.
+`LITELLM_API_KEY` and `LITELLM_BASE_URL`, `settings.json` or `models.json`.
 
 ### Reasoning models without an effort carrier crash model selection
 

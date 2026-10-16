@@ -152,9 +152,40 @@ Use the prefix `LITELLM_PROVIDER_<NAME>_` where `<NAME>` is an uppercase identif
 - **Validation:** Provider IDs must match `/^[a-z0-9][a-z0-9_-]{0,63}$/` (1–64 characters, lowercase alphanumeric with `-` or `_`, starting with an alphanumeric character).
 - **Reserved names:** Tool and command names (`mcp`, `skills`, `codemode`, `tool_search`, and `litellm` as an alias) cannot be used as secondary provider IDs.
 
+### Option C — `models.json`
+
+For a long-lived API key, put the provider block in Pi's own `~/.pi/agent/models.json` instead of running `/login litellm`. No login is needed, and Pi injects the discovered models, so the block carries only `baseUrl` and `apiKey`:
+
+```json
+{
+  "providers": {
+    "litellm": {
+      "baseUrl": "https://litellm.your-domain.com",
+      "apiKey": "$LITELLM_API_KEY"
+    }
+  }
+}
+```
+
+`apiKey` is a Pi config value, so `$ENV_VAR`, `${ENV_VAR}`, `!command`, and a literal key all work, with a literal `$` escaped as `$$`. Prefer `$ENV_VAR` over a literal key: a key written literally here is exactly as readable on disk as one in `auth.json`.
+
+Only the global `~/.pi/agent/models.json` is read. A project-level file is never consulted, so a cloned repository cannot point this provider at a proxy of its own — the same rule [Direct OIDC login](#direct-oidc-login) states for `settings.json`.
+
+This covers long-lived tokens. SSO and other short-lived OAuth credentials still need `/login litellm`, because they require a browser round trip and refresh.
+
+#### Precedence
+
+A provider block may live in `models.json` or `settings.json`. The two merge per field, with `models.json` winning, and `skills`, `mcp`, and `budget` are read from `settings.json` only. `models.json` also accepts the default provider as `litellm.providers.litellm`, the same shape `settings.json` uses.
+
+A stored `/login` credential still takes precedence over a configured `apiKey`. Pi reads the top-level `providers.litellm` block itself, though, which changes three things:
+
+- Pi applies its `baseUrl` to every model, so a stored `/login` credential for a different proxy hides them all. To move a provider that already has a stored credential over to `models.json`, run `/logout litellm` first.
+- Pi hands its `apiKey` to the provider as a credential, so that key also outranks a Google ADC token. A key in `litellm.providers.litellm` or `settings.json` ranks below ADC.
+- Pi validates the fields it knows there, so `headers` must be an object. A `$LITELLM_HEADERS` string belongs in `litellm.providers.litellm`.
+
 ### Multiple LiteLLM provider aliases
 
-Add alias providers in `~/.pi/agent/settings.json` under `litellm.providers`. Each alias is registered as a separate Pi provider name, so models appear as `litellm/model-id` and `litellm-anthropic/model-id`.
+Add alias providers in `~/.pi/agent/settings.json` under `litellm.providers`, or in `~/.pi/agent/models.json` under the same shape. Pi rejects a `models.json` without a top-level `providers` object, so a file that holds only aliases needs `"providers": {}` as well. Each alias is registered as a separate Pi provider name, so models appear as `litellm/model-id` and `litellm-anthropic/model-id`. In `models.json`, the default provider is usually written as the top-level `providers.litellm` shown in Option C instead.
 
 ```json
 {
@@ -211,15 +242,15 @@ Provider fields:
   When discovering and configuring provider aliases from multiple sources, definitions are merged in the following order:
   1. Base provider definitions from `LITELLM_PROVIDERS_JSON`
   2. Discovered environment variables (`LITELLM_PROVIDER_<NAME>_*` and canonical list in `LITELLM_PROVIDERS`)
-  3. Disk settings from `~/.pi/agent/settings.json` under `litellm.providers`. Disk settings override environment definitions, and setting `"enabled": false` removes or skips the provider.
+  3. Disk settings from `~/.pi/agent/settings.json` under `litellm.providers`, merged per field with the provider blocks in `~/.pi/agent/models.json`, which win (see Option C). Disk settings override environment definitions, and setting `"enabled": false` removes or skips the provider.
 
-  Each later source overrides `displayName`, `allowInsecureHttp`, `useGcloudTokenAuth`, `enableOAuth`, and the MCP toggle. `baseUrl`, `apiKey`, and `headers` work differently: a value configured in `settings.json` or `LITELLM_PROVIDERS_JSON` always wins, and `LITELLM_PROVIDER_<NAME>_BASE_URL`, `_API_KEY_HELPER`, `_API_KEY`, and `_HEADERS` apply only when neither sets that field.
+  Each later source overrides `displayName`, `allowInsecureHttp`, `useGcloudTokenAuth`, `enableOAuth`, and the MCP toggle. `baseUrl`, `apiKey`, and `headers` work differently: a value configured in `settings.json`, `models.json`, or `LITELLM_PROVIDERS_JSON` always wins, and `LITELLM_PROVIDER_<NAME>_BASE_URL`, `_API_KEY_HELPER`, `_API_KEY`, and `_HEADERS` apply only when neither sets that field.
 
 - **Credential resolution precedence:**
   When authenticating requests for any provider:
-  1. Saved interactive credentials in `~/.pi/agent/auth.json` (from `/login <provider>` or OAuth SSO)
+  1. Saved interactive credentials in `~/.pi/agent/auth.json` (from `/login <provider>` or OAuth SSO), then the `apiKey` of `models.json`'s top-level `providers.litellm`, which Pi hands to the provider as a credential
   2. Google Application Default Credentials (for an alias with `useGcloudTokenAuth` or `_USE_GCLOUD_AUTH`; for `litellm` when `LITELLM_GCLOUD_TOKEN_AUTH` is enabled)
-  3. Configured `apiKey` from settings (`settings.json` or `LITELLM_PROVIDERS_JSON`, including `$ENV_VAR` and `!command`)
+  3. Configured `apiKey` from settings (`settings.json`, `litellm.providers` in `models.json`, or `LITELLM_PROVIDERS_JSON`, including `$ENV_VAR` and `!command`)
   4. Provider-scoped API key helper (`LITELLM_PROVIDER_<NAME>_API_KEY_HELPER`)
   5. Provider-scoped API key (`LITELLM_PROVIDER_<NAME>_API_KEY`)
   6. For the default `litellm` provider only: fallback to global `LITELLM_API_KEY_HELPER` then `LITELLM_API_KEY`.

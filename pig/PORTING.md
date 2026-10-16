@@ -81,6 +81,11 @@ Keep every `LITELLM_*` variable, the `litellm` settings block (`providers`, `mcp
 the README and `src/index.ts` define them, so one configuration works for both runtimes. PiG's agent directory
 replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
 
+Provider config may also live in the agent dir's `models.json`, read as JSONC the way PiG reads it (BOM, `//`
+comments, trailing commas; `stripJSONComments` is copied from PiG's internal `model_registry.go`). Only providers
+are taken from it: the native `providers.litellm` slot and `litellm.providers.<name>`, merged per field over
+`settings.json` with `models.json` winning. A leading BOM is also accepted in `settings.json`.
+
 ## Verification ladder
 
 1. `go test ./...` in `pig/extensions/litellm`.
@@ -98,6 +103,11 @@ replaces Pi's (`~/.pig/agent`): resolve it through the SDK, never hard-code it.
 
    Repeat the prompt with `mock-responses` and `mock-claude`: the mock logs `POST /v1/responses` and
    `POST /v1/messages`, which proves each model reached its own protocol's endpoint.
+
+   Run the same steps once more with no `LITELLM_*` variables and only
+   `{"providers":{"litellm":{"baseUrl":"http://127.0.0.1:48417","apiKey":"test-key"}}}` in
+   `$PIG_CODING_AGENT_DIR/models.json`. PiG composes that block over the registered provider itself, so this proves
+   its composition keeps each model's route; it stands in for the Vitest case that drives Pi's real ModelRuntime.
 
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
@@ -147,8 +157,8 @@ Intentional differences from the TypeScript extension, all forced by PiG:
 - `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
   `pig login --list` and the CLI `pig login litellm` start the extension through the same inspection host and fail
   the same way (`extension "litellm" inspection failed: ... native provider registry is not bound`); a real
-  session binds the registry, so configure credentials through the environment or `settings.json`, or log in
-  inside a session.
+  session binds the registry, so configure credentials through the environment, `settings.json` or `models.json`,
+  or log in inside a session.
 - `/login litellm` inside a stock 0.4.1 session offers only PiG's generic `Enter API key` prompt, stores the key
   without the proxy URL, and never shows the SSO flows. The extension declares both methods correctly and the host
   publishes the OAuth flow; the gaps are PiG's ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)),

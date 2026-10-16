@@ -17,6 +17,7 @@ import {
   type Provider,
   type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPi, loadExtension, useHermeticEnv } from "./test-helpers.js";
 
@@ -29,6 +30,7 @@ const SUITE_ENV_VARS = [
   "GOOGLE_APPLICATION_CREDENTIALS",
   "STORED_LITELLM_KEY",
   "CUSTOM_LITELLM_KEY",
+  "MODELS_JSON_KEY",
 ] as const;
 
 // Suite-specific names beyond the shared managed set.
@@ -3491,5 +3493,308 @@ describe("multi-provider hardening", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(requestedUrls).toEqual(["https://credential.example.com/v1/messages?beta=true"]);
+  });
+});
+
+describe("models.json provider config", () => {
+  async function writeModels(agentDir: string, value: unknown): Promise<void> {
+    await writeFile(join(agentDir, "models.json"), JSON.stringify(value), "utf8");
+  }
+
+  it("registers the default provider from models.json providers.litellm", async () => {
+    const agentDir = await makeAgentDir();
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "sk-models" } },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({
+      auth: { apiKey: "sk-models", baseUrl: "https://models.example.com" },
+      env: { LITELLM_BASE_URL: "https://models.example.com" },
+    });
+  });
+
+  it("registers aliases from models.json litellm.providers", async () => {
+    const agentDir = await makeAgentDir();
+    // Pi rejects a models.json without a top-level `providers` object, so an aliases-only file still carries one.
+    await writeModels(agentDir, {
+      providers: {},
+      litellm: {
+        providers: {
+          "litellm-anthropic": {
+            baseUrl: "https://litellm-anthropic.example.com",
+            apiKey: "$LITELLM_ANTHROPIC_API_KEY",
+          },
+        },
+      },
+    });
+    process.env.LITELLM_ANTHROPIC_API_KEY = "sk-anthropic";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    const alias = pi.providers.find((provider) => provider.id === "litellm-anthropic");
+    expect(alias).toBeDefined();
+    expect(await resolveApiKey(alias!)).toMatchObject({ auth: { apiKey: "sk-anthropic" } });
+  });
+
+  it("accepts the default provider through models.json litellm.providers.litellm", async () => {
+    const agentDir = await makeAgentDir();
+    await writeModels(agentDir, {
+      providers: {},
+      litellm: { providers: { litellm: { baseUrl: "https://nested.example.com", apiKey: "sk-nested" } } },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://nested.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-nested" } });
+  });
+
+  it("merges models.json over settings.json per field", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: {
+            litellm: {
+              baseUrl: "https://settings.example.com",
+              displayName: "Settings Gateway",
+              apiKey: "sk-settings",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    // models.json sets only baseUrl, so the apiKey and displayName settings.json sets must survive.
+    await writeModels(agentDir, { providers: { litellm: { baseUrl: "https://models.example.com" } } });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("Settings Gateway");
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-settings" } });
+  });
+
+  it("resolves a $ENV apiKey from models.json", async () => {
+    const agentDir = await makeAgentDir();
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "$MODELS_JSON_KEY" } },
+    });
+    process.env.MODELS_JSON_KEY = "sk-from-env";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-from-env" } });
+  });
+
+  it("keeps a stored credential ahead of a models.json apiKey", async () => {
+    const agentDir = await makeAgentDir();
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "sk-models" } },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    await expect(resolveApiKey(pi.providers[0]!, { type: "api_key", key: "sk-stored" })).resolves.toMatchObject({
+      auth: { apiKey: "sk-stored" },
+    });
+  });
+
+  it("keeps the stored credential and the /v1 route when Pi itself reads the models.json block", async () => {
+    const agentDir = await makeAgentDir();
+    // Pi composes this block over the registered provider itself: it rewrites every model's baseUrl to the bare
+    // value and offers the apiKey as a credential, which createPi() never exercises.
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "$MODELS_JSON_KEY" } },
+    });
+    await writeFile(
+      join(agentDir, "auth.json"),
+      JSON.stringify({ litellm: { type: "api_key", key: "sk-stored" } }),
+      "utf8",
+    );
+    process.env.MODELS_JSON_KEY = "sk-models";
+    const requests: string[][] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      requests.push([request.url, request.headers.get("authorization") ?? ""]);
+      if (request.url.endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "chat-model", model_info: { mode: "chat" } }] });
+      }
+      if (request.url.endsWith("/chat/completions")) {
+        return new Response(
+          'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"chat-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      throw new Error(`unexpected URL: ${request.url}`);
+    });
+
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    const pi = createPi();
+    pi.registerProvider = (provider) => runtime.registerNativeProvider(provider);
+    await (await loadExtension(agentDir))(pi);
+    await runtime.refresh({ allowNetwork: false });
+
+    expect(runtime.getError()).toBeUndefined();
+    expect(await new ModelRegistry(runtime).getApiKeyForProvider("litellm")).toBe("sk-stored");
+    const available = await runtime.getAvailable("litellm");
+    expect(available.map((model) => model.id)).toEqual(["chat-model"]);
+    await runtime.completeSimple(available[0]!, { messages: [] });
+
+    expect(requests).toContainEqual(["https://models.example.com/model/info", "Bearer sk-stored"]);
+    expect(requests).toContainEqual(["https://models.example.com/v1/chat/completions", "Bearer sk-stored"]);
+  });
+
+  it("keeps skills/mcp/budget flags in settings.json when models.json supplies providers", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { skills: { enabled: false } } }),
+      "utf8",
+    );
+    await writeModels(agentDir, {
+      providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "sk-models" } },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.tools.map((tool) => tool.name)).not.toContain("litellm_skill_list");
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+  });
+
+  it("falls back to settings.json when models.json is malformed", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(join(agentDir, "models.json"), "{ not json", "utf8");
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        litellm: {
+          providers: { litellm: { baseUrl: "https://settings.example.com", apiKey: "sk-settings" } },
+        },
+      }),
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://settings.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-settings" } });
+  });
+
+  it("ignores a models.json that carries no litellm provider block", async () => {
+    const agentDir = await makeAgentDir();
+    // `providers` is present but holds no litellm entry, so nothing is contributed to the config.
+    await writeModels(agentDir, { providers: { openai: { apiKey: "sk-openai" } } });
+    process.env.LITELLM_BASE_URL = "https://env.example.com";
+    process.env.LITELLM_API_KEY = "sk-env";
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://env.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-env" } });
+  });
+
+  it("parses a JSONC models.json with comments and trailing commas", async () => {
+    const agentDir = await makeAgentDir();
+    // Faithful to a hand-written Pi models.json: `//` comments plus trailing commas in both a nested
+    // object and the outer one. Pi accepts all of these; a strict parse must not. Pi strips only
+    // `//` comments, so a `/* */` block comment is deliberately absent here — it would fail in Pi too.
+    await writeFile(
+      join(agentDir, "models.json"),
+      `{
+  // Pi reads this file as JSONC, not strict JSON.
+  "providers": {
+    // the default provider
+    "litellm": {
+      "baseUrl": "https://models.example.com",
+      "apiKey": "sk-models",
+      "compat": { "supportsStrictTools": false, },
+    },
+  },
+}`,
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-models" } });
+  });
+
+  it("parses a models.json that starts with a byte order mark", async () => {
+    const agentDir = await makeAgentDir();
+    await writeFile(
+      join(agentDir, "models.json"),
+      `\uFEFF${JSON.stringify({
+        providers: { litellm: { baseUrl: "https://models.example.com", apiKey: "sk-bom" } },
+      })}`,
+      "utf8",
+    );
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.baseUrl).toBe("https://models.example.com/v1");
+    await expect(resolveApiKey(pi.providers[0]!)).resolves.toMatchObject({ auth: { apiKey: "sk-bom" } });
+  });
+
+  it("keeps a // inside a models.json string literal", async () => {
+    const agentDir = await makeAgentDir();
+    // A naive comment stripper would truncate this value at the // and corrupt the config.
+    await writeModels(agentDir, {
+      providers: {
+        litellm: {
+          baseUrl: "https://models.example.com",
+          apiKey: "sk-models",
+          displayName: "Gateway // prod",
+        },
+      },
+    });
+    process.env.LITELLM_DISCOVERY_TIMEOUT_MS = "0";
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.providers[0]?.name).toBe("Gateway // prod");
   });
 });

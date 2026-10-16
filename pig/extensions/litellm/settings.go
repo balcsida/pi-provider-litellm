@@ -239,14 +239,72 @@ func agentDir() string {
 	return filepath.Join(home, ".pig", "agent")
 }
 
-// readGlobalLiteLLMSettings reads the `litellm` block of <agentDir>/settings.json; nil when absent or invalid.
+// stripBOM removes a leading UTF-8 byte order mark, as PiG's own settings loader does.
+func stripBOM(raw []byte) []byte {
+	return bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
+}
+
+// stripJSONComments removes // line comments and trailing commas, leaving string literals untouched.
+// Copied from PiG v0.4.1 internal/codingagent/model_registry.go (that package is internal): the extension
+// must accept exactly the models.json files PiG's own reader accepts.
+func stripJSONComments(input string) string {
+	var out []byte
+	i := 0
+	for i < len(input) {
+		c := input[i]
+		switch {
+		case c == '"':
+			start := i
+			i++
+			for i < len(input) {
+				ch := input[i]
+				if ch == '\\' {
+					i += 2
+					continue
+				}
+				i++
+				if ch == '"' {
+					break
+				}
+			}
+			out = append(out, input[start:min(i, len(input))]...)
+		case c == '/' && i+1 < len(input) && input[i+1] == '/':
+			for i < len(input) && input[i] != '\n' {
+				i++
+			}
+		case c == ',':
+			j := i + 1
+			for j < len(input) && (input[j] == ' ' || input[j] == '\t' || input[j] == '\r' || input[j] == '\n') {
+				j++
+			}
+			if j < len(input) && (input[j] == '}' || input[j] == ']') {
+				i++
+			} else {
+				out = append(out, c)
+				i++
+			}
+		default:
+			out = append(out, c)
+			i++
+		}
+	}
+	return string(out)
+}
+
+// readGlobalLiteLLMSettings reads the `litellm` block of <agentDir>/settings.json and merges the providers of
+// <agentDir>/models.json over it; nil when neither contributes.
 func readGlobalLiteLLMSettings() *litellmSettings {
+	return mergeProviderSettings(readSettingsJSONLiteLLM(), readModelsProviderSettings())
+}
+
+// readSettingsJSONLiteLLM reads the `litellm` block of <agentDir>/settings.json; nil when absent or invalid.
+func readSettingsJSONLiteLLM() *litellmSettings {
 	raw, err := os.ReadFile(filepath.Join(agentDir(), "settings.json"))
 	if err != nil {
 		return nil
 	}
 	var top map[string]json.RawMessage
-	if json.Unmarshal(raw, &top) != nil {
+	if json.Unmarshal(stripBOM(raw), &top) != nil {
 		return nil
 	}
 	block, ok := top[settingsKey]
@@ -263,6 +321,105 @@ func readGlobalLiteLLMSettings() *litellmSettings {
 		settings.ProviderOrder = objectKeys(fields["providers"])
 	}
 	return settings
+}
+
+// readModelsProviderSettings reads only the providers of <agentDir>/models.json (global agent dir, never a
+// project copy): aliases from `litellm.providers`, then the native `providers.litellm` slot, which wins per
+// field. The file is JSONC, as PiG reads it. The result holds just `providers`; nil when there is none.
+func readModelsProviderSettings() *litellmSettings {
+	raw, err := os.ReadFile(filepath.Join(agentDir(), "models.json"))
+	if err != nil {
+		return nil
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(stripJSONComments(string(stripBOM(raw)))), &top) != nil {
+		return nil
+	}
+	providers := map[string]any{}
+	var order []string
+	var litellmBlock map[string]json.RawMessage
+	if json.Unmarshal(top[settingsKey], &litellmBlock) == nil {
+		var aliases map[string]any
+		if json.Unmarshal(litellmBlock["providers"], &aliases) == nil {
+			for _, name := range objectKeys(litellmBlock["providers"]) {
+				if _, seen := providers[name]; !seen {
+					order = append(order, name)
+				}
+				providers[name] = aliases[name]
+			}
+		}
+	}
+	var nativeProviders map[string]any
+	if json.Unmarshal(top["providers"], &nativeProviders) == nil {
+		if native, ok := nativeProviders[providerName].(map[string]any); ok && native != nil {
+			if existing, ok := providers[providerName].(map[string]any); ok && existing != nil {
+				merged := make(map[string]any, len(existing)+len(native))
+				for key, value := range existing {
+					merged[key] = value
+				}
+				for key, value := range native {
+					merged[key] = value
+				}
+				native = merged
+			} else if _, seen := providers[providerName]; !seen {
+				order = append(order, providerName)
+			}
+			providers[providerName] = native
+		}
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+	return &litellmSettings{Values: map[string]any{"providers": providers}, ProviderOrder: order}
+}
+
+// mergeProviderSettings merges a provider block that may live in either file per field, models.json winning.
+// Non-provider settings.json keys pass through untouched, which keeps `skills`/`mcp`/`budget` working. The
+// provider order is settings.json's, then the names only models.json contributes.
+func mergeProviderSettings(settings, models *litellmSettings) *litellmSettings {
+	var modelsProviders map[string]any
+	if models != nil {
+		modelsProviders, _ = models.Values["providers"].(map[string]any)
+	}
+	if modelsProviders == nil {
+		return settings
+	}
+	merged := &litellmSettings{Values: map[string]any{}}
+	var settingsProviders map[string]any
+	if settings != nil {
+		for key, value := range settings.Values {
+			merged.Values[key] = value
+		}
+		settingsProviders, _ = settings.Values["providers"].(map[string]any)
+		if settingsProviders != nil {
+			merged.ProviderOrder = slices.Clone(settings.ProviderOrder)
+		}
+	}
+	providers := make(map[string]any, len(settingsProviders)+len(modelsProviders))
+	for name, value := range settingsProviders {
+		providers[name] = value
+	}
+	for _, name := range models.ProviderOrder {
+		raw := modelsProviders[name]
+		base, baseIsObject := settingsProviders[name].(map[string]any)
+		override, overrideIsObject := raw.(map[string]any)
+		if baseIsObject && base != nil && overrideIsObject && override != nil {
+			combined := make(map[string]any, len(base)+len(override))
+			for key, value := range base {
+				combined[key] = value
+			}
+			for key, value := range override {
+				combined[key] = value
+			}
+			raw = combined
+		}
+		if _, seen := settingsProviders[name]; !seen {
+			merged.ProviderOrder = append(merged.ProviderOrder, name)
+		}
+		providers[name] = raw
+	}
+	merged.Values["providers"] = providers
+	return merged
 }
 
 // objectKeys returns the keys of a JSON object in document order.
