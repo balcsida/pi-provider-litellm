@@ -98,3 +98,34 @@ jobs:
           for path in /v1/chat/completions /v1/responses /v1/messages; do
             grep -q "POST $path" .tmp/mockproxy.log
           done
+
+      # The same smoke with the provider configured only through models.json. PiG composes that block over the
+      # registered provider itself, so this stands in for the Vitest case that drives Pi's real ModelRuntime.
+      - name: PiG smoke through models.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PIG_CODING_AGENT_DIR="$(mktemp -d)"
+          export PIG_CODING_AGENT_DIR
+          printf '{"providers":{"litellm":{"baseUrl":"%s","apiKey":"%s"}}}\n' \
+            "$LITELLM_BASE_URL" "$LITELLM_API_KEY" > "$PIG_CODING_AGENT_DIR/models.json"
+          unset LITELLM_BASE_URL LITELLM_API_KEY
+          # Only requests logged from here on count.
+          logged="$(wc -l < .tmp/mockproxy.log)"
+
+          models="$(pig -e ./pig/extensions/litellm --list-models)"
+          echo "$models"
+          for model in mock-chat mock-claude mock-responses; do
+            grep -q "$model" <<<"$models"
+          done
+
+          for model in mock-chat mock-responses mock-claude; do
+            reply="$(pig -e ./pig/extensions/litellm \
+              --model "litellm/$model" -p "say hi")"
+            echo "$reply"
+            grep -q 'mock reply to: say hi' <<<"$reply"
+          done
+          for path in /v1/chat/completions /v1/responses /v1/messages; do
+            tail -n "+$((logged + 1))" .tmp/mockproxy.log | grep -q "POST $path"
+          done
