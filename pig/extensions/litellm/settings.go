@@ -1201,11 +1201,16 @@ func firstAny(a, b any) any {
 	return b
 }
 
-// storedCredential is an auth.json entry. types.AuthFileEntry has no api_key `env`, so it is added here.
+// storedCredential is an auth.json entry. types.AuthFileEntry has neither the api_key `env` nor the direct OIDC
+// login's identity provider, which the next login to the same proxy offers again, so they are added here.
 type storedCredential struct {
 	types.AuthFileEntry
 	Env          map[string]string `json:"env,omitempty"`
 	LegacyAPIKey string            `json:"apiKey,omitempty"`
+	Flow         string            `json:"flow,omitempty"`
+	Issuer       string            `json:"issuer,omitempty"`
+	ClientID     string            `json:"clientId,omitempty"`
+	Scope        string            `json:"scope,omitempty"`
 }
 
 // readStoredCredential reads one provider's entry from auth.json; nil when missing or unreadable.

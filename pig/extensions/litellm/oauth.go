@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +36,8 @@ const (
 	oidcFlow                = "oidc_pkce" // persisted in auth.json; never rename
 	oidcDiscoveryPath       = "/.well-known/openid-configuration"
 	differentBaseURL        = "enter-a-different-url"
+	signInOidc              = "oidc"
+	signInPreviousOidc      = "previous-oidc"
 	pkceTransientBackoffMs  = 5_000
 	expireTokenImmediately  = 0
 	maxSafeInteger          = float64(1<<53 - 1)
@@ -963,6 +966,8 @@ func loginOidc(ctx context.Context, interaction ai.AuthInteraction, baseURL stri
 		setExtra(&credential, "clientId", config.clientID)
 		setExtra(&credential, "tokenEndpoint", discovery.tokenEndpoint)
 		setExtra(&credential, "subject", token.subject)
+		// ai.Credential has its own scope field: PiG would move an Extra "scope" there on the next load.
+		credential.Scope = config.scope
 		return credential, nil
 	})
 }
@@ -1199,6 +1204,70 @@ func loginWithPastedToken(ctx context.Context, interaction ai.AuthInteraction, b
 
 // ---- flow chooser ---------------------------------------------------------------------------------------
 
+// previousOidcConfig is the stored login's identity provider, so signing in with it again takes one keypress.
+// Enter picks it, so only a login to this proxy that recorded its scope qualifies: a guess could hand the IdP's
+// token to another proxy or drop `offline_access`.
+func previousOidcConfig(definition providerDefinition, baseURL string) *oidcConfig {
+	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
+	if stored == nil || stored.Type != "oauth" || stored.Flow != oidcFlow || stored.BaseURL != baseURL || stored.Scope == "" {
+		return nil
+	}
+	config, err := parseOidcConfig(map[string]any{"issuer": stored.Issuer, "clientId": stored.ClientID, "scope": stored.Scope})
+	if err != nil {
+		return nil
+	}
+	return &config
+}
+
+// promptOidcConfig asks, without an `oidc` setting, whether to sign in through LiteLLM or directly with an
+// identity provider where the user has a public client. Any answer but an identity provider selects the
+// LiteLLM-hosted flows.
+func promptOidcConfig(ctx context.Context, interaction ai.AuthInteraction, definition providerDefinition, baseURL string) (*oidcConfig, error) {
+	previous := previousOidcConfig(definition, baseURL)
+	var options []ai.AuthSelectOption
+	if previous != nil {
+		options = append(options, ai.AuthSelectOption{ID: signInPreviousOidc, Label: previous.issuer + " with client " + previous.clientID + " (previous login)"})
+	}
+	options = append(options,
+		ai.AuthSelectOption{ID: "litellm", Label: "LiteLLM SSO"},
+		ai.AuthSelectOption{ID: signInOidc, Label: "Your identity provider (OIDC client ID)…"},
+	)
+	choice, err := interaction.Prompt(ctx, ai.AuthSelectPrompt{Message: "Sign in with:", Options: options})
+	if err != nil {
+		return nil, err
+	}
+	if choice == signInPreviousOidc {
+		return previous, nil
+	}
+	if choice != signInOidc {
+		return nil, nil
+	}
+	// Checked like the setting. redirectPorts stays settings-only, for IdPs that pin exact loopback ports.
+	entered := map[string]any{}
+	for _, field := range []struct {
+		key    string
+		prompt ai.AuthTextPrompt
+	}{
+		{"issuer", ai.AuthTextPrompt{Message: "Enter your identity provider's issuer URL:", Placeholder: "https://idp.example.com"}},
+		{"clientId", ai.AuthTextPrompt{Message: "Enter the OAuth client ID (a public client without a secret):"}},
+		{"scope", ai.AuthTextPrompt{Message: "Enter scopes (blank for openid):", Placeholder: "openid offline_access"}},
+	} {
+		answer, err := interaction.Prompt(ctx, field.prompt)
+		if err != nil {
+			return nil, err
+		}
+		entered[field.key] = strings.TrimSpace(answer)
+	}
+	if entered["scope"] == "" {
+		delete(entered, "scope") // blank means openid
+	}
+	config, err := parseOidcConfig(entered)
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
 func loginOAuth(ctx context.Context, interaction ai.AuthInteraction, definition providerDefinition) (ai.Credential, error) {
 	var oidc *oidcConfig
 	if definition.HasOIDC {
@@ -1214,6 +1283,11 @@ func loginOAuth(ctx context.Context, interaction ai.AuthInteraction, definition 
 	}
 	// Direct OIDC sends nothing to the proxy. The IdP is never derived from it either: the proxy's own OAuth
 	// metadata describes LiteLLM's authorization server, not the IdP that signs the JWTs it accepts.
+	if oidc == nil {
+		if oidc, err = promptOidcConfig(ctx, interaction, definition, baseURL); err != nil {
+			return ai.Credential{}, err
+		}
+	}
 	if oidc != nil {
 		return loginOidc(ctx, interaction, baseURL, *oidc)
 	}

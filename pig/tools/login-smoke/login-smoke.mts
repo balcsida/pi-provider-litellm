@@ -194,6 +194,12 @@ try {
   await show(session, "base URL prompt");
   await session.keyboard.press("Enter"); // the known URL is the first option
 
+  if (mode !== "apikey") {
+    await waitForAny(session, ["Sign in with:"], "sign-in choice");
+    await show(session, "sign-in choice");
+    await session.keyboard.press("Enter"); // LiteLLM SSO is the first option without a previous OIDC login
+  }
+
   if (mode === "apikey") {
     await waitForAny(session, ["Enter API key"], "API key prompt");
     await show(session, "API key prompt");
