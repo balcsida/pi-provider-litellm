@@ -30,6 +30,7 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{"allows an explicitly configured insecure endpoint", "http://host.docker.internal/v1", "http://host.docker.internal", true},
 		{"strips trailing slashes", "https://x.example.com/", "https://x.example.com", false},
 		{"strips many trailing slashes", "https://x.example.com///", "https://x.example.com", false},
+		{"strips trailing slashes in linear time after a long slash run", "https://x.example.com/" + strings.Repeat("/", 100_000) + "x//", "https://x.example.com/" + strings.Repeat("/", 100_000) + "x", false},
 		{"strips a single trailing /v1 suffix", "https://x.example.com/v1", "https://x.example.com", false},
 		{"strips /v1/", "https://x.example.com/v1/", "https://x.example.com", false},
 		{"is case-insensitive on /v1", "https://x.example.com/V1", "https://x.example.com", false},

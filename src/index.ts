@@ -20,7 +20,13 @@ import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
-import { discoverModels, isGpt6OrNewerModel, isGpt55OrNewerModel, normalizeBaseUrl } from "./discover.js";
+import {
+  discoverModels,
+  isGpt6OrNewerModel,
+  isGpt55OrNewerModel,
+  normalizeBaseUrl,
+  trimTrailingSlashes,
+} from "./discover.js";
 import { getGcloudToken, hasGcloudAdcCredentials, isGcloudTokenAuthEnabled } from "./gcloud-token.js";
 import type { LiteLLMImageModel } from "./images.js";
 import { readStoredModels } from "./models-store.js";
@@ -1033,7 +1039,7 @@ function authRequestHeaders(headers?: Record<string, string>, contentType?: stri
 function canonicalIssuer(value: string): string {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash) throw new Error("LiteLLM CLI auth has invalid issuer");
-  return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`;
+  return `${url.origin}${trimTrailingSlashes(url.pathname) || "/"}`;
 }
 
 function sameOriginUrl(value: unknown, issuer: URL, field: string): string {
@@ -1431,15 +1437,18 @@ function parseOidcConfig(raw: unknown): OidcConfig {
 
 // IdP requests never carry the proxy's headers: LITELLM_HEADERS and provider headers can hold gateway credentials.
 async function discoverOidc(issuer: string, signal?: AbortSignal): Promise<OidcDiscovery> {
-  const withoutSlash = (value: string) => value.replace(/\/+$/, "");
-  const response = await fetch(`${withoutSlash(issuer)}${OIDC_DISCOVERY_PATH}`, {
+  const response = await fetch(`${trimTrailingSlashes(issuer)}${OIDC_DISCOVERY_PATH}`, {
     headers: authRequestHeaders(),
     redirect: "manual",
     signal: boundedLoginSignal(signal),
   });
   if (!response.ok) throw new Error(`OIDC discovery failed (HTTP ${response.status})`);
   const data = await readAuthJson(response, signal, "OIDC discovery");
-  if (!isPlainObject(data) || typeof data.issuer !== "string" || withoutSlash(data.issuer) !== withoutSlash(issuer))
+  if (
+    !isPlainObject(data) ||
+    typeof data.issuer !== "string" ||
+    trimTrailingSlashes(data.issuer) !== trimTrailingSlashes(issuer)
+  )
     throw new Error("OIDC discovery issuer does not match the configured issuer");
   const methods = data.code_challenge_methods_supported;
   if (methods !== undefined && (!Array.isArray(methods) || !methods.includes("S256")))

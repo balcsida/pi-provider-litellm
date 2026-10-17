@@ -103,6 +103,13 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl("https://x.example.com///")).toBe("https://x.example.com");
   });
 
+  it("strips trailing slashes in linear time after a long slash run", () => {
+    const path = `/${"/".repeat(100_000)}x`;
+    const start = Date.now();
+    expect(normalizeBaseUrl(`https://x.example.com${path}//`)).toBe(`https://x.example.com${path}`);
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
   it("strips a single trailing /v1 suffix", () => {
     expect(normalizeBaseUrl("https://x.example.com/v1")).toBe("https://x.example.com");
     expect(normalizeBaseUrl("https://x.example.com/v1/")).toBe("https://x.example.com");
