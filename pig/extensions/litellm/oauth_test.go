@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,6 +91,16 @@ func (s *scriptedAuth) promptTypes() []string {
 		types = append(types, prompt.Type())
 	}
 	return types
+}
+
+func (s *scriptedAuth) promptMessages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var messages []string
+	for _, prompt := range s.prompts {
+		messages = append(messages, promptMessage(prompt))
+	}
+	return messages
 }
 
 func (s *scriptedAuth) eventsOf(kind string) []ai.AuthEvent {
@@ -915,8 +927,9 @@ func TestCliSSOLogin(t *testing.T) {
 		if strings.Join(polls, ",") != "/sso/cli/poll/cli-login?|poll-secret,/sso/cli/poll/cli-login?team_id=team-b|poll-secret" {
 			t.Errorf("polls = %v", polls)
 		}
-		if got := script.promptTypes(); len(got) != 2 || got[1] != "select" {
-			t.Errorf("prompts = %v", got)
+		want := []string{"Enter LiteLLM proxy URL (no trailing /v1):", "Sign in with:", "Select a LiteLLM team:"}
+		if got := script.promptMessages(); !slices.Equal(got, want) {
+			t.Errorf("prompts = %q", got)
 		}
 	})
 
@@ -1183,7 +1196,18 @@ type oidcOptions struct {
 	tokenBody     map[string]any
 	token         http.HandlerFunc
 	callbackQuery func(state string) string
+	// unconfigured leaves out the oidc setting, so the IdP is entered at login or offered from the stored login.
+	unconfigured bool
+	baseURL      string                             // the provider's baseUrl setting
+	stored       func(issuer string) map[string]any // the previous login's auth.json entry
+	answers      map[string]string                  // answers by prompt message, over the entered IdP's
 }
+
+const (
+	issuerPrompt   = "Enter your identity provider's issuer URL:"
+	clientIDPrompt = "Enter the OAuth client ID (a public client without a secret):"
+	scopePrompt    = "Enter scopes (blank for openid):"
+)
 
 type oidcRun struct {
 	credential   ai.Credential
@@ -1197,7 +1221,7 @@ type oidcRun struct {
 
 func runOidcLogin(t *testing.T, options oidcOptions) oidcRun {
 	t.Helper()
-	oauthTest(t)
+	dir := oauthTest(t)
 	idp := newRecorder(t, true)
 	authTransport = idp.Client().Transport
 	issuer := idp.URL
@@ -1212,8 +1236,17 @@ func runOidcLogin(t *testing.T, options oidcOptions) oidcRun {
 		}
 	}
 	definition := defaultDefinition(t)
-	definition.OIDC = oidc
-	definition.HasOIDC = true
+	if !options.unconfigured {
+		definition.OIDC = oidc
+		definition.HasOIDC = true
+	}
+	definition.BaseURL = options.baseURL
+	if options.stored != nil {
+		data, _ := json.Marshal(map[string]any{"litellm": options.stored(issuer)})
+		if err := os.WriteFile(filepath.Join(dir, "auth.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv(envHeaders, `{"x-gateway-secret":"gateway-secret"}`)
 	if options.headers != "" {
 		definition.Headers = options.headers
@@ -1249,7 +1282,16 @@ func runOidcLogin(t *testing.T, options oidcOptions) oidcRun {
 		writeJSON(w, 200, merged(map[string]any{"id_token": token, "refresh_token": "refresh-new", "access_token": "idp-access-token", "token_type": "Bearer", "expires_in": 3600}, options.tokenBody))
 	})
 	responses := make(chan *http.Response, 1)
-	script := &scriptedAuth{answer: answers("https://proxy.example.com", "", "")}
+	// Without an oidc setting, the script answers the way a user signing in with their own IdP would.
+	byMessage := map[string]string{"Sign in with:": signInOidc, issuerPrompt: issuer, clientIDPrompt: " " + clientID + " ", scopePrompt: ""}
+	maps.Copy(byMessage, options.answers)
+	usual := answers("https://proxy.example.com", "", "")
+	script := &scriptedAuth{answer: func(prompt ai.AuthPrompt) (string, error) {
+		if answer, ok := byMessage[promptMessage(prompt)]; ok {
+			return answer, nil
+		}
+		return usual(prompt)
+	}}
 	script.onEvent = func(event ai.AuthEvent) {
 		urlEvent, ok := event.(ai.AuthURLEvent)
 		if !ok {
@@ -1285,6 +1327,10 @@ func TestDirectOIDCLogin(t *testing.T) {
 		run := runOidcLogin(t, oidcOptions{claims: map[string]any{"exp": exp}})
 		if run.err != nil {
 			t.Fatal(run.err)
+		}
+		// A configured `oidc` leaves only the proxy URL to ask for: there is no sign-in choice to make.
+		if got := run.script.promptMessages(); !slices.Equal(got, []string{"Enter LiteLLM proxy URL (no trailing /v1):"}) {
+			t.Errorf("prompts = %q", got)
 		}
 		issuer := run.idp.URL
 		requests := run.idp.log()
@@ -1323,7 +1369,7 @@ func TestDirectOIDCLogin(t *testing.T) {
 			t.Errorf("callback = %+v", run.callbackResp)
 		}
 		credential := run.credential
-		if credential.Access != run.issued[0] || credential.Refresh != "refresh-new" || credential.ExpiresMillis() != float64(exp*1000) {
+		if credential.Access != run.issued[0] || credential.Refresh != "refresh-new" || credential.ExpiresMillis() != float64(exp*1000) || credential.Scope != "openid" {
 			t.Errorf("credential = %+v", credential)
 		}
 		for name, want := range map[string]string{"baseUrl": "https://proxy.example.com", "flow": oidcFlow, "issuer": issuer, "clientId": "example-client-id", "tokenEndpoint": issuer + "/token", "subject": "user-123"} {
@@ -1474,6 +1520,118 @@ func TestDirectOIDCLogin(t *testing.T) {
 	}
 }
 
+// ---- direct OIDC login entered at login -------------------------------------------------------------------
+
+func TestOIDCEnteredAtLogin(t *testing.T) {
+	const proxyURL, clientID = "https://proxy.example.com", "example-client-id"
+	signInOptions := func(run oidcRun) []ai.AuthSelectOption {
+		for _, prompt := range run.script.prompts {
+			if selection, ok := prompt.(ai.AuthSelectPrompt); ok && selection.Message == "Sign in with:" {
+				return selection.Options
+			}
+		}
+		return nil
+	}
+	litellmSSO := ai.AuthSelectOption{ID: "litellm", Label: "LiteLLM SSO"}
+	ownIdP := ai.AuthSelectOption{ID: signInOidc, Label: "Your identity provider (OIDC client ID)…"}
+
+	for _, c := range []struct{ name, entered, scope string }{
+		{"the entered scopes", "openid offline_access", "openid offline_access"},
+		{"openid for blank scopes", "", "openid"},
+	} {
+		t.Run("signs in with the identity provider and client ID, using "+c.name, func(t *testing.T) {
+			run := runOidcLogin(t, oidcOptions{unconfigured: true, answers: map[string]string{scopePrompt: c.entered}})
+			if run.err != nil {
+				t.Fatal(run.err)
+			}
+			want := []string{"Enter LiteLLM proxy URL (no trailing /v1):", "Sign in with:", issuerPrompt, clientIDPrompt, scopePrompt}
+			if got := run.script.promptMessages(); !slices.Equal(got, want) {
+				t.Errorf("prompts = %q", got)
+			}
+			// Only the IdP is contacted: no CLI-auth discovery, /sso/* or /key/generate on the proxy.
+			if requests := run.idp.log(); len(requests) != 2 || requests[0].path != oidcDiscoveryPath || requests[1].path != "/token" {
+				t.Errorf("requests = %+v", requests)
+			}
+			if query := run.authURL.Query(); query.Get("client_id") != clientID || query.Get("scope") != c.scope {
+				t.Errorf("auth URL = %s", run.authURL)
+			}
+			for name, want := range map[string]string{"flow": oidcFlow, "baseUrl": proxyURL, "issuer": run.idp.URL, "clientId": clientID} {
+				if got := extra(t, run.credential, name); got != want {
+					t.Errorf("%s = %q, want %q", name, got, want)
+				}
+			}
+			if run.credential.Scope != c.scope {
+				t.Errorf("scope = %q, want %q", run.credential.Scope, c.scope)
+			}
+		})
+	}
+
+	previousLogin := func(override map[string]any) func(string) map[string]any {
+		return func(issuer string) map[string]any {
+			return merged(map[string]any{
+				"type": "oauth", "access": "expired-id-token", "refresh": "", "expires": 0, "baseUrl": proxyURL,
+				"flow": oidcFlow, "issuer": issuer, "clientId": clientID, "tokenEndpoint": issuer + "/token",
+				"subject": "user-123", "scope": "openid offline_access",
+			}, override)
+		}
+	}
+
+	t.Run("offers the previous identity provider login first", func(t *testing.T) {
+		run := runOidcLogin(t, oidcOptions{unconfigured: true, stored: previousLogin(nil), answers: map[string]string{"Sign in with:": signInPreviousOidc}})
+		if run.err != nil {
+			t.Fatal(run.err)
+		}
+		// One keypress each for the proxy URL and the identity provider.
+		if got := run.script.promptMessages(); !slices.Equal(got, []string{"LiteLLM proxy URL:", "Sign in with:"}) {
+			t.Errorf("prompts = %q", got)
+		}
+		previous := ai.AuthSelectOption{ID: signInPreviousOidc, Label: run.idp.URL + " with client " + clientID + " (previous login)"}
+		if got := signInOptions(run); !slices.Equal(got, []ai.AuthSelectOption{previous, litellmSSO, ownIdP}) {
+			t.Errorf("options = %+v", got)
+		}
+		if query := run.authURL.Query(); query.Get("client_id") != clientID || query.Get("scope") != "openid offline_access" {
+			t.Errorf("auth URL = %s", run.authURL)
+		}
+	})
+
+	// Enter picks the first option, so a guess here would send the IdP's token elsewhere or drop scopes.
+	for _, c := range []struct {
+		name   string
+		stored func(string) map[string]any
+	}{
+		{"a login to another proxy", previousLogin(map[string]any{"baseUrl": "https://other.example.com"})},
+		{"a login that recorded no scope", previousLogin(map[string]any{"scope": nil})},
+		{"a login through another flow", previousLogin(map[string]any{"flow": pkceFlow})},
+		// From the login base URL reuse case: a previous LiteLLM SSO login leaves no identity provider to offer again.
+		{"a LiteLLM SSO login", func(string) map[string]any {
+			return map[string]any{"type": "oauth", "access": "expired-token", "refresh": "", "expires": 0, "baseUrl": proxyURL}
+		}},
+	} {
+		t.Run("does not offer "+c.name+" again", func(t *testing.T) {
+			run := runOidcLogin(t, oidcOptions{unconfigured: true, baseURL: proxyURL, stored: c.stored})
+			if run.err != nil {
+				t.Fatal(run.err)
+			}
+			if got := signInOptions(run); !slices.Equal(got, []ai.AuthSelectOption{litellmSSO, ownIdP}) {
+				t.Errorf("options = %+v", got)
+			}
+		})
+	}
+
+	for _, c := range []struct{ name, prompt, answer, field string }{
+		{"an http issuer", issuerPrompt, "http://idp.example.com", "oidc.issuer"},
+		{"a client ID with a space", clientIDPrompt, "example client", "oidc.clientId"},
+		{"scopes without openid", scopePrompt, "profile email", "oidc.scope"},
+	} {
+		t.Run("fails login without any request for "+c.name, func(t *testing.T) {
+			run := runOidcLogin(t, oidcOptions{unconfigured: true, answers: map[string]string{c.prompt: c.answer}})
+			if run.err == nil || !strings.HasPrefix(run.err.Error(), "Invalid LiteLLM "+c.field+" setting: ") || len(run.idp.log()) != 0 {
+				t.Errorf("err = %v, requests %d", run.err, len(run.idp.log()))
+			}
+		})
+	}
+}
+
 // ---- OIDC refresh -----------------------------------------------------------------------------------------
 
 func TestOIDCRefresh(t *testing.T) {
@@ -1494,6 +1652,7 @@ func TestOIDCRefresh(t *testing.T) {
 		setExtra(&credential, "clientId", clientID)
 		setExtra(&credential, "tokenEndpoint", issuer+"/token")
 		setExtra(&credential, "subject", "user-123")
+		credential.Scope = "openid offline_access"
 		for _, fn := range mutate {
 			fn(&credential)
 		}
@@ -1511,8 +1670,8 @@ func TestOIDCRefresh(t *testing.T) {
 		if err != nil || refreshed.Access != token || refreshed.Refresh != "refresh-new" || refreshed.ExpiresMillis() != float64(exp*1000) {
 			t.Fatalf("refreshed = %+v, %v", refreshed, err)
 		}
-		if extra(t, refreshed, "subject") != "user-123" || extra(t, refreshed, "flow") != oidcFlow || extra(t, refreshed, "baseUrl") != "https://proxy.example.com" {
-			t.Errorf("metadata = %v", refreshed.Extra)
+		if extra(t, refreshed, "subject") != "user-123" || extra(t, refreshed, "flow") != oidcFlow || extra(t, refreshed, "baseUrl") != "https://proxy.example.com" || refreshed.Scope != "openid offline_access" {
+			t.Errorf("metadata = %v, scope %q", refreshed.Extra, refreshed.Scope)
 		}
 		requests := idp.log()
 		want := map[string]string{"grant_type": "refresh_token", "refresh_token": "refresh-old", "client_id": clientID}
