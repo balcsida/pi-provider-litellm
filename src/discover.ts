@@ -88,7 +88,14 @@ export function normalizeBaseUrl(input: string, allowInsecureHttp = false): stri
   if (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || allowInsecureHttp))) {
     throw new Error("LiteLLM base URL must use HTTPS except for loopback hosts");
   }
-  return input.replace(/\/+$/, "").replace(/\/v1\/?$/i, "");
+  return trimTrailingSlashes(input).replace(/\/v1\/?$/i, "");
+}
+
+// A loop, not /\/+$/: that regex backtracks quadratically on a long slash run followed by another character.
+export function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
 }
 
 // Matches both the conventional `anthropic/...` prefix and aliases that

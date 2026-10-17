@@ -170,12 +170,6 @@ func extractTextFromContent(content interface{}) string {
 	return ""
 }
 
-// jsonText JSON-encodes s, so quotes, backslashes and newlines in a prompt stay valid stream data.
-func jsonText(s string) string {
-	encoded, _ := json.Marshal(s)
-	return string(encoded)
-}
-
 // thirds splits s into three pieces on character boundaries.
 func thirds(s string) []string {
 	runes := []rune(s)
@@ -222,15 +216,16 @@ func makeHandleChatCompletions(checkKey string) http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			parts := thirds(replyText)
-			chunks := []string{
-				`{"choices":[{"delta":{"role":"assistant"},"index":0}]}`,
-				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[0])),
-				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[1])),
-				fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"index":0}]}`, jsonText(parts[2])),
-				`{"choices":[{"delta":{"content":""},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
+			chunks := []map[string]any{
+				{"choices": []map[string]any{{"delta": map[string]string{"role": "assistant"}, "index": 0}}},
+				{"choices": []map[string]any{{"delta": map[string]string{"content": parts[0]}, "index": 0}}},
+				{"choices": []map[string]any{{"delta": map[string]string{"content": parts[1]}, "index": 0}}},
+				{"choices": []map[string]any{{"delta": map[string]string{"content": parts[2]}, "index": 0}}},
+				{"choices": []map[string]any{{"delta": map[string]string{"content": ""}, "finish_reason": "stop", "index": 0}}, "usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}},
 			}
 			for _, chunk := range chunks {
-				fmt.Fprintf(w, "data: %s\n\n", chunk)
+				data, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		} else {
@@ -281,30 +276,27 @@ func makeHandleResponses(checkKey string) http.HandlerFunc {
 		lastMsg := getLastUserMessage(input)
 		replyText := "mock reply to: " + lastMsg
 		deltas := thirds(replyText)
-		quote := jsonText
 
 		// Real Responses API stream shape: top-level item/delta fields, not nested under "response".
-		item := fmt.Sprintf(`{"id":"msg_test","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}`, quote(replyText))
-		events := []string{
-			`{"type":"response.created","sequence_number":0,"response":{"id":"resp_test","object":"response","created_at":1234567890,"status":"in_progress","model":"mock-responses","output":[]}}`,
-			`{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_test","object":"response","status":"in_progress","output":[]}}`,
-			`{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_test","type":"message","status":"in_progress","role":"assistant","content":[]}}`,
-			`{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_test","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`,
-			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[0])),
-			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[1])),
-			fmt.Sprintf(`{"type":"response.output_text.delta","sequence_number":6,"item_id":"msg_test","output_index":0,"content_index":0,"delta":%s}`, quote(deltas[2])),
-			fmt.Sprintf(`{"type":"response.output_text.done","sequence_number":7,"item_id":"msg_test","output_index":0,"content_index":0,"text":%s}`, quote(replyText)),
-			fmt.Sprintf(`{"type":"response.content_part.done","sequence_number":8,"item_id":"msg_test","output_index":0,"content_index":0,"part":{"type":"output_text","text":%s,"annotations":[]}}`, quote(replyText)),
-			fmt.Sprintf(`{"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":%s}`, item),
-			fmt.Sprintf(`{"type":"response.completed","sequence_number":10,"response":{"id":"resp_test","object":"response","created_at":1234567890,"status":"completed","model":"mock-responses","output":[%s],"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":30}}}`, item),
+		part := map[string]any{"type": "output_text", "text": replyText, "annotations": []any{}}
+		item := map[string]any{"id": "msg_test", "type": "message", "status": "completed", "role": "assistant", "content": []any{part}}
+		events := []map[string]any{
+			{"type": "response.created", "sequence_number": 0, "response": map[string]any{"id": "resp_test", "object": "response", "created_at": 1234567890, "status": "in_progress", "model": "mock-responses", "output": []any{}}},
+			{"type": "response.in_progress", "sequence_number": 1, "response": map[string]any{"id": "resp_test", "object": "response", "status": "in_progress", "output": []any{}}},
+			{"type": "response.output_item.added", "sequence_number": 2, "output_index": 0, "item": map[string]any{"id": "msg_test", "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}}},
+			{"type": "response.content_part.added", "sequence_number": 3, "item_id": "msg_test", "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}},
+			{"type": "response.output_text.delta", "sequence_number": 4, "item_id": "msg_test", "output_index": 0, "content_index": 0, "delta": deltas[0]},
+			{"type": "response.output_text.delta", "sequence_number": 5, "item_id": "msg_test", "output_index": 0, "content_index": 0, "delta": deltas[1]},
+			{"type": "response.output_text.delta", "sequence_number": 6, "item_id": "msg_test", "output_index": 0, "content_index": 0, "delta": deltas[2]},
+			{"type": "response.output_text.done", "sequence_number": 7, "item_id": "msg_test", "output_index": 0, "content_index": 0, "text": replyText},
+			{"type": "response.content_part.done", "sequence_number": 8, "item_id": "msg_test", "output_index": 0, "content_index": 0, "part": part},
+			{"type": "response.output_item.done", "sequence_number": 9, "output_index": 0, "item": item},
+			{"type": "response.completed", "sequence_number": 10, "response": map[string]any{"id": "resp_test", "object": "response", "created_at": 1234567890, "status": "completed", "model": "mock-responses", "output": []any{item}, "usage": map[string]any{"input_tokens": 10, "input_tokens_details": map[string]int{"cached_tokens": 0}, "output_tokens": 20, "output_tokens_details": map[string]int{"reasoning_tokens": 0}, "total_tokens": 30}}},
 		}
 
 		for _, event := range events {
-			var typed struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal([]byte(event), &typed)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], data)
 		}
 	}
 }
@@ -331,24 +323,21 @@ func makeHandleMessages(checkKey string) http.HandlerFunc {
 		replyText := "mock reply to: " + lastMsg
 		parts := thirds(replyText)
 
-		events := []string{
-			`{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
-			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[0])),
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[1])),
-			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, jsonText(parts[2])),
-			`{"type":"content_block_stop","index":0}`,
-			`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":20}}`,
-			`{"type":"message_stop"}`,
+		events := []map[string]any{
+			{"type": "message_start", "message": map[string]any{"id": "msg_test", "type": "message", "role": "assistant", "content": []any{}, "model": "claude-3-5-sonnet-20241022", "stop_reason": nil, "stop_sequence": nil, "usage": map[string]int{"input_tokens": 10, "output_tokens": 0}}},
+			{"type": "content_block_start", "index": 0, "content_block": map[string]string{"type": "text", "text": ""}},
+			{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": parts[0]}},
+			{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": parts[1]}},
+			{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": parts[2]}},
+			{"type": "content_block_stop", "index": 0},
+			{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 20}},
+			{"type": "message_stop"},
 		}
 
 		// Anthropic names each event on an event: line before its data: line; PiG's driver keys on it.
 		for _, event := range events {
-			var typed struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal([]byte(event), &typed)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], data)
 		}
 	}
 }
