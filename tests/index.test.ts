@@ -3135,6 +3135,7 @@ describe("direct OIDC login", () => {
     it.each<[string, Record<string, unknown>]>([
       ["a login to another proxy", { baseUrl: "https://other.example.com" }],
       ["a login that recorded no scope", { scope: undefined }],
+      ["a login through another flow", { flow: "litellm_cli_pkce" }],
     ])("does not offer %s again", async (_name, override) => {
       let offered: string[] | undefined;
       const answer = ownIdp({ "LiteLLM proxy URL:": proxyUrl });

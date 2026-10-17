@@ -1601,6 +1601,7 @@ func TestOIDCEnteredAtLogin(t *testing.T) {
 	}{
 		{"a login to another proxy", previousLogin(map[string]any{"baseUrl": "https://other.example.com"})},
 		{"a login that recorded no scope", previousLogin(map[string]any{"scope": nil})},
+		{"a login through another flow", previousLogin(map[string]any{"flow": pkceFlow})},
 		// From the login base URL reuse case: a previous LiteLLM SSO login leaves no identity provider to offer again.
 		{"a LiteLLM SSO login", func(string) map[string]any {
 			return map[string]any{"type": "oauth", "access": "expired-token", "refresh": "", "expires": 0, "baseUrl": proxyURL}
