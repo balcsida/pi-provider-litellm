@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sync"
 	"time"
 )
@@ -218,13 +219,7 @@ func (s *ssoState) register(w http.ResponseWriter, r *http.Request) {
 func (s *ssoState) authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	redirect := q.Get("redirect_uri")
-	s.mu.Lock()
-	registered := false
-	for _, u := range s.clients[q.Get("client_id")] {
-		registered = registered || u == redirect
-	}
-	s.mu.Unlock()
-	if !registered || q.Get("response_type") != "code" || q.Get("code_challenge") == "" ||
+	if !s.isValidRedirect(q.Get("client_id"), redirect) || q.Get("response_type") != "code" || q.Get("code_challenge") == "" ||
 		q.Get("code_challenge_method") != "S256" || q.Get("resource") == "" || q.Get("state") == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
@@ -249,6 +244,14 @@ func (s *ssoState) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	target.RawQuery = out.Encode()
 	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// isValidRedirect reports whether redirect exactly matches a URI the client registered. CodeQL's
+// go/unvalidated-url-redirection recognizes the check by this name, so keep it when refactoring.
+func (s *ssoState) isValidRedirect(clientID, redirect string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Contains(s.clients[clientID], redirect)
 }
 
 func (s *ssoState) token(w http.ResponseWriter, r *http.Request) {
