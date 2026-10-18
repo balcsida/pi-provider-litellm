@@ -1445,9 +1445,14 @@ function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFam
     !resolveBackendIdentity({ ...entry, model_name: undefined })
   )
     return "conflicting";
+  const customProvider = wireString(entry.litellm_params?.custom_llm_provider)?.trim().toLowerCase();
   const identityFamilies = [
     entry.litellm_params?.model,
-    entry.litellm_params?.custom_llm_provider,
+    // A generic adapter (`openai`, `azure`, ...) names transport, not a backend family;
+    // counting it as identity contradicts a model id such as `openai/kimi-k3`.
+    customProvider && GENERIC_TRANSPORT_ADAPTERS.has(customProvider)
+      ? undefined
+      : entry.litellm_params?.custom_llm_provider,
     entry.model_info?.base_model,
   ]
     .map((candidate) => wireString(candidate)?.trim())

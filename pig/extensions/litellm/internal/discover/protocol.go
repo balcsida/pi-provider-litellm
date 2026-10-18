@@ -328,7 +328,14 @@ func deploymentFamily(entry types.ModelInfoEntry) modelgroups.FamilyEvidence {
 		return modelgroups.FamilyConflicting
 	}
 	var identityFamilies []modelgroups.SemanticFamily
-	for _, candidate := range []string{model, customProvider, baseModel} {
+	// A generic adapter (`openai`, `azure`, ...) names transport, not a backend family;
+	// counting it as identity contradicts a model id such as `openai/kimi-k3`.
+	candidates := []string{model}
+	if customProvider != "" && !genericTransportAdapters[lowerTrim(customProvider)] {
+		candidates = append(candidates, customProvider)
+	}
+	candidates = append(candidates, baseModel)
+	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
 		}

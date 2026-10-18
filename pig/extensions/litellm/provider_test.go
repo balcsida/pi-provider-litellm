@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -224,7 +225,7 @@ func TestRefreshModelsStoredModels(t *testing.T) {
 		if ids := modelIDs(t, h.provider); !equalStrings(ids, []string{"stored", "other-stored"}) {
 			t.Fatalf("ids=%v", ids)
 		}
-		if len(*diagnostics) != 1 || !strings.Contains((*diagnostics)[0], "version does not match 6") ||
+		if len(*diagnostics) != 1 || !strings.Contains((*diagnostics)[0], fmt.Sprintf("version does not match %d", types.DiscoveryVersion)) ||
 			!strings.Contains((*diagnostics)[0], "network refresh failed") {
 			t.Fatalf("diagnostics=%v", *diagnostics)
 		}
