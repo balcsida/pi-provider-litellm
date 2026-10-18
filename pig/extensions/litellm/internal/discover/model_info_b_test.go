@@ -1045,6 +1045,40 @@ func TestModelInfoB_AppliesKimiCompatToAFireworksAccountScopedPathRoutedByCustom
 	}
 }
 
+func TestModelInfoB_AppliesKimiCompatToAnOpenAIAdapterPrefixedVendorIDRoutedByCustomLLMProviderOpenAI(t *testing.T) {
+	result, collected := modelInfoBDiscover(t, `{"model_name":"kimi-k3-greenpt",`+
+		`"litellm_params":{"model":"openai/kimi-k3","custom_llm_provider":"openai"},"model_info":{"id":"one","mode":"chat"}}`)
+
+	model := modelInfoBFirst(t, result)
+	if model.LiteLLMBackendFamily != types.FamilyKimi {
+		t.Errorf("family = %q, want kimi", model.LiteLLMBackendFamily)
+	}
+	modelInfoBMatch(t, model.Compat, `{"maxTokensField":"max_tokens","supportsStrictMode":false}`)
+	if model.LiteLLMPolicy == nil || !model.LiteLLMPolicy.NormalizeStrictToolMessages {
+		t.Errorf("litellmPolicy = %s, want normalizeStrictToolMessages", modelInfoBJSON(model.LiteLLMPolicy))
+	}
+	if strings.Contains(modelInfoBStderrJoined(collected), "conflicting deployment family evidence") {
+		t.Errorf("diagnostics = %q", collected.Lines())
+	}
+}
+
+func TestModelInfoB_DoesNotTreatTheGenericAdapterAsFamilyEvidenceAgainstAnOpenAIAdapterPrefixedVendorID(t *testing.T) {
+	for _, customProvider := range []string{"openai", "openai_like", "custom_openai", "azure"} {
+		t.Run(customProvider, func(t *testing.T) {
+			result, collected := modelInfoBDiscover(t, fmt.Sprintf(`{"model_name":"deepseek-v4.1-flash-greenpt",`+
+				`"litellm_params":{"model":"openai/deepseek-v4.1-flash","custom_llm_provider":%q},"model_info":{"id":"one","mode":"chat"}}`, customProvider))
+
+			model := modelInfoBFirst(t, result)
+			if model.LiteLLMBackendFamily != types.FamilyDeepSeek {
+				t.Errorf("family = %q, want deepseek", model.LiteLLMBackendFamily)
+			}
+			if strings.Contains(modelInfoBStderrJoined(collected), "conflicting deployment family evidence") {
+				t.Errorf("diagnostics = %q", collected.Lines())
+			}
+		})
+	}
+}
+
 func TestModelInfoB_KeepsStrictRepairButWithholdsVisibilitySuppressionForMixedKimiThinkingModes(t *testing.T) {
 	result, _ := modelInfoBDiscover(t,
 		`{"model_name":"mixed-kimi-mode-route","litellm_params":{"model":"moonshot/kimi-k2.6"},"model_info":{"id":"normal","mode":"chat"}}`,
