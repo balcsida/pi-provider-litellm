@@ -3837,6 +3837,53 @@ describe("discoverModels via /model/info", () => {
     expect(stderr.mock.calls.flat().join(" ")).not.toContain("conflicting deployment family evidence");
   });
 
+  it("applies Kimi compat to an OpenAI-adapter-prefixed vendor id routed by custom_llm_provider: openai", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "kimi-k3-greenpt",
+              litellm_params: { model: "openai/kimi-k3", custom_llm_provider: "openai" },
+              model_info: { id: "one", mode: "chat" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmBackendFamily).toBe("kimi");
+    expect(result.models[0]?.compat).toMatchObject({ maxTokensField: "max_tokens", supportsStrictMode: false });
+    expect(result.models[0]?.litellmPolicy?.normalizeStrictToolMessages).toBe(true);
+    expect(stderr.mock.calls.flat().join(" ")).not.toContain("conflicting deployment family evidence");
+  });
+
+  it.each(["openai", "openai_like", "custom_openai", "azure"])(
+    "does not treat the generic %s adapter as family evidence against an OpenAI-adapter-prefixed vendor id",
+    async (customProvider) => {
+      const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      mockEndpoints({
+        "/model/info": () =>
+          jsonResponse(200, {
+            data: [
+              {
+                model_name: "deepseek-v4.1-flash-greenpt",
+                litellm_params: { model: "openai/deepseek-v4.1-flash", custom_llm_provider: customProvider },
+                model_info: { id: "one", mode: "chat" },
+              },
+            ],
+          }),
+      });
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]?.litellmBackendFamily).toBe("deepseek");
+      expect(stderr.mock.calls.flat().join(" ")).not.toContain("conflicting deployment family evidence");
+    },
+  );
+
   it("keeps strict repair but withholds visibility suppression for mixed Kimi thinking modes", async () => {
     mockEndpoints({
       "/model/info": () =>
