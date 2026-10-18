@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":6,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":7,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}
