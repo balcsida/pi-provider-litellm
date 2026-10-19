@@ -22,7 +22,7 @@ func TestUpstreamReductionRegressions(t *testing.T) {
 		eq(t, ConservativeCostTiers([]ai.ModelCost{cost}), []ai.CostTier{tier(100, 10, 20, 3, 4)})
 	})
 
-	// The Vitest rows for NaN and infinite thresholds cannot exist: ai.CostTier.InputTokensAbove is an int.
+	// The Vitest rows for NaN and infinite thresholds cannot exist: ai.CostTier.InputTokensAbove is a float64 and the port skips guarding them.
 	t.Run("ignores a negative tier threshold", func(t *testing.T) {
 		cost := modelCost(1, 2, 3, 4, tier(-1, 100, 200, 300, 400), tier(100, 10, 20, 30, 40))
 
@@ -297,9 +297,9 @@ func TestUpstreamReductionRegressions(t *testing.T) {
 	t.Run("constructs a safe piecewise envelope for different tier thresholds regardless of order", func(t *testing.T) {
 		rateAt := func(cost ai.ModelCost, inputTokens int) (input, output float64) {
 			input, output = cost.Input, cost.Output
-			best := -1
+			best := -1.0
 			for _, candidate := range cost.Tiers {
-				if candidate.InputTokensAbove < inputTokens && candidate.InputTokensAbove > best {
+				if candidate.InputTokensAbove < float64(inputTokens) && candidate.InputTokensAbove > best {
 					best, input, output = candidate.InputTokensAbove, candidate.InputCostPer1M, candidate.OutputCostPer1M
 				}
 			}
@@ -453,7 +453,11 @@ func TestCatalogResolutionFromModel(t *testing.T) {
 	raw := json.RawMessage(`{"id":"gpt-5.5","name":"GPT","api":"openai-responses","provider":"openai","baseUrl":"https://example.test",` +
 		`"reasoning":true,"input":["text","image"],"cost":{"input":1,"output":2,"cacheRead":0.1,"cacheWrite":0},` +
 		`"contextWindow":400000,"maxTokens":128000}`)
-	models, err := ai.DecodeModelsCatalog([]json.RawMessage{raw}, "openai")
+	stored, _, err := ai.DecodeStoredModel(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := ai.DecodeModelsCatalog([]ai.AnyModel{stored}, "openai")
 	if err != nil || len(models) != 1 {
 		t.Fatalf("decode: %v %d", err, len(models))
 	}

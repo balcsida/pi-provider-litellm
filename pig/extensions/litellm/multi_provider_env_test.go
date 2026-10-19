@@ -841,7 +841,7 @@ func TestPerProviderCredentialAndEndpointResolution(t *testing.T) {
 			if _, ok := host.servers["corp"]; ok {
 				t.Fatal("corp is still registered after login")
 			}
-			hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+			hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 			if _, ok := host.servers["corp"]; !ok {
 				t.Fatal("corp is not registered again on the next turn")
 			}
@@ -860,7 +860,7 @@ func TestPerProviderCredentialAndEndpointResolution(t *testing.T) {
 			if _, ok := host.servers["corp"]; ok {
 				t.Fatal("corp is registered after login")
 			}
-			hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+			hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 			if _, ok := host.servers["corp"]; ok {
 				t.Fatal("corp is registered on the next turn")
 			}

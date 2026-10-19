@@ -366,15 +366,15 @@ func explicitLimit(value *float64) *float64 {
 	return value
 }
 
-var extendedLevels = func() []ai.ThinkingLevel {
-	levels := make([]ai.ThinkingLevel, len(thinking.Definitions))
+var extendedLevels = func() []ai.ModelThinkingLevel {
+	levels := make([]ai.ModelThinkingLevel, len(thinking.Definitions))
 	for i, definition := range thinking.Definitions {
 		levels[i] = definition.Level
 	}
 	return levels
 }()
 
-func normalizeEffort(level string) (ai.ThinkingLevel, bool) {
+func normalizeEffort(level string) (ai.ModelThinkingLevel, bool) {
 	if level == "none" {
 		level = "off"
 	}
@@ -389,8 +389,8 @@ func normalizeEffort(level string) (ai.ThinkingLevel, bool) {
 // levelFlagFields maps each thinking.Definitions level to the ModelInfoDetails field its LiteLLM support flag
 // decodes into, found by JSON tag, so the table is derived from the one definition rather than restated. A
 // definition without a field fails here, at init, before any level could go unread.
-var levelFlagFields = func() map[ai.ThinkingLevel]int {
-	fields := map[ai.ThinkingLevel]int{}
+var levelFlagFields = func() map[ai.ModelThinkingLevel]int {
+	fields := map[ai.ModelThinkingLevel]int{}
 	details := reflect.TypeFor[types.ModelInfoDetails]()
 	for _, definition := range thinking.Definitions {
 		for i := range details.NumField() {
@@ -406,7 +406,7 @@ var levelFlagFields = func() map[ai.ThinkingLevel]int {
 }()
 
 // levelFlag reads the LiteLLM support flag thinking.Definitions names for a level.
-func levelFlag(info *types.ModelInfoDetails, level ai.ThinkingLevel) *bool {
+func levelFlag(info *types.ModelInfoDetails, level ai.ModelThinkingLevel) *bool {
 	index, ok := levelFlagFields[level]
 	if !ok {
 		return nil
@@ -422,7 +422,7 @@ func stringPtr(value string) *string { return &value }
 // reportedLevel: LiteLLM reads a declared `reasoning_effort_levels` list whole, ahead of the
 // per-level flags, because flags cannot state a set such as low/high/max: medium has no opt-out. A
 // declared list therefore answers every level for its deployment. Nil is absent.
-func reportedLevel(entry types.ModelInfoEntry, level ai.ThinkingLevel) *bool {
+func reportedLevel(entry types.ModelInfoEntry, level ai.ModelThinkingLevel) *bool {
 	info := entry.ModelInfo
 	if info == nil {
 		return nil
@@ -441,7 +441,7 @@ func reportedLevel(entry types.ModelInfoEntry, level ai.ThinkingLevel) *bool {
 func isTrue(value *bool) bool  { return value != nil && *value }
 func isFalse(value *bool) bool { return value != nil && !*value }
 
-func levelWire(level ai.ThinkingLevel) *string {
+func levelWire(level ai.ModelThinkingLevel) *string {
 	if level == ai.ThinkingOff {
 		return stringPtr("none")
 	}
@@ -457,12 +457,12 @@ func reasoningLevelMap(
 	catalogEfforts [][]string,
 	catalogMaps []ai.ThinkingLevelMap,
 ) ai.ThinkingLevelMap {
-	var publicSets []map[ai.ThinkingLevel]bool
+	var publicSets []map[ai.ModelThinkingLevel]bool
 	for _, levels := range catalogEfforts {
 		if levels == nil {
 			continue
 		}
-		set := map[ai.ThinkingLevel]bool{}
+		set := map[ai.ModelThinkingLevel]bool{}
 		for _, effort := range levels {
 			if level, ok := normalizeEffort(effort); ok {
 				set[level] = true
@@ -474,7 +474,7 @@ func reasoningLevelMap(
 	}
 	out := ai.ThinkingLevelMap{}
 	if len(publicSets) > 0 {
-		for _, level := range []ai.ThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh} {
+		for _, level := range []ai.ModelThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh} {
 			every := true
 			for _, set := range publicSets {
 				every = every && set[level]
@@ -511,7 +511,7 @@ func reasoningLevelMap(
 			out[level] = levelWire(level)
 		}
 	}
-	for _, level := range []ai.ThinkingLevel{ai.ThinkingXHigh, ai.ThinkingMax} {
+	for _, level := range []ai.ModelThinkingLevel{ai.ThinkingXHigh, ai.ThinkingMax} {
 		every := true
 		for _, entry := range entries {
 			every = every && isTrue(reportedLevel(entry, level))
@@ -1097,8 +1097,8 @@ func unanimous(values []string) string {
 	return values[0]
 }
 
-func ratesAboveThreshold(cost ai.ModelCost, threshold int) ai.ModelCost {
-	matchedThreshold := -1
+func ratesAboveThreshold(cost ai.ModelCost, threshold float64) ai.ModelCost {
+	matchedThreshold := -1.0
 	var matches []ai.CostTier
 	for _, tier := range cost.Tiers {
 		if tier.InputTokensAbove < 0 || tier.InputTokensAbove > threshold {
@@ -1130,8 +1130,8 @@ func ratesAboveThreshold(cost ai.ModelCost, threshold int) ai.ModelCost {
 // Every source threshold is retained because crossing it can change which deployment is most
 // expensive, even when the ladders use different breakpoints.
 func ConservativeCostTiers(costs []ai.ModelCost) []ai.CostTier {
-	seen := map[int]bool{}
-	var thresholds []int
+	seen := map[float64]bool{}
+	var thresholds []float64
 	for _, cost := range costs {
 		for _, tier := range cost.Tiers {
 			if tier.InputTokensAbove >= 0 && !seen[tier.InputTokensAbove] {
@@ -1143,7 +1143,7 @@ func ConservativeCostTiers(costs []ai.ModelCost) []ai.CostTier {
 	if len(thresholds) == 0 {
 		return nil
 	}
-	sort.Ints(thresholds)
+	sort.Float64s(thresholds)
 	out := make([]ai.CostTier, len(thresholds))
 	for i, threshold := range thresholds {
 		tier := ai.CostTier{InputTokensAbove: threshold}

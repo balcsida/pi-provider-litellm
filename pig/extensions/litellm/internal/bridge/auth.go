@@ -14,7 +14,8 @@ import (
 //     one is recorded (hostErrors) and returned from Resolve/Check instead of a false "absent";
 //   - ai.AuthInteraction.Notify has no error return, so the first failed notification is recorded
 //     and returned from Login once it finishes;
-//   - ai.LoginOptions (GetDeviceID) has no SDK counterpart and is passed zero.
+//   - ai.LoginOptions.GetDeviceID has no error return, so a failed call is recorded (hostErrors) and
+//     yields an empty ID.
 func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 	var out sdk.ProviderAuth
 	if a := auth.APIKey; a != nil && a.Resolve != nil {
@@ -48,13 +49,13 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 			}
 		}
 		if a.Login != nil {
-			out.APIKey.Login = func(in sdk.AuthInteraction) (map[string]any, error) {
+			out.APIKey.Login = func(in sdk.AuthInteraction) (*sdk.Credential, error) {
 				var host hostErrors
 				credential, err := a.Login(signal(in.Signal), host.interaction(in))
 				if err = host.or(err); err != nil {
 					return nil, err
 				}
-				return toMap(credential)
+				return encodeCredential(credential)
 			}
 		}
 	}
@@ -63,15 +64,15 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 			Name:           o.Name,
 			IsSubscription: &o.IsSubscription,
 			LoginLabel:     optional(o.LoginLabel),
-			Login: func(in sdk.AuthInteraction) (map[string]any, error) {
+			Login: func(in sdk.AuthInteraction, options sdk.LoginOptions) (*sdk.Credential, error) {
 				var host hostErrors
-				credential, err := o.Login(signal(in.Signal), host.interaction(in), ai.LoginOptions{})
+				credential, err := o.Login(signal(in.Signal), host.interaction(in), loginOptions(&host, options))
 				if err = host.or(err); err != nil {
 					return nil, err
 				}
-				return toMap(credential)
+				return encodeCredential(credential)
 			},
-			Refresh: func(wire map[string]any, ctx context.Context) (map[string]any, error) {
+			Refresh: func(wire *sdk.Credential, ctx context.Context) (*sdk.Credential, error) {
 				credential, err := decodeCredential(wire)
 				if err != nil || credential == nil {
 					return nil, err
@@ -80,9 +81,9 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 				if err != nil {
 					return nil, err
 				}
-				return toMap(refreshed)
+				return encodeCredential(refreshed)
 			},
-			ToAuth: func(wire map[string]any) (map[string]any, error) {
+			ToAuth: func(wire *sdk.Credential) (map[string]any, error) {
 				credential, err := decodeCredential(wire)
 				if err != nil || credential == nil {
 					return nil, err
@@ -93,6 +94,21 @@ func wrapAuth(auth ai.ProviderAuth) sdk.ProviderAuth {
 				}
 				return modelAuthMap(modelAuth), nil
 			},
+		}
+	}
+	return out
+}
+
+// loginOptions maps the app's sdk.LoginOptions onto ai.LoginOptions.
+func loginOptions(host *hostErrors, in sdk.LoginOptions) ai.LoginOptions {
+	out := ai.LoginOptions{AgentName: in.AgentName}
+	if in.GetDeviceID != nil {
+		out.GetDeviceID = func() string {
+			id, err := in.GetDeviceID()
+			if err != nil {
+				host.record(err)
+			}
+			return id
 		}
 	}
 	return out

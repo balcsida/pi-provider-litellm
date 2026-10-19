@@ -441,7 +441,7 @@ func fbPiInput(model ai.GeneratedModel) []string {
 }
 
 // fbSupportedLevels is Pi's getSupportedThinkingLevels for a discovered model.
-func fbSupportedLevels(model types.DiscoveredModel) []ai.ThinkingLevel {
+func fbSupportedLevels(model types.DiscoveredModel) []ai.ModelThinkingLevel {
 	return ai.GetSupportedThinkingLevels(&ai.Model{
 		ProviderMeta:     ai.ProviderMetadata{Reasoning: model.Reasoning},
 		ThinkingLevelMap: model.ThinkingLevelMap,

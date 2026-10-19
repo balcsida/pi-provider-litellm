@@ -385,39 +385,45 @@ func skillToolDefinitions(getAuth func(sdk.Context) (types.LiteLLMRuntimeAuth, e
 
 // skillsSystemPrompt is the before_agent_start body. Skills enrichment is best-effort: an expired
 // credential or an unreachable proxy must not report an extension error on every turn, so errors only
-// produce a verbose diagnostic. It returns the replacement prompt, or nil to keep it.
-func (s *extensionState) skillsSystemPrompt(ctx context.Context, systemPrompt string, getAuth func() (*types.LiteLLMRuntimeAuth, error)) any {
+// produce a verbose diagnostic. The prompt is read only once a section exists, as in the TypeScript handler.
+// It returns the replacement prompt, or nil to keep it.
+func (s *extensionState) skillsSystemPrompt(ctx context.Context, getPrompt func() (string, error), getAuth func() (*types.LiteLLMRuntimeAuth, error)) (any, error) {
 	s.mu.Lock()
 	s.defaultRuntimeAuth = nil
 	s.mu.Unlock()
 	if discoveryDisabledReason() != "" {
-		return nil
+		return nil, nil
 	}
-	skip := func(err error) any {
+	skip := func(err error) {
 		if isVerboseDiscovery() {
 			reportDiagnostic("LiteLLM: skipping Skills (" + err.Error() + ").")
 		}
-		return nil
 	}
 	auth, err := getAuth()
 	if err != nil {
-		return skip(err)
+		skip(err)
+		return nil, nil
 	}
 	if auth == nil {
-		return nil
+		return nil, nil
 	}
 	s.mu.Lock()
 	s.defaultRuntimeAuth = auth
 	s.mu.Unlock()
 	skills, err := listSkills(ctx, auth.BaseURL, auth.APIKey, auth.Headers, auth.AllowInsecureHTTP)
 	if err != nil {
-		return skip(err)
+		skip(err)
+		return nil, nil
 	}
 	section := createSkillsPromptSection(skills)
 	if section == "" {
-		return nil
+		return nil, nil
 	}
-	return map[string]any{"systemPrompt": systemPrompt + "\n\n" + section}
+	prompt, err := getPrompt()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"systemPrompt": prompt + "\n\n" + section}, nil
 }
 
 // setupSkills registers the skill tools and the prompt hook when the "skills" feature is enabled.
@@ -431,9 +437,13 @@ func setupSkills(e hookRegistrar, s *extensionState) {
 		e.RegisterTool(definition)
 	}
 	e.OnEvent(sdk.EventBeforeAgentStart, func(h hookHost, data map[string]any) (any, error) {
-		prompt, _ := data["systemPrompt"].(string)
-		return s.skillsSystemPrompt(h.RequestContext(), prompt, func() (*types.LiteLLMRuntimeAuth, error) {
+		// *sdk.SystemPrompt since SDK 0.5.0; the interface keeps the handler testable without a host.
+		reader, ok := data["systemPrompt"].(interface{ Get() (string, error) })
+		if !ok {
+			return nil, nil
+		}
+		return s.skillsSystemPrompt(h.RequestContext(), reader.Get, func() (*types.LiteLLMRuntimeAuth, error) {
 			return h.ResolveAuth(s.definitions[0].Name)
-		}), nil
+		})
 	})
 }

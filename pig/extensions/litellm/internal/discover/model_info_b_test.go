@@ -82,7 +82,7 @@ func modelInfoBIDs(models []types.DiscoveredModel) []string {
 // modelInfoBLevels builds a ThinkingLevelMap from off, minimal, low, medium, high, xhigh, max values;
 // "" is an explicit null.
 func modelInfoBLevels(values ...string) ai.ThinkingLevelMap {
-	names := []ai.ThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh, ai.ThinkingXHigh, ai.ThinkingMax}
+	names := []ai.ModelThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh, ai.ThinkingXHigh, ai.ThinkingMax}
 	levels := ai.ThinkingLevelMap{}
 	for i, value := range values {
 		if value == "" {
@@ -1122,7 +1122,7 @@ func TestModelInfoB_KeepsPisStandardLevelsForAnOffMapDeploymentThatOptsIntoReaso
 		t.Errorf("compat = %s, want supportsReasoningEffort", modelInfoBJSON(discovered.Compat))
 	}
 	model := &ai.Model{ProviderMeta: ai.ProviderMetadata{Reasoning: discovered.Reasoning}, ThinkingLevelMap: discovered.ThinkingLevelMap}
-	want := []ai.ThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh}
+	want := []ai.ModelThinkingLevel{ai.ThinkingOff, ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh}
 	if got := ai.GetSupportedThinkingLevels(model); !slices.Equal(got, want) {
 		t.Errorf("supported levels = %v, want %v", got, want)
 	}

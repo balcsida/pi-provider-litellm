@@ -37,11 +37,11 @@ func TestIntersectThinkingLevelMaps(t *testing.T) {
 		if got := Intersect([]ai.ThinkingLevelMap{nil, nil}); got != nil {
 			t.Errorf("got %v", got)
 		}
-		var levels []ai.ThinkingLevel
+		var levels []ai.ModelThinkingLevel
 		for _, d := range Definitions {
 			levels = append(levels, d.Level)
 		}
-		want := []ai.ThinkingLevel{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+		want := []ai.ModelThinkingLevel{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 		if !reflect.DeepEqual(levels, want) {
 			t.Errorf("got %v", levels)
 		}

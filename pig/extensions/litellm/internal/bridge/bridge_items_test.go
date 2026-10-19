@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -145,20 +146,33 @@ func TestDecodeTranscript(t *testing.T) {
 }
 
 func TestOAuthWrapperRoundTrip(t *testing.T) {
+	const maxSafeExpires = 1<<53 - 1
 	var notified []string
+	var toAuthExpires int64
+	assertKept := func(t *testing.T, step string, credential *sdk.Credential) {
+		t.Helper()
+		data, err := json.Marshal(credential)
+		if err != nil || !strings.Contains(string(data), `"expires":9007199254740991`) || !strings.Contains(string(data), `"baseUrl":"http://base"`) {
+			t.Fatalf("%s lost expires or baseUrl: %s, %v", step, data, err)
+		}
+	}
 	auth := wrapAuth(ai.ProviderAuth{OAuth: &ai.OAuthAuth{
 		Name: "sso", IsSubscription: true, LoginLabel: "Sign in",
 		Login: func(_ context.Context, in ai.AuthInteraction, _ ai.LoginOptions) (ai.Credential, error) {
 			in.Notify(ai.AuthInfoEvent{Message: "go"})
 			code, err := in.Prompt(context.Background(), ai.AuthTextPrompt{Message: "code"})
-			return ai.Credential{Type: "oauth", Access: "a-" + code, Refresh: "r1", Expires: 100}, err
+			return ai.Credential{Type: "oauth", Access: "a-" + code, Refresh: "r1", Expires: maxSafeExpires,
+				Extra: map[string]json.RawMessage{"baseUrl": json.RawMessage(`"http://base"`)}}, err
 		},
 		Refresh: func(_ context.Context, c ai.Credential) (ai.Credential, error) {
 			c.Access = "a2"
 			return c, nil
 		},
 		ToAuth: func(c ai.Credential) (ai.ModelAuth, error) {
-			return ai.ModelAuth{APIKey: c.Access, BaseURL: "http://base"}, nil
+			toAuthExpires = c.Expires
+			var baseURL string
+			err := json.Unmarshal(c.Extra["baseUrl"], &baseURL)
+			return ai.ModelAuth{APIKey: c.Access, BaseURL: baseURL}, err
 		},
 	}})
 	o := auth.OAuth
@@ -168,17 +182,19 @@ func TestOAuthWrapperRoundTrip(t *testing.T) {
 	wire, err := o.Login(sdk.AuthInteraction{
 		Prompt: func(map[string]any) (string, error) { return "code", nil },
 		Notify: func(e map[string]any) error { notified = append(notified, e["message"].(string)); return nil },
-	})
-	if err != nil || wire["access"] != "a-code" || wire["refresh"] != "r1" || len(notified) != 1 {
+	}, sdk.LoginOptions{})
+	if err != nil || wire.String("access") != "a-code" || wire.String("refresh") != "r1" || len(notified) != 1 {
 		t.Fatalf("login = %v, %v, %v", wire, err, notified)
 	}
+	assertKept(t, "login", wire)
 	refreshed, err := o.Refresh(wire, context.Background())
-	if err != nil || refreshed["access"] != "a2" || refreshed["refresh"] != "r1" {
+	if err != nil || refreshed.String("access") != "a2" || refreshed.String("refresh") != "r1" {
 		t.Fatalf("refresh = %v, %v", refreshed, err)
 	}
+	assertKept(t, "refresh", refreshed)
 	modelAuth, err := o.ToAuth(refreshed)
-	if err != nil || modelAuth["apiKey"] != "a2" || modelAuth["baseUrl"] != "http://base" {
-		t.Fatalf("toAuth = %v, %v", modelAuth, err)
+	if err != nil || modelAuth["apiKey"] != "a2" || modelAuth["baseUrl"] != "http://base" || toAuthExpires != maxSafeExpires {
+		t.Fatalf("toAuth = %v, %v, expires %d", modelAuth, err, toAuthExpires)
 	}
 }
 

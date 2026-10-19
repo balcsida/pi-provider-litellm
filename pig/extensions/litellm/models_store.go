@@ -30,22 +30,27 @@ func readStoredModels(agentDir, provider, baseURL string, allowInsecureHTTP bool
 	if err != nil {
 		return nil
 	}
-	var store map[string]ai.ModelsStoreEntry
+	// Only this provider's record is decoded: a malformed record of another provider must not disable the seed.
+	var store map[string]json.RawMessage
 	if json.Unmarshal(raw, &store) != nil {
 		return nil
 	}
-	entry, ok := store[provider]
-	if !ok || len(entry.Models) == 0 || entry.CheckedAt == nil {
+	var entry ai.ModelsStoreEntry
+	if record, ok := store[provider]; !ok || json.Unmarshal(record, &entry) != nil {
+		return nil
+	}
+	if len(entry.Models) == 0 || entry.CheckedAt == nil {
 		return nil
 	}
 	if time.Since(time.UnixMilli(int64(*entry.CheckedAt))) >= storeFreshness {
 		return nil
 	}
 	models := make([]types.DiscoveredModel, 0, len(entry.Models))
-	for _, record := range entry.Models {
+	for _, stored := range entry.Models {
 		var model types.DiscoveredModel
+		record, err := ai.EncodeStoredModel(stored)
 		// An undecodable record is the restore failure: PiG skips it, so the seed has to be the catalog.
-		if json.Unmarshal(record, &model) != nil || model.Provider != provider {
+		if err != nil || json.Unmarshal(record, &model) != nil || model.Provider != provider {
 			return nil
 		}
 		policy, known := policies.entry(provider, model.ID)

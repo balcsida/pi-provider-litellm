@@ -1156,7 +1156,7 @@ func (c *budgetController) command(host budgetHost, args string) {
 
 // setupBudget is setupLiteLLMBudget. The factory calls it as `setupBudget(e, state)`.
 //
-// The active provider is tracked from model_select (PiG 0.4.1 emits it from SetModel with the selected model
+// The active provider is tracked from model_select (PiG 0.5.1 emits it from coding/session.go with the selected model
 // in data["model"]), and also from before_agent_start, which runs the same logic when the provider differs
 // from the tracked one, and turn_end, through ModelProvider(): a host that does not emit model_select still
 // shows a provider switch on the next prompt.

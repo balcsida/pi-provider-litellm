@@ -81,17 +81,6 @@ func wireCallbacks(options *ai.StreamOptions, modelWire map[string]any, in sdk.P
 			return in.OnResponse(wire, modelWire)
 		}
 	}
-	if in.TransformHeaders != nil {
-		// ponytail: entries with a nil value (header deletions) cannot cross the map[string]string
-		// wire, so they are omitted on the way out; the returned map replaces the headers wholesale.
-		options.TransformHeaders = func(_ context.Context, headers ai.ProviderHeaders) (ai.ProviderHeaders, error) {
-			returned, err := in.TransformHeaders(stringHeaders(headers))
-			if err != nil {
-				return nil, err
-			}
-			return ai.ProviderHeadersFromStrings(returned), nil
-		}
-	}
 }
 
 // pump forwards every ai event as its JSON object. It ends when the ai stream ends or ctx is

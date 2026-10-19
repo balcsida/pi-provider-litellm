@@ -51,10 +51,10 @@ func aLevels(pairs map[string]string) ai.ThinkingLevelMap {
 	out := ai.ThinkingLevelMap{}
 	for level, value := range pairs {
 		if value == "null" {
-			out[ai.ThinkingLevel(level)] = nil
+			out[ai.ModelThinkingLevel(level)] = nil
 		} else {
 			wire := value
-			out[ai.ThinkingLevel(level)] = &wire
+			out[ai.ModelThinkingLevel(level)] = &wire
 		}
 	}
 	return out
@@ -64,7 +64,7 @@ func aLevels(pairs map[string]string) ai.ThinkingLevelMap {
 func aLevelsMatch(t *testing.T, got ai.ThinkingLevelMap, want map[string]string) {
 	t.Helper()
 	for level, value := range want {
-		have, ok := got[ai.ThinkingLevel(level)]
+		have, ok := got[ai.ModelThinkingLevel(level)]
 		switch {
 		case !ok:
 			t.Errorf("level %s missing from %v", level, got)
@@ -76,7 +76,7 @@ func aLevelsMatch(t *testing.T, got ai.ThinkingLevelMap, want map[string]string)
 	}
 }
 
-func aSupportedLevels(model types.DiscoveredModel) []ai.ThinkingLevel {
+func aSupportedLevels(model types.DiscoveredModel) []ai.ModelThinkingLevel {
 	return ai.GetSupportedThinkingLevels(&ai.Model{
 		ProviderMeta:     ai.ProviderMetadata{Reasoning: model.Reasoning},
 		ThinkingLevelMap: model.ThinkingLevelMap,
@@ -342,7 +342,7 @@ func TestModelInfoA_KeepsStandardLevelsACodexCatalogMapLeavesImplicit(t *testing
 
 	model := firstModel(t, base, aOffline(t))
 
-	want := []ai.ThinkingLevel{ai.ThinkingOff, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh, ai.ThinkingXHigh, ai.ThinkingMax}
+	want := []ai.ModelThinkingLevel{ai.ThinkingOff, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh, ai.ThinkingXHigh, ai.ThinkingMax}
 	if got := aSupportedLevels(model); !reflect.DeepEqual(got, want) {
 		t.Errorf("levels = %v, want %v", got, want)
 	}
@@ -367,7 +367,7 @@ func TestModelInfoA_ReadsADeclaredReasoningEffortLevelsListAsTheCompleteLevelSet
 
 	model := firstModel(t, base, aOffline(t))
 
-	want := []ai.ThinkingLevel{ai.ThinkingOff, ai.ThinkingLow, ai.ThinkingHigh, ai.ThinkingMax}
+	want := []ai.ModelThinkingLevel{ai.ThinkingOff, ai.ThinkingLow, ai.ThinkingHigh, ai.ThinkingMax}
 	if got := aSupportedLevels(model); !reflect.DeepEqual(got, want) {
 		t.Errorf("levels = %v, want %v", got, want)
 	}

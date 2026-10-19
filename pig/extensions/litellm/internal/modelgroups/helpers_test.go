@@ -90,7 +90,7 @@ func modelCost(input, output, cacheRead, cacheWrite float64, tiers ...ai.CostTie
 	return ai.ModelCost{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite, Tiers: tiers}
 }
 
-func tier(above int, input, output, cacheRead, cacheWrite float64) ai.CostTier {
+func tier(above float64, input, output, cacheRead, cacheWrite float64) ai.CostTier {
 	return ai.CostTier{InputTokensAbove: above, InputCostPer1M: input, OutputCostPer1M: output, CacheReadCostPer1M: cacheRead, CacheWriteCostPer1M: cacheWrite}
 }
 
@@ -103,9 +103,9 @@ func lv(pairs ...string) ai.ThinkingLevelMap {
 	out := ai.ThinkingLevelMap{}
 	for i := 0; i < len(pairs); i += 2 {
 		if pairs[i+1] == "null" {
-			out[ai.ThinkingLevel(pairs[i])] = nil
+			out[ai.ModelThinkingLevel(pairs[i])] = nil
 		} else {
-			out[ai.ThinkingLevel(pairs[i])] = s(pairs[i+1])
+			out[ai.ModelThinkingLevel(pairs[i])] = s(pairs[i+1])
 		}
 	}
 	return out
