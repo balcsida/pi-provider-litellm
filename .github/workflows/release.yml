@@ -45,13 +45,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - run: npm ci --ignore-scripts
+      # Each publish skips a version already on npm, so a release that failed
+      # between the two publishes (or before the GitHub release) can be rerun;
+      # npm refuses to publish the same version twice.
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          spec="pi-provider-litellm@${GITHUB_REF_NAME#v}"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec is already on npm; skipping"
+          else
+            npm publish --access public --provenance
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish PiG package to npm
+        shell: bash
         working-directory: pig
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          spec="pig-provider-litellm@${GITHUB_REF_NAME#v}"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec is already on npm; skipping"
+          else
+            npm publish --access public --provenance
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub release
