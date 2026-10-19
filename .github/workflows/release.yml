@@ -40,10 +40,17 @@ jobs:
           test "${GITHUB_REF_NAME#v}" = "$packageVersion"
           lockVersion=$(node -p "require('./package-lock.json').version")
           test "$lockVersion" = "$packageVersion"
+          pigVersion=$(node -p "require('./pig/package.json').version")
+          test "$pigVersion" = "$packageVersion"
         env:
           GH_TOKEN: ${{ github.token }}
       - run: npm ci --ignore-scripts
       - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish PiG package to npm
+        working-directory: pig
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
