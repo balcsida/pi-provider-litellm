@@ -11,7 +11,7 @@ pig/
 ├── PORTING.md                      this brief
 ├── package.json                    PiG package manifest (phase 6)
 └── extensions/litellm/             Go module github.com/balcsida/pi-provider-litellm/pig/extensions/litellm
-    ├── go.mod                      requires github.com/MichaelKinsy/PiG v0.4.1 and .../extensions/sdk v0.4.1
+    ├── go.mod                      requires github.com/MichaelKinsy/PiG v0.5.1 and .../extensions/sdk v0.5.1
     ├── extension.go                factory: func Extension() *sdk.Extension      ← src/index.ts
     ├── provider.go                 LiteLLM native provider                       ← src/provider.ts
     ├── models_store.go             stored-catalog seed                           ← src/models-store.ts
@@ -89,10 +89,9 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
 ## Verification ladder
 
 1. `go test ./...` in `pig/extensions/litellm`.
-2. `pig install --validate-only --json ./pig/extensions/litellm` proves the factory builds, but PiG 0.4.1's
-   validate host never binds the native provider registry, so any extension that registers a native provider
-   fails it with `native provider registry is not bound`. Treat that exact error as expected there; a real load
-   is the test.
+2. `pig install --validate-only --json ./pig/extensions/litellm` proves the factory builds and registers: PiG 0.5.1
+   reports `"valid": true` and `"registered": true`. `pig package validate ./pig --json` validates the Go member
+   too.
 3. Live smoke against the mock proxy in `pig/tools/mockproxy` (`go run . -key test-key -addr 127.0.0.1:48417`):
 
    ```sh
@@ -121,7 +120,7 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
    ```
 
    `LOGIN_SMOKE_MODE` is `cli`, `pkce`, `paste` or `apikey`; the mock's `-sso` mode must match the first three.
-   Stock PiG 0.4.1 fails this step (see Known PiG 0.4.1 issues); the fork branch named there passes all four.
+   Stock PiG 0.5.1 passes this step in all four modes.
 
 ## Status
 
@@ -137,8 +136,10 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   discovery-version staleness gate reads the sidecar instead of the stored model.
 - The stored-catalog seed (`models_store.go`) reads the discovery version from the sidecar, and treats an undecodable
   stored record as the restore failure, because Go's `EnrichCachedModel` cannot fail where the TypeScript one throws.
-- PiG 0.4.1 emits `model_select` (from `SetModel`, with the Pi-shaped model in `data["model"]`), although its
-  parity table still lists it as planned. The budget status line follows the provider in `data["model"]["provider"]`;
+  The typed store now rejects a malformed record on the host side before the extension sees it, so only
+  extension-only fields (`litellmPolicy` and the like) can still fail there.
+- PiG 0.5.1 emits `model_select` from `coding/session.go`, with `data["model"]`, `data["previousModel"]` and
+  `data["source"]`. The budget status line follows the provider in `data["model"]["provider"]`;
   `before_agent_start`, `turn_end` and `session_start` remain as a fallback through `ctx.ModelProvider()` for a host
   that does not emit it.
 - The first MCP sync runs at `session_start`, not while the factory runs: `*sdk.Extension.RegisterMcpServer` only
@@ -156,32 +157,19 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   `GenerateImages` nor `GetAllModels`, so a PiG native provider cannot surface image models. The Go discovery keeps
   withholding those groups like any other non-chat mode; port `src/images.ts` once the SDK exposes both callbacks.
 
-## Known PiG 0.4.1 issues
+## Known PiG 0.5.1 issues
 
-- `pig install --validate-only` cannot validate an extension that registers a native provider (see step 2 above).
-  `pig login --list` and the CLI `pig login litellm` start the extension through the same inspection host and fail
-  the same way (`extension "litellm" inspection failed: ... native provider registry is not bound`); a real
-  session binds the registry, so configure credentials through the environment, `settings.json` or `models.json`,
-  or log in inside a session.
-- `/login litellm` inside a stock 0.4.1 session offers only PiG's generic `Enter API key` prompt, stores the key
-  without the proxy URL, and never shows the SSO flows. The extension declares both methods correctly and the host
-  publishes the OAuth flow; the gaps are PiG's ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)),
-  fixed on the fork branch `fix/native-provider-login` of `balcsida/PiG`: the registry records a native provider's registration without its OAuth method and rewrites it on
-  every catalog refresh (0.4.1 also predates PiG#192, the inheritance of a published flow); a flow's `select` prompt
-  is answered with `Login cancelled`; a provider's own `apiKey.login` is not run; and the flow's `loginLabel` is not
-  shown. With that build, step 5 of the verification ladder passes for CLI SSO, PKCE (with refresh), pasted token
-  and API key, with no change to the extension. Until PiG ships it, configure credentials through the environment or
-  `settings.json`.
-- `pig piglet build` cannot fuse a Go factory that depends on a third-party module
-  ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196); a fix is offered in
-  [MichaelKinsy/PiG#202](https://github.com/MichaelKinsy/PiG/pull/202), and the maintainer's own is on the 0.4.2 line):
-  the fused builder overlays Pig's own `go.mod` and compiles read-only, and a Binary fuses every compatible factory
-  whether or not `extensionRealization` is set. This is why the login flows stay hand-written instead of using
-  `github.com/balcsida/litellm-auth-go`, and why this module must keep depending only on the standard library,
-  PiG and the SDK until that issue is resolved.
 - A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted
   when no effort carrier is evidenced, for example a Claude route on Chat Completions without
-  `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:173` (`thinkingMaxLevelForEntry`) indexes
+  `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:180` (`thinkingMaxLevelForEntry`) indexes
   the last element of the empty list `ai.GetSupportedThinkingLevels` returns. Pi tolerates the same model. The fix
   belongs in PiG (return `""` when the list is empty); the extension deliberately keeps the TypeScript semantics rather
   than inventing a level.
+- PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the `go.mod` SDK pin of the extension, so
+  this extension needs PiG 0.5.1 or later; a 0.4.1 host cannot load it.
+- When the extension fails to build, `--list-models` exits 0 and prints only `No models available`, while `-p` and
+  `pig install --validate-only --json` report the build error.
+- Fixed in 0.5.1: `/login litellm` offers the login flows under their `loginLabel`, answers `select` prompts and runs
+  the provider's own API-key login ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)).
+- Fixed in 0.5.1: fused builds accept third-party modules ([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196)),
+  though this module still depends only on the standard library, PiG and the SDK by choice.

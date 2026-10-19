@@ -289,12 +289,12 @@ func TestMcpFirstSyncRunsWhenTheSessionStartsNotWhileTheExtensionLoads(t *testin
 	if host.registers != 1 || host.servers["litellm"].URL != "https://proxy.example.com/mcp" {
 		t.Fatalf("registers = %d, servers = %s", host.registers, mcpJSON(t, host.fakeRegistrar))
 	}
-	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 	if host.registers != 1 {
 		t.Fatalf("the turn registered again: %d", host.registers)
 	}
 	t.Setenv(envBaseURL, "https://moved.example.com")
-	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 	if host.registers != 2 || host.servers["litellm"].URL != "https://moved.example.com/mcp" {
 		t.Fatalf("registers = %d, servers = %s", host.registers, mcpJSON(t, host.fakeRegistrar))
 	}
@@ -313,8 +313,8 @@ func TestMcpReportsABogusExposureAndKeepsTheExtensionLoaded(t *testing.T) {
 		return fmt.Errorf("server \"litellm\": exposure must be one of codemode, deferred, direct, hidden")
 	}
 	hooks.emit(t, sdk.EventSessionStart, host, nil)
-	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
-	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 	want := budgetNotice{`LiteLLM MCP ("litellm"): server "litellm": exposure must be one of codemode, deferred, direct, hidden`, "warning"}
 	if got := host.notifications(); len(got) != 1 || got[0] != want {
 		t.Fatalf("notices = %v, want one %v", got, want)
@@ -328,7 +328,7 @@ func TestMcpRegistersNothingWhenMCPIsDisabledAndKeepsSkills(t *testing.T) {
 	hooks, _, host := wire(t, `{"litellm":{"skills":{"enabled":true},"mcp":{"enabled":false}}}`)
 	defaultEnv(t, "https://proxy.example.com")
 	hooks.emit(t, sdk.EventSessionStart, host, nil)
-	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": ""})
+	hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
 	if host.registers != 0 || len(host.servers) != 0 {
 		t.Fatalf("registers %d, servers %s", host.registers, mcpJSON(t, host.fakeRegistrar))
 	}

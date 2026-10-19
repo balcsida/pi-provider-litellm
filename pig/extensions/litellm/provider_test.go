@@ -84,7 +84,11 @@ func storedEntry(t *testing.T, models ...any) *ai.ModelsStoreEntry {
 		if err != nil {
 			t.Fatal(err)
 		}
-		entry.Models = append(entry.Models, data)
+		decoded, _, err := ai.DecodeStoredModel(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry.Models = append(entry.Models, decoded)
 	}
 	return entry
 }
@@ -631,7 +635,8 @@ func TestRefreshModelsUndecodableRecord(t *testing.T) {
 	h := newHarness(t, nil)
 	good := nativeModel(t, "good")
 	h.policies.replace("litellm", []types.DiscoveredModel{good})
-	stored := storedEntry(t, good, json.RawMessage(`{"id":5}`))
+	// Passes PiG's stored-model codec but not the extension's own decode.
+	stored := storedEntry(t, good, json.RawMessage(`{"id":"x","name":"x","api":"openai-completions","provider":"litellm","baseUrl":"http://x","input":["text"],"litellmPolicy":5}`))
 	if _, err := refresh(h.provider, stored, false, false); err != nil {
 		t.Fatalf("one undecodable record aborted the restore: %v", err)
 	}

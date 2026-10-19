@@ -280,6 +280,8 @@ func TestSkillToolDefinitions(t *testing.T) {
 	})
 }
 
+func basePrompt() (string, error) { return "Base prompt", nil }
+
 func skillsHookState() *extensionState {
 	return newExtensionState(nil, []providerDefinition{{Name: providerName}}, nil)
 }
@@ -292,7 +294,7 @@ func TestBeforeAgentStartSkillsHook(t *testing.T) {
 
 	t.Run("survives an unrefreshable OAuth credential", func(t *testing.T) {
 		diagnostics = nil
-		got := skillsHookState().skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		got, _ := skillsHookState().skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			return nil, errors.New("OAuth refresh failed for litellm: LiteLLM credential cannot be refreshed")
 		})
 		if got != nil || len(diagnostics) != 0 {
@@ -301,7 +303,7 @@ func TestBeforeAgentStartSkillsHook(t *testing.T) {
 	})
 	t.Run("survives a failing skills catalog request", func(t *testing.T) {
 		server, _ := skillsServer(t, scriptedReply{-1, ``})
-		got := skillsHookState().skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		got, _ := skillsHookState().skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			return &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"}, nil
 		})
 		if got != nil {
@@ -311,7 +313,7 @@ func TestBeforeAgentStartSkillsHook(t *testing.T) {
 	t.Run("rejects placeholder runtime hosts before sending credentials", func(t *testing.T) {
 		server, seen := skillsServer(t, scriptedReply{200, `[]`})
 		_ = server
-		got := skillsHookState().skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		got, _ := skillsHookState().skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			root, err := requireCredentialRoot("https://litellm.example.com", providerName)
 			if err != nil {
 				return nil, err
@@ -325,7 +327,7 @@ func TestBeforeAgentStartSkillsHook(t *testing.T) {
 	t.Run("reports the reason on stderr under LITELLM_VERBOSE_DISCOVERY", func(t *testing.T) {
 		t.Setenv(envVerboseDiscovery, "1")
 		diagnostics = nil
-		skillsHookState().skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		skillsHookState().skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			return nil, errors.New("LiteLLM credential cannot be refreshed")
 		})
 		if len(diagnostics) != 1 || !strings.Contains(diagnostics[0], "cannot be refreshed") {
@@ -335,17 +337,41 @@ func TestBeforeAgentStartSkillsHook(t *testing.T) {
 	t.Run("appends the skills section to the system prompt", func(t *testing.T) {
 		server, _ := skillsServer(t, scriptedReply{200, `{"plugins":[{"name":"terraform","description":"Terraform conventions"}]}`})
 		state := skillsHookState()
-		got, _ := state.skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		reply, _ := state.skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			return &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"}, nil
-		}).(map[string]any)
+		})
+		got, _ := reply.(map[string]any)
 		prompt, _ := got["systemPrompt"].(string)
 		if !strings.HasPrefix(prompt, "Base prompt\n\nLiteLLM Skills Gateway") || state.defaultRuntimeAuth == nil {
 			t.Fatalf("prompt = %q", prompt)
 		}
 	})
+	t.Run("reads the prompt only when a section exists", func(t *testing.T) {
+		server, _ := skillsServer(t, scriptedReply{200, `[]`})
+		got, err := skillsHookState().skillsSystemPrompt(context.Background(), func() (string, error) {
+			t.Fatal("prompt must not be read without a section")
+			return "", nil
+		}, func() (*types.LiteLLMRuntimeAuth, error) {
+			return &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"}, nil
+		})
+		if got != nil || err != nil {
+			t.Fatalf("got %v, err %v", got, err)
+		}
+	})
+	t.Run("returns the error when the prompt cannot be read", func(t *testing.T) {
+		server, _ := skillsServer(t, scriptedReply{200, `{"plugins":[{"name":"terraform"}]}`})
+		_, err := skillsHookState().skillsSystemPrompt(context.Background(), func() (string, error) {
+			return "", errors.New("prompt unavailable")
+		}, func() (*types.LiteLLMRuntimeAuth, error) {
+			return &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"}, nil
+		})
+		if err == nil || err.Error() != "prompt unavailable" {
+			t.Fatalf("err = %v", err)
+		}
+	})
 	t.Run("skips skills when discovery is disabled", func(t *testing.T) {
 		t.Setenv(envOffline, "1")
-		got := skillsHookState().skillsSystemPrompt(context.Background(), "Base prompt", func() (*types.LiteLLMRuntimeAuth, error) {
+		got, _ := skillsHookState().skillsSystemPrompt(context.Background(), basePrompt, func() (*types.LiteLLMRuntimeAuth, error) {
 			t.Fatal("auth must not be resolved")
 			return nil, nil
 		})
@@ -386,7 +412,7 @@ func TestSkillsThroughTheHooks(t *testing.T) {
 		if slices.Contains(hooks.tools, "litellm_skill_list") || len(hooks.tools) != 0 {
 			t.Fatalf("tools = %v", hooks.tools)
 		}
-		for _, result := range hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": "Base prompt"}) {
+		for _, result := range hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("Base prompt")}) {
 			if result != nil {
 				t.Fatalf("a before_agent_start handler answered: %v", result)
 			}
@@ -400,7 +426,7 @@ func TestSkillsThroughTheHooks(t *testing.T) {
 		server, seen := skillsServer(t, scriptedReply{200, `[]`})
 		hooks, state, host := wire(t, `{"litellm":{"budget":{"enabled":false}}}`)
 		host.setAuth(providerName, &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "active-key"})
-		data := map[string]any{"systemPrompt": "Base prompt"}
+		data := map[string]any{"systemPrompt": fakePrompt("Base prompt")}
 		hooks.emit(t, sdk.EventBeforeAgentStart, host, data)
 		if state.defaultRuntimeAuth == nil || len(seen()) == 0 {
 			t.Fatalf("auth not cached: %v, requests %v", state.defaultRuntimeAuth, paths(seen()))

@@ -286,10 +286,10 @@ func levels(pairs ...string) ai.ThinkingLevelMap {
 	out := ai.ThinkingLevelMap{}
 	for i := 0; i < len(pairs); i += 2 {
 		if pairs[i+1] == "" {
-			out[ai.ThinkingLevel(pairs[i])] = nil
+			out[ai.ModelThinkingLevel(pairs[i])] = nil
 			continue
 		}
-		out[ai.ThinkingLevel(pairs[i])] = &pairs[i+1]
+		out[ai.ModelThinkingLevel(pairs[i])] = &pairs[i+1]
 	}
 	return out
 }

@@ -39,7 +39,7 @@ func Wrap(p *ai.ModelsProvider) *sdk.Provider {
 		out.BaseURL = &p.BaseURL
 	}
 	if p.FilterModels != nil {
-		out.FilterModels = func(wire []map[string]any, credential map[string]any) ([]map[string]any, error) {
+		out.FilterModels = func(wire []map[string]any, credential *sdk.Credential) ([]map[string]any, error) {
 			return filterModels(p, wire, credential)
 		}
 	}
@@ -82,19 +82,36 @@ func fromMap(in map[string]any, target any) error {
 	return json.Unmarshal(data, target)
 }
 
-func decodeCredential(in map[string]any) (*ai.Credential, error) {
+func decodeCredential(in *sdk.Credential) (*ai.Credential, error) {
 	if in == nil {
 		return nil, nil
 	}
 	var credential ai.Credential
-	if err := fromMap(in, &credential); err != nil {
+	if err := convert(in, &credential); err != nil {
 		return nil, fmt.Errorf("decode credential: %w", err)
 	}
 	return &credential, nil
 }
 
+// encodeCredential is the wire credential the host stores for a credential the provider returned.
+func encodeCredential(in ai.Credential) (*sdk.Credential, error) {
+	var out sdk.Credential
+	if err := convert(in, &out); err != nil {
+		return nil, fmt.Errorf("encode credential: %w", err)
+	}
+	return &out, nil
+}
+
+func convert(in, target any) error {
+	data, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
 // modelsCatalogRecord mirrors the unexported record of ai/models_catalog_codec.go:15, which is
-// the only chat-model JSON shape PiG defines (only DecodeModelsCatalog is exported).
+// the only chat-model JSON shape PiG defines (only DecodeModelsCatalog, DecodeStoredModel and EncodeStoredModel are exported).
 type modelsCatalogRecord struct {
 	Type                          ai.ModelType                     `json:"type,omitempty"`
 	ID                            string                           `json:"id"`
@@ -166,7 +183,14 @@ func decodeModel(wire map[string]any, providerID string) (*ai.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	models, err := ai.DecodeModelsCatalog([]json.RawMessage{data}, providerID)
+	decoded, known, err := ai.DecodeStoredModel(data)
+	if err != nil {
+		return nil, err
+	}
+	if !known {
+		return nil, fmt.Errorf("model %v is not a chat model of provider %q", wire["id"], providerID)
+	}
+	models, err := ai.DecodeModelsCatalog([]ai.AnyModel{decoded}, providerID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +217,7 @@ func streamModel(wire map[string]any) (*ai.Model, error) {
 // filterModels keeps the caller's own map for every model p keeps, so the host's pointer-identity
 // index match survives and fields the catalog record lacks stay on the map. A model p replaced
 // with a new value is encoded fresh and reported with index -1.
-func filterModels(p *ai.ModelsProvider, wire []map[string]any, credentialWire map[string]any) ([]map[string]any, error) {
+func filterModels(p *ai.ModelsProvider, wire []map[string]any, credentialWire *sdk.Credential) ([]map[string]any, error) {
 	credential, err := decodeCredential(credentialWire)
 	if err != nil {
 		return nil, err
@@ -247,7 +271,7 @@ func refreshModels(p *ai.ModelsProvider, in sdk.RefreshModelsContext) error {
 		signal = context.Background()
 	}
 	return p.RefreshModels(ai.RefreshModelsContext{
-		Credential: credential, Stored: stored, AllowNetwork: in.AllowNetwork, Force: in.Force, Signal: signal,
+		Credential: credential, Stored: stored, AllowNetwork: in.AllowNetwork, Force: in.Force, Signal: signal, BaseURL: in.BaseURL,
 		Publish: func(publication ai.ModelsPublication) (bool, error) {
 			wire := sdk.ModelsPublication{}
 			if publication.Persist != nil {

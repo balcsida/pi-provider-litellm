@@ -48,41 +48,21 @@ Besides the `LITELLM_*` variables and the `litellm` block of `settings.json`, pr
 for aliases). It is read as JSONC like PiG's own reader (BOM, `//` comments, trailing commas) and wins per field
 over `settings.json`; only providers are taken from it.
 
-## Known PiG 0.4.1 issues
+## Known PiG 0.5.1 issues
 
-### Fused builds and third-party Go modules
+### Requires PiG 0.5.1 or later
 
-`pig piglet build` cannot fuse a Go factory that depends on a third-party module
-([MichaelKinsy/PiG#196](https://github.com/MichaelKinsy/PiG/issues/196); a fix is offered in
-[MichaelKinsy/PiG#202](https://github.com/MichaelKinsy/PiG/pull/202)). This extension therefore depends only on
-the standard library, PiG and the SDK, and its login flows are implemented here rather than through a shared
-library.
-
-### `--validate-only`
-
-`pig install --validate-only` fails with `native provider registry is not bound` for this extension. PiG 0.4.1's
-validate host does not bind the native provider registry, and this extension registers one. Use
-`pig package validate ./pig` to validate the package, and a real load (`pig -e ...`) to prove the extension works.
-The same inspection host backs `pig login --list` and the CLI `pig login litellm`, which report
-`extension "litellm" inspection failed` on 0.4.1; configure credentials through the environment,
-`settings.json` or `models.json`, or log in inside a session, where the registry is bound.
-
-### Logging in inside a session
-
-On stock PiG 0.4.1, `/login litellm` offers only PiG's generic API-key prompt: the SSO flows (CLI SSO, PKCE,
-direct OIDC, pasted token) never appear, and the key is stored without the proxy URL. PiG records a native
-provider's registration without its account login method, answers a flow's `select` prompt with `Login cancelled`,
-and does not run a provider's own API-key login ([MichaelKinsy/PiG#201](https://github.com/MichaelKinsy/PiG/issues/201)).
-The fork branch `fix/native-provider-login` of `balcsida/PiG` fixes all of it without any change here; with that build the login smoke in `pig/tools/login-smoke` passes for CLI
-SSO, PKCE with refresh, pasted token and API key. Until PiG ships the fix, configure credentials through
-`LITELLM_API_KEY` and `LITELLM_BASE_URL`, `settings.json` or `models.json`.
+PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the SDK pin in the extension's `go.mod`, so
+a 0.4.1 host cannot load this extension. When the extension fails to build, `--list-models` exits 0 and prints only
+`No models available`; `-p` and `pig install --validate-only --json` report the build error. On stock 0.5.1,
+`/login litellm` offers the SSO flows.
 
 ### Reasoning models without an effort carrier crash model selection
 
 When discovery finds a reasoning model but no evidence of a transmissible effort level (for example a Claude route
 served over Chat Completions without `reasoning_effort_levels`), it emits a thinking-level map that denies every
-level, exactly as the TypeScript extension does. PiG 0.4.1 then panics while selecting that model
-(`coding/model.go:173`, `thinkingMaxLevelForEntry` indexes the last element of an empty list), whether through
+level, exactly as the TypeScript extension does. PiG 0.5.1 then panics while selecting that model
+(`coding/model.go:180`, `thinkingMaxLevelForEntry` indexes the last element of an empty list), whether through
 `--model` or `/model`. Pi tolerates the same model. Until PiG guards the empty list, pick a route that declares its
 effort levels, or route the model through the Messages API.
 

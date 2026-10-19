@@ -887,7 +887,7 @@ func TestHookDataKeysAndScoping(t *testing.T) {
 		host.setAuth(providerName, &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test", AllowInsecureHTTP: true})
 		resetSkillsCache()
 		var prompt string
-		for _, result := range hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": "Base prompt"}) {
+		for _, result := range hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("Base prompt")}) {
 			if updated, ok := result.(map[string]any); ok {
 				prompt, _ = updated["systemPrompt"].(string)
 			}
@@ -1006,7 +1006,7 @@ func TestBudgetWiring(t *testing.T) {
 
 	t.Run("before_agent_start still picks up a provider switch without model_select", func(t *testing.T) {
 		hooks, host := withAuth(t)
-		hooks.only(t, sdk.EventBeforeAgentStart, 0, host, map[string]any{"systemPrompt": ""})
+		hooks.only(t, sdk.EventBeforeAgentStart, 0, host, map[string]any{"systemPrompt": fakePrompt("")})
 		eventually(t, host, personal)
 		hooks.emit(t, sdk.EventSessionShutdown, host, nil)
 	})
@@ -1029,3 +1029,8 @@ func TestBudgetWiring(t *testing.T) {
 		}
 	})
 }
+
+// fakePrompt stands in for the *sdk.SystemPrompt a 0.5.0 host puts in before_agent_start data.
+type fakePrompt string
+
+func (p fakePrompt) Get() (string, error) { return string(p), nil }

@@ -399,7 +399,7 @@ func adaptPublicCatalogRecord(provider, catalogModelID string, record *catalog.P
 	case record != nil && record.ThinkingLevelMap != nil:
 		levels := make(ai.ThinkingLevelMap, len(record.ThinkingLevelMap))
 		for level, mapped := range record.ThinkingLevelMap {
-			levels[ai.ThinkingLevel(level)] = mapped
+			levels[ai.ModelThinkingLevel(level)] = mapped
 		}
 		resolution.ThinkingLevelMap = levels
 	case piCatalog != nil && piCatalog.ThinkingLevelMap != nil:

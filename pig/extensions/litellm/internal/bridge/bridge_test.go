@@ -273,7 +273,7 @@ func TestRefreshModelsPassThroughAndPublish(t *testing.T) {
 	var publications []sdk.ModelsPublication
 	force := true
 	err := p.RefreshModels(sdk.RefreshModelsContext{
-		Credential: map[string]any{"type": "api_key", "key": "k"}, Stored: stored, AllowNetwork: true, Force: &force, Signal: context.Background(),
+		Credential: sdk.NewCredential("type", "api_key", "key", "k"), Stored: stored, AllowNetwork: true, Force: &force, Signal: context.Background(),
 		Publish: func(pub sdk.ModelsPublication) (bool, error) {
 			publications = append(publications, pub)
 			if pub.Update != nil {
@@ -292,7 +292,7 @@ func TestRefreshModelsPassThroughAndPublish(t *testing.T) {
 		t.Fatalf("publications = %+v", publications)
 	}
 	var persisted ai.ModelsStoreEntry
-	if err := json.Unmarshal(publications[1].Persist, &persisted); err != nil || len(persisted.Models) != 1 || !strings.Contains(string(persisted.Models[0]), `"fetched"`) || persisted.CheckedAt == nil {
+	if err := json.Unmarshal(publications[1].Persist, &persisted); err != nil || len(persisted.Models) != 1 || !strings.Contains(string(mustEncodeStored(t, persisted.Models[0])), `"fetched"`) || persisted.CheckedAt == nil {
 		t.Fatalf("persist = %s (%v)", publications[1].Persist, err)
 	}
 	models, _ := p.GetModels()
@@ -338,4 +338,13 @@ func TestAuthResolve(t *testing.T) {
 	if err != nil || result == nil || result.Auth["apiKey"] != "sk-env" || *result.Source != "MOCK_KEY" {
 		t.Fatalf("resolve = %+v, %v", result, err)
 	}
+}
+
+func mustEncodeStored(t *testing.T, model ai.AnyModel) json.RawMessage {
+	t.Helper()
+	data, err := ai.EncodeStoredModel(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

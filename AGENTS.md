@@ -18,8 +18,9 @@
 
 - `pig/` holds the Go port for PiG (the Go reimplementation of Pi): the factory extension in `pig/extensions/litellm`,
   a mock LiteLLM proxy in `pig/tools/mockproxy`, the PiG package manifest and an example fused Piglet. Read
-  `pig/PORTING.md` before touching it; it records the design decisions, the port map, the conventions and the two
-  PiG 0.4.1 issues the port exposed. `pig/README.md` is the user-facing documentation.
+  `pig/PORTING.md` before touching it; it records the design decisions, the port map, the conventions and the PiG
+  0.5.1 issues that remain (the empty thinking-level crash, the SDK pin PiG ignores, a silent build failure).
+  `pig/README.md` is the user-facing documentation.
 - The Go module depends on `github.com/MichaelKinsy/PiG` and its `extensions/sdk` at the same version as the `pig`
   binary in use; bump both together.
 - Verify with `go test -race ./...` in `pig/extensions/litellm`, `pig package validate ./pig`, and the live smoke

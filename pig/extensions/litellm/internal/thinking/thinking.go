@@ -5,7 +5,7 @@ import "github.com/MichaelKinsy/PiG/ai"
 
 // Definition is one row of THINKING_LEVEL_DEFINITIONS: Pi level, LiteLLM effort value, support flag.
 type Definition struct {
-	Level  ai.ThinkingLevel
+	Level  ai.ModelThinkingLevel
 	Effort string
 	Flag   string
 }
@@ -22,7 +22,7 @@ var Definitions = []Definition{
 
 // Pi sends an omitted standard level as its own name. An omitted off sends no disable value
 // and omitted xhigh/max are unsupported, so those stay distinct.
-func implicit(level ai.ThinkingLevel) bool {
+func implicit(level ai.ModelThinkingLevel) bool {
 	switch level {
 	case ai.ThinkingMinimal, ai.ThinkingLow, ai.ThinkingMedium, ai.ThinkingHigh:
 		return true

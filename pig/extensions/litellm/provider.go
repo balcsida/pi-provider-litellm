@@ -66,7 +66,11 @@ func toAIModels(provider string, models []types.DiscoveredModel) ([]ai.AnyModel,
 		}
 		raw = append(raw, data)
 	}
-	return ai.DecodeModelsCatalog(raw, provider)
+	decoded, err := ai.DecodeStoredModels(raw)
+	if err != nil {
+		return nil, err
+	}
+	return ai.DecodeModelsCatalog(decoded, provider)
 }
 
 type proxyRootInfo struct{ root, canonical, hostname string }
@@ -299,7 +303,11 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 			// PiG persists models of every type; this provider only publishes chat models, and the
 			// policy helpers read chat-only fields.
 			records := make([]json.RawMessage, 0, len(refresh.Stored.Models))
-			for _, raw := range refresh.Stored.Models {
+			for _, storedModel := range refresh.Stored.Models {
+				raw, err := ai.EncodeStoredModel(storedModel)
+				if err != nil {
+					return err
+				}
 				if !isChatModelRecord(raw) {
 					continue
 				}
@@ -334,8 +342,12 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 				}
 				records = append(records, data)
 			}
+			decoded, err := ai.DecodeStoredModels(records)
+			if err != nil {
+				return err
+			}
 			entry := *refresh.Stored
-			entry.Models = records
+			entry.Models = decoded
 			stored = &entry
 		}
 		forced := refresh.Force != nil && *refresh.Force
