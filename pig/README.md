@@ -1,6 +1,6 @@
 # pig-provider-litellm
 
-Go port of the [LiteLLM provider extension](../README.md) for [PiG](https://github.com/MichaelKinsy/PiG). It
+Go port of the [LiteLLM provider extension](https://github.com/balcsida/pi-provider-litellm#readme) for [PiG](https://github.com/MichaelKinsy/PiG). It
 registers the same `litellm` native provider (plus aliases from settings and from the `LITELLM_PROVIDERS`,
 `LITELLM_PROVIDERS_JSON` and `LITELLM_PROVIDER_<NAME>_*` environment variables, as in the root README), discovers
 models from your LiteLLM proxy, and adds LiteLLM MCP, Skill Hub, budget status and Google ADC support.
@@ -8,16 +8,24 @@ models from your LiteLLM proxy, and adds LiteLLM MCP, Skill Hub, budget status a
 ## Relation to the TypeScript extension
 
 The TypeScript extension in `../src` is the specification; `extensions/litellm` ports its behavior (see
-[PORTING.md](PORTING.md)). Both use the same configuration, so one setup works for Pi and PiG:
+[PORTING.md](https://github.com/balcsida/pi-provider-litellm/blob/main/pig/PORTING.md)). Both use the same configuration, so one setup works for Pi and PiG:
 
 - the `litellm` settings block (`providers`, `mcp`, `budget`, `skills`),
 - every `LITELLM_*` environment variable,
 - the `auth.json` entries (`oauth` and `api_key`).
 
 PiG reads them from its own agent directory (`~/.pig/agent`, or `PIG_CODING_AGENT_DIR`) instead of Pi's. See the
-[root README](../README.md) for the settings reference.
+[root README](https://github.com/balcsida/pi-provider-litellm#readme) for the settings reference.
 
 ## Install
+
+Install from npm:
+
+```bash
+pig install npm:pig-provider-litellm
+```
+
+Or install from the repository:
 
 ```bash
 pig install 'git:https://github.com/balcsida/pi-provider-litellm.git#subdirectory=pig'
