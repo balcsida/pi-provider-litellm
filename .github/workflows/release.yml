@@ -45,32 +45,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - run: npm ci --ignore-scripts
-      # Each publish skips a version already on npm, so a release that failed
-      # between the two publishes (or before the GitHub release) can be rerun;
-      # npm refuses to publish the same version twice.
-      - name: Publish to npm
+      # A publish is skipped when its version is already on npm, so a release
+      # that failed between the two publishes (or before the GitHub release)
+      # can be rerun; npm refuses to publish the same version twice.
+      - name: Check npm for the release version
+        id: published
         shell: bash
         run: |
           set -euo pipefail
-          spec="pi-provider-litellm@${GITHUB_REF_NAME#v}"
-          if npm view "$spec" version >/dev/null 2>&1; then
-            echo "$spec is already on npm; skipping"
-          else
-            npm publish --access public --provenance
-          fi
+          version="${GITHUB_REF_NAME#v}"
+          for package in root=pi-provider-litellm pig=pig-provider-litellm; do
+            if npm view "${package#*=}@$version" version >/dev/null 2>&1; then
+              echo "${package%%=*}=true" >> "$GITHUB_OUTPUT"
+              echo "${package#*=}@$version is already on npm"
+            fi
+          done
+      - name: Publish to npm
+        if: steps.published.outputs.root != 'true'
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish PiG package to npm
-        shell: bash
+        if: steps.published.outputs.pig != 'true'
         working-directory: pig
-        run: |
-          set -euo pipefail
-          spec="pig-provider-litellm@${GITHUB_REF_NAME#v}"
-          if npm view "$spec" version >/dev/null 2>&1; then
-            echo "$spec is already on npm; skipping"
-          else
-            npm publish --access public --provenance
-          fi
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub release
