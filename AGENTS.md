@@ -181,7 +181,7 @@
 - The release workflow is tag-driven for `v*.*.*`; it publishes with `npm publish --access public --provenance` and creates a GitHub release.
 - Local release prep should keep `package.json`, `package-lock.json` and `pig/package.json` versions in sync, build `dist/`, run package checks, and create only local commits/tags unless the user explicitly overrides the no-push rule.
 - Verify released state with `gh release view <tag>` and `npm view pi-provider-litellm version dist-tags --json` and `npm view pig-provider-litellm version dist-tags --json` after the user pushes the tag, then replace the generated release notes (see Release Notes).
-- The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only. `pig/` publishes separately as `pig-provider-litellm` from the same tag, limited by its `files` list to `extensions`, `README.md` and `LICENSE`; `scripts/supply-chain-guard.ts` covers only the root package.
+- The npm package should stay limited to `src`, `README.md`, and `LICENSE`; builds are verification-only. `pig/` publishes separately as `pig-provider-litellm` from the same tag, limited by its `files` list to `extensions` (without its `_test.go` files), `README.md` and `LICENSE`; `scripts/supply-chain-guard.ts` covers only the root package.
 - `scripts/supply-chain-guard.ts` rejects install lifecycle scripts, runtime dependencies, non-registry specs, non-registry lockfile URLs, and unexpected package files, and requires every allowlisted source file to ship; update tests before changing that policy.
 
 ## Release Notes

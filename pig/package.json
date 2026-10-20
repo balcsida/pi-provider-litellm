@@ -5,6 +5,7 @@
   "license": "MIT",
   "files": [
     "extensions",
+    "!extensions/**/*_test.go",
     "README.md",
     "LICENSE"
   ],
