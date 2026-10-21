@@ -745,6 +745,10 @@ func Extension() *sdk.Extension {
 	definitions := getProviderDefinitions(settings)
 	state := newExtensionState(settings, definitions, newPolicyStore(filepath.Join(agentDir(), policiesFilename)))
 
+	// Before seeding: setupMCP starts the MCP access check, which overlaps seeding as in the TypeScript.
+	setupRefreshCommand(e, state)
+	setupHooks(sdkRegistrar{e, state}, state)
+
 	type seeded struct {
 		index  int
 		models []types.DiscoveredModel
@@ -769,7 +773,5 @@ func Extension() *sdk.Extension {
 		}
 	}
 
-	setupRefreshCommand(e, state)
-	setupHooks(sdkRegistrar{e, state}, state)
 	return e
 }

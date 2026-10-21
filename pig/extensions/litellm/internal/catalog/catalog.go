@@ -411,8 +411,8 @@ var (
 	backgroundInFlight = map[*refreshCall]struct{}{}
 )
 
-// Go runs fn on a goroutine that Drain waits for: every detached catalog fetch gets the shutdown hook as
-// its owner, although the fetch's own timeout, not that hook, ends it.
+// Go runs fn on a goroutine that Drain waits for: every detached request gets the shutdown hook as
+// its owner, although the request's own timeout, not that hook, ends it.
 func Go(fn func()) {
 	call := &refreshCall{done: make(chan struct{})}
 	backgroundMu.Lock()

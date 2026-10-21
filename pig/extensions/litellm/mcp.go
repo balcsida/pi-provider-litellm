@@ -23,6 +23,8 @@ import (
 	"time"
 
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
+
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/catalog"
 )
 
 // mcpTransport is the transport of the access check; nil means http.DefaultTransport. Tests inject one that
@@ -206,18 +208,23 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 		return false
 	}
 	response.Body.Close()
-	// The host opens its own session; end the one this check opened.
+	// The host opens its own session; end the one this check opened. Like the TypeScript `void fetch`, on its
+	// own budget and not waited for, so the answer costs one round trip; Drain waits for it at shutdown.
 	if session := response.Header.Get("mcp-session-id"); session != "" {
-		// On its own budget, as in the TypeScript, so a slow initialize cannot starve the cleanup.
-		closeCtx, cancelClose := context.WithTimeout(context.Background(), budget)
-		defer cancelClose()
-		if closing, err := http.NewRequestWithContext(closeCtx, http.MethodDelete, url, nil); err == nil {
-			closing.Header = headers.Clone()
-			closing.Header.Set("mcp-session-id", session)
+		closeHeaders := headers.Clone()
+		closeHeaders.Set("mcp-session-id", session)
+		catalog.Go(func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), budget)
+			defer cancelClose()
+			closing, err := http.NewRequestWithContext(closeCtx, http.MethodDelete, url, nil)
+			if err != nil {
+				return
+			}
+			closing.Header = closeHeaders
 			if closed, err := client.Do(closing); err == nil {
 				closed.Body.Close()
 			}
-		}
+		})
 	}
 	return response.StatusCode == http.StatusForbidden
 }
@@ -272,7 +279,7 @@ type earlyCheck struct {
 }
 
 // startChecks starts the access checks while the extension loads, as the TypeScript overlaps them with
-// seeding, so the first session_start does not wait for the proxy's round trips.
+// seeding (setupHooks runs before it), so the first session_start does not wait for the proxy's round trip.
 func (m *mcpSync) startChecks() {
 	if m.settingsErr != nil {
 		return
@@ -284,10 +291,10 @@ func (m *mcpSync) startChecks() {
 		}
 		check := &earlyCheck{identity: m.identity(config), done: make(chan struct{})}
 		m.early[definition.Name] = check
-		go func() {
+		catalog.Go(func() {
 			check.refused = mcpAccessRefused(definition, config.URL)
 			close(check.done)
-		}()
+		})
 	}
 }
 
