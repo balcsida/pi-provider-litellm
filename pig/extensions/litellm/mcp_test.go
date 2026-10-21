@@ -300,6 +300,36 @@ func TestMcpFirstSyncRunsWhenTheSessionStartsNotWhileTheExtensionLoads(t *testin
 	}
 }
 
+func TestMcpAccessCheckStartsWhileTheExtensionLoadsAndSessionStartUsesItsAnswer(t *testing.T) {
+	// wire, with the proxy configured and answering before the extension loads.
+	dir := hermeticAgentDir(t)
+	writeFileIn(t, dir, "settings.json", `{"litellm":{}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	sent := make(chan struct{}, 1)
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		sent <- struct{}{}
+		return noServersGranted(r)
+	})
+	parsed := readGlobalLiteLLMSettings()
+	hooks := &recordingHooks{}
+	setupHooks(hooks, newExtensionState(parsed, getProviderDefinitions(parsed), newPolicyStore(filepath.Join(dir, policiesFilename))))
+	host := newFakeHookHost()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no access check while the extension loads")
+	}
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	// session_start waited for the check started while loading, so its request is recorded.
+	if len(*checks) != 1 {
+		t.Fatalf("checks = %+v, want the one sent while loading", *checks)
+	}
+	want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, host.fakeRegistrar); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+}
+
 func TestMcpReportsABogusExposureAndKeepsTheExtensionLoaded(t *testing.T) {
 	hooks, _, host := wire(t, `{"litellm":{"mcp":{"exposure":"bogus"}}}`)
 	defaultEnv(t, "https://proxy.example.com")

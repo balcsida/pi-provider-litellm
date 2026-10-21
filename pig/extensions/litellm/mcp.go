@@ -52,6 +52,8 @@ type mcpSync struct {
 	mu       sync.Mutex
 	attempts map[string]*mcpAttempt
 	last     mcpRegistrar
+	// early holds each provider's access check started while the extension loads, for the first sync to use.
+	early map[string]*earlyCheck
 	// Headers can carry credentials, so a config is remembered as a keyed digest.
 	salt []byte
 }
@@ -61,7 +63,7 @@ func newMcpSync(state *extensionState, settingsRaw []byte) (*mcpSync, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	m := &mcpSync{state: state, attempts: map[string]*mcpAttempt{}, salt: salt}
+	m := &mcpSync{state: state, attempts: map[string]*mcpAttempt{}, early: map[string]*earlyCheck{}, salt: salt}
 	// The host validates exposure and toolExposure; an unusable value is reported when registering. The
 	// settings file is decoded again here because toolExposure patterns are ordered and the decoded map is not.
 	var top map[string]json.RawMessage
@@ -241,7 +243,7 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 	attempt := &mcpAttempt{identity: identity}
 	m.attempts[definition.Name] = attempt
 	m.mu.Unlock()
-	refused := m.settingsErr == nil && mcpAccessRefused(definition, config.URL)
+	refused := m.settingsErr == nil && m.accessRefused(definition, config.URL, identity)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.attempts[definition.Name] != attempt {
@@ -260,6 +262,46 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 		return
 	}
 	attempt.registered = true
+}
+
+// earlyCheck is an access check running ahead of the first sync; refused is set before done closes.
+type earlyCheck struct {
+	identity string
+	done     chan struct{}
+	refused  bool
+}
+
+// startChecks starts the access checks while the extension loads, as the TypeScript overlaps them with
+// seeding, so the first session_start does not wait for the proxy's round trips.
+func (m *mcpSync) startChecks() {
+	if m.settingsErr != nil {
+		return
+	}
+	for _, definition := range m.state.definitions {
+		config := m.config(definition)
+		if config == nil {
+			continue
+		}
+		check := &earlyCheck{identity: m.identity(config), done: make(chan struct{})}
+		m.early[definition.Name] = check
+		go func() {
+			check.refused = mcpAccessRefused(definition, config.URL)
+			close(check.done)
+		}()
+	}
+}
+
+// accessRefused answers from the early check when it was for this config, and asks the proxy otherwise.
+func (m *mcpSync) accessRefused(definition providerDefinition, url, identity string) bool {
+	m.mu.Lock()
+	check := m.early[definition.Name]
+	delete(m.early, definition.Name)
+	m.mu.Unlock()
+	if check != nil && check.identity == identity {
+		<-check.done
+		return check.refused
+	}
+	return mcpAccessRefused(definition, url)
 }
 
 // lastRegistrar is the registrar of the latest sync, nil before the first one.
@@ -289,6 +331,7 @@ func setupMCP(e hookRegistrar, state *extensionState) {
 		reportDiagnostic("LiteLLM MCP: " + err.Error())
 		return
 	}
+	m.startChecks()
 	// A login drops the server before it can store a new credential, since the host reads the credential per request.
 	// The drop reaches the host through the context of the session that last synced.
 	state.mu.Lock()
