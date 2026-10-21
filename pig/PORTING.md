@@ -108,6 +108,10 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
    `$PIG_CODING_AGENT_DIR/models.json`. PiG composes that block over the registered provider itself, so this proves
    its composition keeps each model's route; it stands in for the Vitest case that drives Pi's real ModelRuntime.
 
+   To measure startup against a slow proxy, start the mock with `-latency 300ms` and compare the wall time of
+   `pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"` between two builds. `PIG_STARTUP_TRACE=1`
+   prints the host's startup steps, but `session_start` is not one of them, so wall time is the number to compare.
+
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
 5. Login inside a session: `pig/tools/login-smoke/login-smoke.mts` drives `/login litellm` through a real terminal
