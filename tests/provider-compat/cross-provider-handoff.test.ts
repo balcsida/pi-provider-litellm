@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { anthropicTextResponse, assistant, claudeRoute, createCompatibilityHarness, user } from "./helpers.js";
 
 describe("native cross-provider handoff compatibility", () => {
-  it("replays foreign thinking, tool calls, and tool results into LiteLLM", async () => {
+  it("drops foreign thinking and replays tool calls and tool results into LiteLLM", async () => {
     const { models, model, foreignModel, requests } = await createCompatibilityHarness();
     const message = await models
       .streamSimple(model, {
@@ -40,7 +40,7 @@ describe("native cross-provider handoff compatibility", () => {
       { role: "user", content: "Start elsewhere" },
       expect.objectContaining({
         role: "assistant",
-        content: "look up 714",
+        content: null,
         tool_calls: [
           { id: "foreign_call", type: "function", function: { name: "lookup", arguments: '{"value":714}' } },
         ],
@@ -50,7 +50,7 @@ describe("native cross-provider handoff compatibility", () => {
     ]);
   });
 
-  it("characterizes foreign OpenAI reasoning replay into native Messages", async () => {
+  it("drops foreign OpenAI reasoning on replay into native Messages", async () => {
     const { models, model, foreignModel, requests, respond } = await createCompatibilityHarness(
       claudeRoute("anthropic", "anthropic/claude-sonnet-4-6"),
     );
@@ -70,13 +70,10 @@ describe("native cross-provider handoff compatibility", () => {
 
     expect(message.content).toEqual([{ type: "text", text: "continued" }]);
     expect(model.api).toBe("anthropic-messages");
-    expect(requests[0]?.messages).toContainEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "foreign thought" }],
-    });
+    expect(requests[0]?.messages).not.toContainEqual(expect.objectContaining({ role: "assistant" }));
   });
 
-  it("replays a LiteLLM transcript into another OpenAI-compatible provider", async () => {
+  it("replays a LiteLLM transcript into another OpenAI-compatible provider without its thinking", async () => {
     const { models, model, foreignModel, foreignRequests } = await createCompatibilityHarness();
     const message = await models
       .streamSimple(foreignModel, {
@@ -108,7 +105,7 @@ describe("native cross-provider handoff compatibility", () => {
       { role: "user", content: "Start in LiteLLM" },
       expect.objectContaining({
         role: "assistant",
-        content: "call lookup",
+        content: null,
         tool_calls: [
           { id: "litellm_call", type: "function", function: { name: "lookup", arguments: '{"value":887}' } },
         ],
