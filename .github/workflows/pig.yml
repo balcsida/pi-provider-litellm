@@ -50,7 +50,7 @@ jobs:
         run: go test ./...
 
       - name: Install PiG
-        run: go install github.com/MichaelKinsy/PiG/cmd/pig@v0.5.1
+        run: go install github.com/MichaelKinsy/PiG/cmd/pig@v0.5.2
 
       - name: Validate package
         run: pig package validate ./pig --json

@@ -11,7 +11,7 @@ pig/
 ├── PORTING.md                      this brief
 ├── package.json                    PiG package manifest (phase 6)
 └── extensions/litellm/             Go module github.com/balcsida/pi-provider-litellm/pig/extensions/litellm
-    ├── go.mod                      requires github.com/MichaelKinsy/PiG v0.5.1 and .../extensions/sdk v0.5.1
+    ├── go.mod                      requires github.com/MichaelKinsy/PiG v0.5.2 and .../extensions/sdk v0.5.2
     ├── extension.go                factory: func Extension() *sdk.Extension      ← src/index.ts
     ├── provider.go                 LiteLLM native provider                       ← src/provider.ts
     ├── models_store.go             stored-catalog seed                           ← src/models-store.ts
@@ -89,7 +89,7 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
 ## Verification ladder
 
 1. `go test ./...` in `pig/extensions/litellm`.
-2. `pig install --validate-only --json ./pig/extensions/litellm` proves the factory builds and registers: PiG 0.5.1
+2. `pig install --validate-only --json ./pig/extensions/litellm` proves the factory builds and registers: PiG 0.5.2
    reports `"valid": true` and `"registered": true`. `pig package validate ./pig --json` validates the Go member
    too.
 3. Live smoke against the mock proxy in `pig/tools/mockproxy` (`go run . -key test-key -addr 127.0.0.1:48417`):
@@ -120,7 +120,8 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
    ```
 
    `LOGIN_SMOKE_MODE` is `cli`, `pkce`, `paste` or `apikey`; the mock's `-sso` mode must match the first three.
-   Stock PiG 0.5.1 passes this step in all four modes.
+   Stock PiG 0.5.2 passes this step in all four modes. On a desktop PiG also opens the authorize URL in the browser;
+   when the browser's callback lands first, the `pkce` driver's own fetch fails with `ECONNREFUSED`, so run it again.
 
 ## Status
 
@@ -138,7 +139,7 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   stored record as the restore failure, because Go's `EnrichCachedModel` cannot fail where the TypeScript one throws.
   The typed store now rejects a malformed record on the host side before the extension sees it, so only
   extension-only fields (`litellmPolicy` and the like) can still fail there.
-- PiG 0.5.1 emits `model_select` from `coding/session.go`, with `data["model"]`, `data["previousModel"]` and
+- PiG 0.5.2 emits `model_select` from `coding/session.go`, with `data["model"]`, `data["previousModel"]` and
   `data["source"]`. The budget status line follows the provider in `data["model"]["provider"]`;
   `before_agent_start`, `turn_end` and `session_start` remain as a fallback through `ctx.ModelProvider()` for a host
   that does not emit it.
@@ -157,16 +158,17 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   `GenerateImages` nor `GetAllModels`, so a PiG native provider cannot surface image models. The Go discovery keeps
   withholding those groups like any other non-chat mode; port `src/images.ts` once the SDK exposes both callbacks.
 
-## Known PiG 0.5.1 issues
+## Known PiG 0.5.2 issues
 
 - A reasoning model whose `thinkingLevelMap` denies every level (the TypeScript's `NO_TRANSMISSIBLE_LEVELS`, emitted
   when no effort carrier is evidenced, for example a Claude route on Chat Completions without
-  `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:180` (`thinkingMaxLevelForEntry`) indexes
+  `reasoning_effort_levels`) crashes PiG at model selection: `coding/model.go:175` (`thinkingMaxLevelForEntry`) indexes
   the last element of the empty list `ai.GetSupportedThinkingLevels` returns. Pi tolerates the same model. The fix
   belongs in PiG (return `""` when the list is empty); the extension deliberately keeps the TypeScript semantics rather
   than inventing a level.
-- PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the `go.mod` SDK pin of the extension, so
-  this extension needs PiG 0.5.1 or later; a 0.4.1 host cannot load it.
+- PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the `go.mod` SDK pin of the extension.
+  SDK 0.5.2's `ModelRegistry.Find` also returns an error, so this extension needs PiG 0.5.2 or later; a 0.5.1 host
+  cannot load it.
 - When the extension fails to build, `--list-models` exits 0 and prints only `No models available`, while `-p` and
   `pig install --validate-only --json` report the build error.
 - Fixed in 0.5.1: `/login litellm` offers the login flows under their `loginLabel`, answers `select` prompts and runs

@@ -94,7 +94,9 @@ func (h sdkHost) GetSessionID() (string, error)   { return h.ctx.GetSessionID() 
 func (h sdkHost) RequestContext() context.Context { return requestContext{h.ctx} }
 func (h sdkHost) UnregisterMcpServer(name string) { h.ctx.UnregisterMcpServer(name) }
 func (h sdkHost) FindModel(provider, modelID string) map[string]any {
-	return h.ctx.ModelRegistry().Find(provider, modelID)
+	// A host failure reads as an unknown model, as it did before SDK 0.5.2's Find returned the error.
+	found, _ := h.ctx.ModelRegistry().Find(provider, modelID)
+	return found
 }
 func (h sdkHost) RegisterMcpServer(name string, config sdk.McpServerConfig) error {
 	return h.ctx.RegisterMcpServer(name, config)
