@@ -3,6 +3,7 @@ package litellm
 // Ports tests/mcp-server.test.ts ("LiteLLM MCP server registration") as unit tests of mcpSync.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +13,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
+
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/catalog"
 )
 
 // fakeRegistrar records the servers the way the host holds them.
@@ -300,6 +304,87 @@ func TestMcpFirstSyncRunsWhenTheSessionStartsNotWhileTheExtensionLoads(t *testin
 	}
 }
 
+func TestMcpAccessCheckStartsWhileTheExtensionLoadsAndSessionStartUsesItsAnswer(t *testing.T) {
+	// wire, with the proxy configured and answering before the extension loads.
+	dir := hermeticAgentDir(t)
+	writeFileIn(t, dir, "settings.json", `{"litellm":{}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	sent := make(chan struct{}, 1)
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		sent <- struct{}{}
+		return noServersGranted(r)
+	})
+	parsed := readGlobalLiteLLMSettings()
+	hooks := &recordingHooks{}
+	setupHooks(hooks, newExtensionState(parsed, getProviderDefinitions(parsed), newPolicyStore(filepath.Join(dir, policiesFilename))))
+	host := newFakeHookHost()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no access check while the extension loads")
+	}
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	// session_start waited for the check started while loading, so its request is recorded.
+	if len(*checks) != 1 {
+		t.Fatalf("checks = %+v, want the one sent while loading", *checks)
+	}
+	want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, host.fakeRegistrar); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+}
+
+func TestMcpSessionShutdownCancelsAnUnusedAccessCheckStartedWhileLoadingAndWaitsForIt(t *testing.T) {
+	// wire, with the proxy configured before the extension loads.
+	dir := hermeticAgentDir(t)
+	writeFileIn(t, dir, "settings.json", `{"litellm":{}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	first := make(chan struct{}, 1)
+	first <- struct{}{}
+	sent := make(chan struct{})
+	ended := make(chan error, 1)
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-first:
+		default:
+			return noServersGranted(r)
+		}
+		// The check started while loading is still unanswered when the session ends.
+		close(sent)
+		<-r.Context().Done()
+		ended <- r.Context().Err()
+		return nil, r.Context().Err()
+	})
+	parsed := readGlobalLiteLLMSettings()
+	hooks := &recordingHooks{}
+	setupHooks(hooks, newExtensionState(parsed, getProviderDefinitions(parsed), newPolicyStore(filepath.Join(dir, policiesFilename))))
+	host := newFakeHookHost()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no access check while the extension loads")
+	}
+	hooks.emit(t, sdk.EventSessionShutdown, host, nil)
+	// Its own budget had seconds left: shutdown cancelled it and waited for it to end.
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the check ended with %v, want it cancelled", err)
+		}
+	default:
+		t.Fatal("session_shutdown returned while the access check was still running")
+	}
+	// The next session asks the proxy itself rather than taking the cancelled check for an answer.
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	if len(*checks) != 2 {
+		t.Fatalf("checks = %+v, want the cancelled one and a new one", *checks)
+	}
+	want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, host.fakeRegistrar); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+}
+
 func TestMcpReportsABogusExposureAndKeepsTheExtensionLoaded(t *testing.T) {
 	hooks, _, host := wire(t, `{"litellm":{"mcp":{"exposure":"bogus"}}}`)
 	defaultEnv(t, "https://proxy.example.com")
@@ -371,6 +456,7 @@ type mcpCheck struct {
 func mcpProxy(t *testing.T, answer func(*http.Request) (*http.Response, error)) *[]mcpCheck {
 	t.Helper()
 	checks := &[]mcpCheck{}
+	var mu sync.Mutex
 	previous := mcpTransport
 	mcpTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body []byte
@@ -378,11 +464,25 @@ func mcpProxy(t *testing.T, answer func(*http.Request) (*http.Response, error)) 
 			body, _ = io.ReadAll(r.Body)
 		}
 		deadline, _ := r.Context().Deadline()
+		mu.Lock()
 		*checks = append(*checks, mcpCheck{r.Method, r.URL.String(), string(body), r.Header.Clone(), deadline})
+		mu.Unlock()
 		return answer(r)
 	})
+	// Registered last so it runs first: a detached DELETE must not outlive the transport it uses.
 	t.Cleanup(func() { mcpTransport = previous })
+	t.Cleanup(func() { drainDetached(t) })
 	return checks
+}
+
+// drainDetached waits for the requests the extension detaches, such as the check's cleanup DELETE.
+func drainDetached(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := catalog.Drain(ctx); err != nil {
+		t.Fatalf("detached requests did not finish: %v", err)
+	}
 }
 
 func mcpAnswer(status int, headers map[string]string) (*http.Response, error) {
@@ -431,6 +531,7 @@ func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheChe
 	if got := mcpJSON(t, f); got != want {
 		t.Fatalf("servers = %s, want %s", got, want)
 	}
+	drainDetached(t)
 	if len(*checks) != 2 {
 		t.Fatalf("checks = %+v", *checks)
 	}
@@ -447,6 +548,54 @@ func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheChe
 	// The cleanup runs on its own budget, so a slow initialize cannot starve it.
 	if !closing.deadline.After(check.deadline) {
 		t.Fatalf("close deadline %v is not after the check's %v", closing.deadline, check.deadline)
+	}
+}
+
+func TestMcpSyncDoesNotWaitForTheCleanupDeleteOfTheCheckSession(t *testing.T) {
+	_, _, m := mcpFixture(t, "")
+	release := make(chan struct{})
+	deleting := make(chan struct{})
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodDelete {
+			close(deleting)
+			<-release
+			return mcpAnswer(200, nil)
+		}
+		return mcpAnswer(200, map[string]string{"mcp-session-id": "check-session"})
+	})
+	released := false
+	releaseDelete := func() {
+		if !released {
+			released = true
+			close(release)
+		}
+	}
+	t.Cleanup(releaseDelete) // runs before mcpProxy's drain, so a failed assertion cannot leave the DELETE blocked
+	defaultEnv(t, "https://proxy.example.com")
+	f := newFakeRegistrar()
+	synced := make(chan struct{})
+	go func() {
+		m.syncAll(f)
+		close(synced)
+	}()
+	select {
+	case <-synced:
+	case <-time.After(3 * time.Second):
+		releaseDelete()
+		t.Fatal("syncAll waited for the blocked DELETE")
+	}
+	if _, ok := f.servers["litellm"]; !ok {
+		t.Fatalf("servers = %s", mcpJSON(t, f))
+	}
+	select {
+	case <-deleting:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the detached DELETE was never sent")
+	}
+	releaseDelete()
+	drainDetached(t)
+	if len(*checks) != 2 {
+		t.Fatalf("checks = %+v", *checks)
 	}
 }
 

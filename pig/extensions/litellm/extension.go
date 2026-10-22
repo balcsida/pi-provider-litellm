@@ -46,6 +46,7 @@ type extensionState struct {
 	loginGeneration     int
 	networkAttempts     map[string]int
 	onLoginStart        []func(providerDefinition)
+	onShutdown          []func() // cancel what a setup function left running, before session_shutdown drains it
 	warnedFallbackRoute map[string]bool
 
 	// MCP message buffering: Pi starts the terminal before supplying a context.
@@ -561,8 +562,13 @@ func setupSessionState(e hookRegistrar, s *extensionState) {
 	e.OnEvent(sdk.EventSessionShutdown, func(hookHost, map[string]any) (any, error) {
 		s.mu.Lock()
 		s.ui, s.sessionStarted, s.pendingMessages = nil, false, nil
+		stops := append([]func(){}, s.onShutdown...)
 		s.mu.Unlock()
-		// The detached public-catalog fetches get the same bounded drain as the budget polls.
+		for _, stop := range stops {
+			stop()
+		}
+		// The detached requests (public-catalog fetches, MCP access checks) get the same bounded drain as the
+		// budget polls.
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainBudget)
 		defer cancel()
 		_ = catalog.Drain(ctx)
@@ -745,6 +751,10 @@ func Extension() *sdk.Extension {
 	definitions := getProviderDefinitions(settings)
 	state := newExtensionState(settings, definitions, newPolicyStore(filepath.Join(agentDir(), policiesFilename)))
 
+	// Before seeding: setupMCP starts the MCP access check, which overlaps seeding as in the TypeScript.
+	setupRefreshCommand(e, state)
+	setupHooks(sdkRegistrar{e, state}, state)
+
 	type seeded struct {
 		index  int
 		models []types.DiscoveredModel
@@ -769,7 +779,5 @@ func Extension() *sdk.Extension {
 		}
 	}
 
-	setupRefreshCommand(e, state)
-	setupHooks(sdkRegistrar{e, state}, state)
 	return e
 }

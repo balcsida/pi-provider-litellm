@@ -108,6 +108,10 @@ are taken from it: the native `providers.litellm` slot and `litellm.providers.<n
    `$PIG_CODING_AGENT_DIR/models.json`. PiG composes that block over the registered provider itself, so this proves
    its composition keeps each model's route; it stands in for the Vitest case that drives Pi's real ModelRuntime.
 
+   To measure startup against a slow proxy, start the mock with `-latency 300ms` and compare the wall time of
+   `pig -e ./pig/extensions/litellm --model litellm/mock-chat -p "say hi"` between two builds. `PIG_STARTUP_TRACE=1`
+   prints the host's startup steps, but `session_start` is not one of them, so wall time is the number to compare.
+
 4. `pig piglet build pig/litellm-example.yaml --format binary --out /tmp/pig-litellm-bin` fuses the extension into a
    PiG binary; the build's process-hazard vet must pass, and the binary must pass step 3 unchanged.
 5. Login inside a session: `pig/tools/login-smoke/login-smoke.mts` drives `/login litellm` through a real terminal
@@ -147,6 +151,11 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   queues the declaration and the host validates it while loading, so a refused config (`mcp.exposure: "bogus"`)
   would fail the whole extension load. `sdk.Context.RegisterMcpServer` returns the host's error, which is reported
   once through `notifyMcp`, and the registered server connects through `mcp_servers_change`.
+  The access check itself starts while the factory runs, before seeding, and the first sync (the one at
+  `session_start`) uses its answer. The early checks and the check's cleanup `DELETE` run detached through
+  `catalog.Go`, and session shutdown drains them together with the catalog fetches. Shutdown first cancels the
+  early checks no sync has used, so the next session asks again; the `DELETE` keeps its own timeout, because
+  cancelling it would leave open the session the proxy opened for the check.
 - Handlers and setup functions depend on two narrow unexported interfaces in `extension.go`, `hookRegistrar`
   (`OnEvent`, `Command`, `RegisterTool`; `sdkRegistrar` adapts `*sdk.Extension`) and `hookHost` (the `sdk.Context`
   methods the handlers use; `sdkHost` adapts `sdk.Context`), so the wiring tests register into a recording fake and

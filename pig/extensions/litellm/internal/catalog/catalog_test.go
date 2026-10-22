@@ -300,3 +300,29 @@ func TestDrain_WaitsForStaleCacheRefresh(t *testing.T) {
 		t.Fatalf("idle Drain = %v", err)
 	}
 }
+
+func TestDrain_WaitsForGoroutinesStartedWhileItWaits(t *testing.T) {
+	release, finish := make(chan struct{}), make(chan struct{})
+	// As an MCP access check starts the DELETE that ends the session it opened.
+	Go(func() {
+		<-release
+		Go(func() { <-finish })
+	})
+	drained := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		drained <- Drain(ctx)
+	}()
+	time.Sleep(20 * time.Millisecond) // Drain lists the first goroutine before it starts the second
+	close(release)
+	select {
+	case err := <-drained:
+		t.Fatalf("Drain = %v while the goroutine started during the drain was running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
+	if err := <-drained; err != nil {
+		t.Fatalf("Drain = %v", err)
+	}
+}

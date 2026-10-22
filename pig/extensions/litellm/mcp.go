@@ -23,6 +23,8 @@ import (
 	"time"
 
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
+
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/catalog"
 )
 
 // mcpTransport is the transport of the access check; nil means http.DefaultTransport. Tests inject one that
@@ -52,6 +54,8 @@ type mcpSync struct {
 	mu       sync.Mutex
 	attempts map[string]*mcpAttempt
 	last     mcpRegistrar
+	// early holds each provider's access check started while the extension loads, for the first sync to use.
+	early map[string]*earlyCheck
 	// Headers can carry credentials, so a config is remembered as a keyed digest.
 	salt []byte
 }
@@ -61,7 +65,7 @@ func newMcpSync(state *extensionState, settingsRaw []byte) (*mcpSync, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	m := &mcpSync{state: state, attempts: map[string]*mcpAttempt{}, salt: salt}
+	m := &mcpSync{state: state, attempts: map[string]*mcpAttempt{}, early: map[string]*earlyCheck{}, salt: salt}
 	// The host validates exposure and toolExposure; an unusable value is reported when registering. The
 	// settings file is decoded again here because toolExposure patterns are ordered and the decoded map is not.
 	var top map[string]json.RawMessage
@@ -149,8 +153,8 @@ func (m *mcpSync) dropLocked(registrar mcpRegistrar, definition providerDefiniti
 // mcpAccessRefused is mcpAccessRefused. LiteLLM 1.102.0 and later answer `initialize` with 403 when the key
 // has no MCP servers granted, and a host warns at every start about a server that fails to connect. Asking
 // first lets such a server be registered disabled: the host neither connects to it nor warns, and the user
-// can enable it once servers are granted.
-func mcpAccessRefused(definition providerDefinition, url string) bool {
+// can enable it once servers are granted. Ending ctx ends the check, which then counts as not refused.
+func mcpAccessRefused(ctx context.Context, definition providerDefinition, url string) bool {
 	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
 	// The check must send the credential the host will send. Like seeding, it runs no key helper and mints
 	// no ADC token, and resolving without them would fall through to another key.
@@ -160,7 +164,7 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 		return false
 	}
 	budget := time.Duration(seedTimeoutMsBudget()) * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	var apiKey, root string
 	if stored != nil && stored.Type == "oauth" {
@@ -204,18 +208,24 @@ func mcpAccessRefused(definition providerDefinition, url string) bool {
 		return false
 	}
 	response.Body.Close()
-	// The host opens its own session; end the one this check opened.
+	// The host opens its own session; end the one this check opened. Like the TypeScript `void fetch`, on its
+	// own budget and not waited for, so the answer costs one round trip; Drain waits for it at shutdown. Not
+	// on ctx: a check cancelled at shutdown must still close the session the proxy opened for it.
 	if session := response.Header.Get("mcp-session-id"); session != "" {
-		// On its own budget, as in the TypeScript, so a slow initialize cannot starve the cleanup.
-		closeCtx, cancelClose := context.WithTimeout(context.Background(), budget)
-		defer cancelClose()
-		if closing, err := http.NewRequestWithContext(closeCtx, http.MethodDelete, url, nil); err == nil {
-			closing.Header = headers.Clone()
-			closing.Header.Set("mcp-session-id", session)
+		closeHeaders := headers.Clone()
+		closeHeaders.Set("mcp-session-id", session)
+		catalog.Go(func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), budget)
+			defer cancelClose()
+			closing, err := http.NewRequestWithContext(closeCtx, http.MethodDelete, url, nil)
+			if err != nil {
+				return
+			}
+			closing.Header = closeHeaders
 			if closed, err := client.Do(closing); err == nil {
 				closed.Body.Close()
 			}
-		}
+		})
 	}
 	return response.StatusCode == http.StatusForbidden
 }
@@ -241,7 +251,7 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 	attempt := &mcpAttempt{identity: identity}
 	m.attempts[definition.Name] = attempt
 	m.mu.Unlock()
-	refused := m.settingsErr == nil && mcpAccessRefused(definition, config.URL)
+	refused := m.settingsErr == nil && m.accessRefused(definition, config.URL, identity)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.attempts[definition.Name] != attempt {
@@ -260,6 +270,57 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 		return
 	}
 	attempt.registered = true
+}
+
+// earlyCheck is an access check running ahead of the first sync; refused is set before done closes.
+type earlyCheck struct {
+	identity string
+	done     chan struct{}
+	refused  bool
+}
+
+// startChecks starts the access checks while the extension loads, as the TypeScript overlaps them with
+// seeding (setupHooks runs before it), so the first session_start does not wait for the proxy's round trip.
+// Session shutdown cancels the checks no sync has used, then drains them.
+func (m *mcpSync) startChecks() {
+	if m.settingsErr != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	for _, definition := range m.state.definitions {
+		config := m.config(definition)
+		if config == nil {
+			continue
+		}
+		check := &earlyCheck{identity: m.identity(config), done: make(chan struct{})}
+		m.early[definition.Name] = check
+		catalog.Go(func() {
+			check.refused = mcpAccessRefused(ctx, definition, config.URL)
+			close(check.done)
+		})
+	}
+	m.state.mu.Lock()
+	m.state.onShutdown = append(m.state.onShutdown, func() {
+		// A later sync asks the proxy itself rather than take a cancelled check for an answer.
+		m.mu.Lock()
+		clear(m.early)
+		m.mu.Unlock()
+		cancel()
+	})
+	m.state.mu.Unlock()
+}
+
+// accessRefused answers from the early check when it was for this config, and asks the proxy otherwise.
+func (m *mcpSync) accessRefused(definition providerDefinition, url, identity string) bool {
+	m.mu.Lock()
+	check := m.early[definition.Name]
+	delete(m.early, definition.Name)
+	m.mu.Unlock()
+	if check != nil && check.identity == identity {
+		<-check.done
+		return check.refused
+	}
+	return mcpAccessRefused(context.Background(), definition, url)
 }
 
 // lastRegistrar is the registrar of the latest sync, nil before the first one.
@@ -289,6 +350,7 @@ func setupMCP(e hookRegistrar, state *extensionState) {
 		reportDiagnostic("LiteLLM MCP: " + err.Error())
 		return
 	}
+	m.startChecks()
 	// A login drops the server before it can store a new credential, since the host reads the credential per request.
 	// The drop reaches the host through the context of the session that last synced.
 	state.mu.Lock()

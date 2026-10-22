@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	addr   = flag.String("addr", "127.0.0.1:0", "listen address")
-	key    = flag.String("key", "", "required bearer token")
-	models = flag.String("models", "", "path to JSON models file (default built-in)")
-	dump   = flag.Bool("dump", false, "detailed request/response logging")
+	addr    = flag.String("addr", "127.0.0.1:0", "listen address")
+	key     = flag.String("key", "", "required bearer token")
+	models  = flag.String("models", "", "path to JSON models file (default built-in)")
+	dump    = flag.Bool("dump", false, "detailed request/response logging")
+	latency = flag.Duration("latency", 0, "delay before every response, to measure startup against a slow proxy")
 )
 
 type ModelInfo struct {
@@ -399,6 +400,13 @@ func main() {
 	var handler http.Handler = mux
 	if *dump {
 		handler = &dumpMiddleware{handler: mux}
+	}
+	if *latency > 0 {
+		inner := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(*latency)
+			inner.ServeHTTP(w, r)
+		})
 	}
 
 	listener, err := net.Listen("tcp", *addr)
