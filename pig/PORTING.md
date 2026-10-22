@@ -153,8 +153,9 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   once through `notifyMcp`, and the registered server connects through `mcp_servers_change`.
   The access check itself starts while the factory runs, before seeding, and the first sync (the one at
   `session_start`) uses its answer. The early checks and the check's cleanup `DELETE` run detached through
-  `catalog.Go`: each is bounded by its own timeout rather than cancelled at shutdown, and session shutdown drains
-  them together with the catalog fetches.
+  `catalog.Go`, and session shutdown drains them together with the catalog fetches. Shutdown first cancels the
+  early checks no sync has used, so the next session asks again; the `DELETE` keeps its own timeout, because
+  cancelling it would leave open the session the proxy opened for the check.
 - Handlers and setup functions depend on two narrow unexported interfaces in `extension.go`, `hookRegistrar`
   (`OnEvent`, `Command`, `RegisterTool`; `sdkRegistrar` adapts `*sdk.Extension`) and `hookHost` (the `sdk.Context`
   methods the handlers use; `sdkHost` adapts `sdk.Context`), so the wiring tests register into a recording fake and

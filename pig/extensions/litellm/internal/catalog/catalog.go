@@ -412,7 +412,7 @@ var (
 )
 
 // Go runs fn on a goroutine that Drain waits for: every detached request gets the shutdown hook as
-// its owner, although the request's own timeout, not that hook, ends it.
+// its owner. Go cancels nothing; fn's own context or timeout ends it.
 func Go(fn func()) {
 	call := &refreshCall{done: make(chan struct{})}
 	backgroundMu.Lock()
@@ -437,23 +437,27 @@ func backgroundRefresh(ctx context.Context, key string, options LoadPublicCatalo
 	Go(func() { refreshCatalog(ctx, key, options) })
 }
 
-// Drain waits for the fetches Go started, returning ctx.Err() if ctx ends first. The extension calls it
-// on session shutdown.
+// Drain waits for the goroutines Go started, including those started while it waits (an MCP access
+// check starts the DELETE that ends its session), returning ctx.Err() if ctx ends first. The extension
+// calls it on session shutdown.
 func Drain(ctx context.Context) error {
-	backgroundMu.Lock()
-	pending := make([]*refreshCall, 0, len(backgroundInFlight))
-	for call := range backgroundInFlight {
-		pending = append(pending, call)
-	}
-	backgroundMu.Unlock()
-	for _, call := range pending {
+	for {
+		var next *refreshCall
+		backgroundMu.Lock()
+		for call := range backgroundInFlight {
+			next = call
+			break
+		}
+		backgroundMu.Unlock()
+		if next == nil {
+			return nil
+		}
 		select {
-		case <-call.done:
+		case <-next.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	return nil
 }
 
 type loaded struct{ catalog modelsDevCatalog }

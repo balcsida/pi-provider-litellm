@@ -334,6 +334,57 @@ func TestMcpAccessCheckStartsWhileTheExtensionLoadsAndSessionStartUsesItsAnswer(
 	}
 }
 
+func TestMcpSessionShutdownCancelsAnUnusedAccessCheckStartedWhileLoadingAndWaitsForIt(t *testing.T) {
+	// wire, with the proxy configured before the extension loads.
+	dir := hermeticAgentDir(t)
+	writeFileIn(t, dir, "settings.json", `{"litellm":{}}`)
+	defaultEnv(t, "https://proxy.example.com")
+	first := make(chan struct{}, 1)
+	first <- struct{}{}
+	sent := make(chan struct{})
+	ended := make(chan error, 1)
+	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-first:
+		default:
+			return noServersGranted(r)
+		}
+		// The check started while loading is still unanswered when the session ends.
+		close(sent)
+		<-r.Context().Done()
+		ended <- r.Context().Err()
+		return nil, r.Context().Err()
+	})
+	parsed := readGlobalLiteLLMSettings()
+	hooks := &recordingHooks{}
+	setupHooks(hooks, newExtensionState(parsed, getProviderDefinitions(parsed), newPolicyStore(filepath.Join(dir, policiesFilename))))
+	host := newFakeHookHost()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no access check while the extension loads")
+	}
+	hooks.emit(t, sdk.EventSessionShutdown, host, nil)
+	// Its own budget had seconds left: shutdown cancelled it and waited for it to end.
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the check ended with %v, want it cancelled", err)
+		}
+	default:
+		t.Fatal("session_shutdown returned while the access check was still running")
+	}
+	// The next session asks the proxy itself rather than taking the cancelled check for an answer.
+	hooks.emit(t, sdk.EventSessionStart, host, nil)
+	if len(*checks) != 2 {
+		t.Fatalf("checks = %+v, want the cancelled one and a new one", *checks)
+	}
+	want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, host.fakeRegistrar); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+}
+
 func TestMcpReportsABogusExposureAndKeepsTheExtensionLoaded(t *testing.T) {
 	hooks, _, host := wire(t, `{"litellm":{"mcp":{"exposure":"bogus"}}}`)
 	defaultEnv(t, "https://proxy.example.com")
