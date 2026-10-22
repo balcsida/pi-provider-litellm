@@ -56,21 +56,21 @@ Besides the `LITELLM_*` variables and the `litellm` block of `settings.json`, pr
 for aliases). It is read as JSONC like PiG's own reader (BOM, `//` comments, trailing commas) and wins per field
 over `settings.json`; only providers are taken from it.
 
-## Known PiG 0.5.1 issues
+## Known PiG 0.5.2 issues
 
-### Requires PiG 0.5.1 or later
+### Requires PiG 0.5.2 or later
 
-PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the SDK pin in the extension's `go.mod`, so
-a 0.4.1 host cannot load this extension. When the extension fails to build, `--list-models` exits 0 and prints only
-`No models available`; `-p` and `pig install --validate-only --json` report the build error. On stock 0.5.1,
-`/login litellm` offers the SSO flows.
+PiG 0.5.x compiles a Go extension against the host's own SDK and ignores the SDK pin in the extension's `go.mod`.
+SDK 0.5.2 changed `ModelRegistry.Find`, so a 0.5.1 host cannot load this extension. When the extension fails to
+build, `--list-models` exits 0 and prints only `No models available`; `-p` and `pig install --validate-only --json`
+report the build error. On stock 0.5.2, `/login litellm` offers the SSO flows.
 
 ### Reasoning models without an effort carrier crash model selection
 
 When discovery finds a reasoning model but no evidence of a transmissible effort level (for example a Claude route
 served over Chat Completions without `reasoning_effort_levels`), it emits a thinking-level map that denies every
-level, exactly as the TypeScript extension does. PiG 0.5.1 then panics while selecting that model
-(`coding/model.go:180`, `thinkingMaxLevelForEntry` indexes the last element of an empty list), whether through
+level, exactly as the TypeScript extension does. PiG 0.5.2 then panics while selecting that model
+(`coding/model.go:175`, `thinkingMaxLevelForEntry` indexes the last element of an empty list), whether through
 `--model` or `/model`. Pi tolerates the same model. Until PiG guards the empty list, pick a route that declares its
 effort levels, or route the model through the Messages API.
 

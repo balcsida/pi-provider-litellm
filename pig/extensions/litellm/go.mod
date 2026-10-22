@@ -3,8 +3,8 @@ module github.com/balcsida/pi-provider-litellm/pig/extensions/litellm
 go 1.26.0
 
 require (
-	github.com/MichaelKinsy/PiG v0.5.1
-	github.com/MichaelKinsy/PiG/extensions/sdk v0.5.1
+	github.com/MichaelKinsy/PiG v0.5.2
+	github.com/MichaelKinsy/PiG/extensions/sdk v0.5.2
 )
 
 require (
