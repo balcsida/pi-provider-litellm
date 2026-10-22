@@ -400,7 +400,7 @@ describe("Anthropic Messages wire compatibility", () => {
 
     await models.streamSimple(model, { messages: [user("Think carefully")] }, { reasoning: "max" }).result();
 
-    expect(model.thinkingLevelMap).toEqual({ off: null, xhigh: null, max: "max" });
+    expect(model.thinkingLevelMap).toEqual({ xhigh: null, max: "max" });
     expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "max" } });
   });
 
