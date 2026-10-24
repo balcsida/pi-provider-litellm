@@ -288,6 +288,37 @@ async function readModelsProviderSettings(): Promise<Record<string, unknown> | u
   }
 }
 
+// Pi `modelOverrides` limits from the global models.json, keyed by provider id then model id.
+async function readModelLimitOverrides(): Promise<NonNullable<DiscoveryOptions["modelOverrides"]>> {
+  // Null prototypes: a `__proto__` provider or model key in the user's file stays a plain key.
+  const result: Record<string, Record<string, { contextWindow?: number; maxTokens?: number }>> = Object.create(null);
+  try {
+    const raw = await readFile(join(getAgentDir(), MODELS_FILENAME), "utf8");
+    const parsed = JSON.parse(stripJsonComments(stripBom(raw))) as Record<string, unknown>;
+    if (!isPlainObject(parsed.providers)) return result;
+    const limit = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+    for (const [providerId, provider] of Object.entries(parsed.providers)) {
+      if (!isPlainObject(provider) || !isPlainObject(provider.modelOverrides)) continue;
+      for (const [modelId, override] of Object.entries(provider.modelOverrides)) {
+        if (!isPlainObject(override)) continue;
+        const contextWindow = limit(override.contextWindow);
+        const maxTokens = limit(override.maxTokens);
+        if (contextWindow === undefined && maxTokens === undefined) continue;
+        const models = result[providerId] ?? Object.create(null);
+        result[providerId] = models;
+        models[modelId] = {
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
+          ...(maxTokens !== undefined ? { maxTokens } : {}),
+        };
+      }
+    }
+  } catch {
+    // Missing or unparsable models.json: no overrides.
+  }
+  return result;
+}
+
 // A provider block may live in either file; merge per field with models.json winning. Non-provider
 // settings.json keys pass through untouched, which is what keeps `skills`/`mcp`/`budget` working.
 function mergeProviderSettings(
@@ -2639,6 +2670,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       headers: auth.headers,
       allowInsecureHttp: auth.allowInsecureHttp,
       ...modelsDevDiscoveryOptions(),
+      modelOverrides: await readModelLimitOverrides(),
       silent: !isVerboseDiscovery(),
       onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
     });

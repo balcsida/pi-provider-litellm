@@ -497,6 +497,7 @@ function adaptPublicCatalogRecord(
   const piCost = piCatalog?.cost;
   return {
     provider,
+    ...(resolved ? { piProvider: resolved.provider } : {}),
     // A models.dev hit names the model canonically even when Pi's catalog does not know it yet,
     // so two spellings of one backend model reduce to one identity instead of a conflict.
     catalogModelId: resolved?.model.id ?? record?.modelId ?? catalogModelId,
@@ -690,10 +691,16 @@ function mapFromModelInfoGroup(
     denyLevels?: boolean;
     allowMessages?: boolean;
     proxyVersion?: ProxyVersion;
+    modelOverrides?: DiscoveryOptions["modelOverrides"];
   } = {},
 ): DiscoveredModel | undefined {
   const reduced = reduceModelGroup(entries, (entry) => {
-    const catalog = resolveModelInfoCatalog(entry, publicCatalog);
+    const resolved = resolveModelInfoCatalog(entry, publicCatalog);
+    const limitOverrides =
+      resolved?.piProvider && resolved.catalogModelId
+        ? options.modelOverrides?.[resolved.piProvider]?.[resolved.catalogModelId]
+        : undefined;
+    const catalog = limitOverrides ? { ...resolved, limitOverrides } : resolved;
     const family = deploymentFamily(entry);
     const generations = [entry.litellm_params?.model, entry.model_info?.base_model]
       .map((id) => wireString(id)?.trim())
@@ -931,6 +938,7 @@ async function discoverFromHealth(
         denyLevels: group.some(({ denyLevels }) => denyLevels),
         allowMessages: false,
         proxyVersion,
+        modelOverrides: options.modelOverrides,
       });
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
@@ -1037,10 +1045,11 @@ function applyWildcardEvidence(
   publishedWildcardIds: ReadonlySet<string>,
   publicCatalog: PublicCatalog | undefined,
   proxyVersion: ProxyVersion | undefined,
+  modelOverrides: DiscoveryOptions["modelOverrides"],
 ): DiscoveredModel | undefined {
   const parents = selectedWildcardRows(model.id, wildcardRows, publishedWildcardIds);
   if (!parents) return undefined;
-  const selected = mapFromModelInfoGroup(parents, publicCatalog, { proxyVersion });
+  const selected = mapFromModelInfoGroup(parents, publicCatalog, { proxyVersion, modelOverrides });
   if (!selected) return undefined;
   const policies = [model.litellmPolicy, selected.litellmPolicy].filter((policy) => policy !== undefined);
   const combinedPolicy =
@@ -1217,6 +1226,7 @@ export async function discoverModels(
           withheldRepairRoutes,
           defaultedContextRoutes,
           proxyVersion,
+          modelOverrides: options.modelOverrides,
         }),
         deploymentFamilies: group.map(deploymentFamily),
       };
@@ -1273,14 +1283,26 @@ export async function discoverModels(
           // The parents were reduced before the version was known; an expansion
           // must inherit from parents reduced under the version it is published with.
           sources = wildcardRoutes.flatMap(({ route, deploymentFamilies }) => {
-            const model = mapFromModelInfoGroup(groups.get(route)!, publicCatalog, { proxyVersion });
+            const model = mapFromModelInfoGroup(groups.get(route)!, publicCatalog, {
+              proxyVersion,
+              modelOverrides: options.modelOverrides,
+            });
             return model ? [{ model, deploymentFamilies }] : [];
           });
         }
         const expanded = candidates
           .map((entry) => mapFromWildcardExpansion(entry, sources, withheldRepairRoutes))
           .filter((model): model is DiscoveredModel => model !== undefined)
-          .map((model) => applyWildcardEvidence(model, wildcardRows, publishedWildcardIds, publicCatalog, proxyVersion))
+          .map((model) =>
+            applyWildcardEvidence(
+              model,
+              wildcardRows,
+              publishedWildcardIds,
+              publicCatalog,
+              proxyVersion,
+              options.modelOverrides,
+            ),
+          )
           .filter((model): model is DiscoveredModel => model !== undefined);
         models = [...models, ...expanded];
       }

@@ -25,6 +25,7 @@ type groupOptions struct {
 	// withholdMessages is `allowMessages === false`.
 	withholdMessages bool
 	proxyVersion     *proxyversion.Version
+	modelOverrides   map[string]map[string]types.LimitOverrides
 }
 
 func mapFromModelInfoGroup(
@@ -39,6 +40,9 @@ func mapFromModelInfoGroup(
 		resolution := modelgroups.CatalogResolution{}
 		if resolved := ResolveModelInfoCatalog(entry, publicCatalog); resolved != nil {
 			resolution = *resolved
+		}
+		if overrides, ok := options.modelOverrides[resolution.PiProvider][resolution.CatalogModelID]; ok && resolution.PiProvider != "" && resolution.CatalogModelID != "" {
+			resolution.LimitOverrides = &overrides
 		}
 		family := deploymentFamily(entry)
 		generations := map[modelgroups.SemanticModel]bool{}

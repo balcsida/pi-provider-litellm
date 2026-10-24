@@ -155,12 +155,13 @@ func applyWildcardEvidence(
 	publishedWildcardIDs map[string]bool,
 	publicCatalog catalog.PublicCatalog,
 	proxyVersion *proxyversion.Version,
+	modelOverrides map[string]map[string]types.LimitOverrides,
 ) *types.DiscoveredModel {
 	parents := selectedWildcardRows(model.ID, wildcardRows, publishedWildcardIDs)
 	if parents == nil {
 		return nil
 	}
-	selected := mapFromModelInfoGroup(parents, publicCatalog, &groupOptions{proxyVersion: proxyVersion})
+	selected := mapFromModelInfoGroup(parents, publicCatalog, &groupOptions{proxyVersion: proxyVersion, modelOverrides: modelOverrides})
 	if selected == nil {
 		return nil
 	}

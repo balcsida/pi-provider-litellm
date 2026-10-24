@@ -88,6 +88,9 @@ export interface DiscoveryOptions {
   // path, models.dev is not consulted at all.
   modelsDev?: boolean;
   modelsDevCachePath?: string;
+  // Pi `models.json` `providers.<providerId>.modelOverrides.<modelId>` limits. Pi applies them to that
+  // provider's own models only, so discovery applies them to routes backed by the same catalog model.
+  modelOverrides?: Readonly<Record<string, Readonly<Record<string, { contextWindow?: number; maxTokens?: number }>>>>;
 }
 
 export interface ModelInfoEntry {

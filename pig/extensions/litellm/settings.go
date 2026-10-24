@@ -373,6 +373,44 @@ func readModelsProviderSettings() *litellmSettings {
 	return &litellmSettings{Values: map[string]any{"providers": providers}, ProviderOrder: order}
 }
 
+// readModelLimitOverrides reads Pi `modelOverrides` limits from <agentDir>/models.json (global agent dir, never
+// a project copy), keyed by provider id then model id. Only finite numbers > 0 count; anything else is ignored.
+func readModelLimitOverrides() map[string]map[string]types.LimitOverrides {
+	result := map[string]map[string]types.LimitOverrides{}
+	raw, err := os.ReadFile(filepath.Join(agentDir(), "models.json"))
+	if err != nil {
+		return result
+	}
+	var top struct {
+		Providers map[string]any `json:"providers"`
+	}
+	if json.Unmarshal([]byte(stripJSONComments(string(stripBOM(raw)))), &top) != nil {
+		return result
+	}
+	limit := func(value any) *float64 {
+		if number, ok := value.(float64); ok && number > 0 && !math.IsInf(number, 0) {
+			return &number
+		}
+		return nil
+	}
+	for providerID, provider := range top.Providers {
+		block, _ := provider.(map[string]any)
+		overrides, _ := block["modelOverrides"].(map[string]any)
+		for modelID, value := range overrides {
+			override, _ := value.(map[string]any)
+			entry := types.LimitOverrides{ContextWindow: limit(override["contextWindow"]), MaxTokens: limit(override["maxTokens"])}
+			if entry.ContextWindow == nil && entry.MaxTokens == nil {
+				continue
+			}
+			if result[providerID] == nil {
+				result[providerID] = map[string]types.LimitOverrides{}
+			}
+			result[providerID][modelID] = entry
+		}
+	}
+	return result
+}
+
 // mergeProviderSettings merges a provider block that may live in either file per field, models.json winning.
 // Non-provider settings.json keys pass through untouched, which keeps `skills`/`mcp`/`budget` working. The
 // provider order is settings.json's, then the names only models.json contributes.

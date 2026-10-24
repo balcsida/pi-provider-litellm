@@ -13,13 +13,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
 )
 
 var hermeticVars = []string{
 	envBaseURL, envAPIKey, envAPIKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
 	envVerboseDiscovery, envModelsDev, envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
 	envPIOffline, envPIGOffline, "PIG_USE_PI_DIRS", "PIG_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
-	envProviders, envProvidersJSON,
+	envProviders, envProvidersJSON, "LITELLM_TRUST_PROXY_LIMITS",
 }
 
 // hermeticAgentDir clears every variable the extension reads and points the agent dir at a temp dir.
@@ -620,6 +622,37 @@ func TestKnownBaseURL(t *testing.T) {
 		hermeticAgentDir(t)
 		if _, _, ok := knownBaseURL(definition); ok {
 			t.Fatal("expected nothing")
+		}
+	})
+}
+
+func TestReadModelLimitOverrides(t *testing.T) {
+	num := func(v float64) *float64 { return &v }
+	t.Run("keeps valid values and ignores everything else", func(t *testing.T) {
+		dir := hermeticAgentDir(t)
+		writeFileIn(t, dir, "models.json", "\ufeff// JSONC\n"+`{"providers":{"openai":{"modelOverrides":{
+			"ok":{"contextWindow":500000,"maxTokens":128000,},
+			"partial":{"contextWindow":"500000","maxTokens":64000},
+			"zero":{"contextWindow":0,"maxTokens":-1},
+			"null":{"contextWindow":null},
+			"flat":"2000000"}},
+			"other":{"modelOverrides":"nope"},"third":null}}`)
+		want := map[string]map[string]types.LimitOverrides{"openai": {
+			"ok":      {ContextWindow: num(500000), MaxTokens: num(128000)},
+			"partial": {MaxTokens: num(64000)},
+		}}
+		if got := readModelLimitOverrides(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v", got)
+		}
+	})
+	t.Run("returns an empty map for a missing or unparsable file", func(t *testing.T) {
+		dir := hermeticAgentDir(t)
+		if got := readModelLimitOverrides(); got == nil || len(got) != 0 {
+			t.Fatalf("missing: %v", got)
+		}
+		writeFileIn(t, dir, "models.json", "{ not json")
+		if got := readModelLimitOverrides(); got == nil || len(got) != 0 {
+			t.Fatalf("unparsable: %v", got)
 		}
 	})
 }

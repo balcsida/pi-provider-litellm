@@ -56,6 +56,12 @@ Besides the `LITELLM_*` variables and the `litellm` block of `settings.json`, pr
 for aliases). It is read as JSONC like PiG's own reader (BOM, `//` comments, trailing commas) and wins per field
 over `settings.json`; only providers are taken from it.
 
+A `models.json` `providers.<providerId>.modelOverrides.<modelId>` entry with `contextWindow` / `maxTokens` sets the
+limits of every route backed by that model, ahead of the proxy's figure and the catalog, and
+`LITELLM_TRUST_PROXY_LIMITS=1` makes a deployment's explicit `max_input_tokens` / `max_output_tokens` win over the
+catalog; both behave as in the root README. `<providerId>` is the Pi provider whose catalog entry identifies the
+backend (`openai-codex` for a `chatgpt/` deployment), not the LiteLLM provider label.
+
 ## Known PiG 0.5.2 issues
 
 ### Requires PiG 0.5.2 or later

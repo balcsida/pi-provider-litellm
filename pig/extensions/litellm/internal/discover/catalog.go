@@ -377,6 +377,9 @@ func adaptPublicCatalogRecord(provider, catalogModelID string, record *catalog.P
 	}
 
 	resolution := modelgroups.CatalogResolution{Provider: provider}
+	if resolved != nil {
+		resolution.PiProvider = resolved.provider
+	}
 	// A models.dev hit names the model canonically even when Pi's catalog does not know it yet, so two
 	// spellings of one backend model reduce to one identity instead of a conflict.
 	switch {

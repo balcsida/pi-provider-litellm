@@ -167,6 +167,7 @@ func discoverFromModelInfo(
 				withheldRepairRoutes:    withheldRepairRoutes,
 				defaultedContextRoutes:  defaultedContextRoutes,
 				proxyVersion:            proxyVersion,
+				modelOverrides:          options.ModelOverrides,
 			}),
 			deploymentFamilies: families,
 		})
@@ -254,7 +255,7 @@ func discoverFromModelInfo(
 				// parents reduced under the version it is published with.
 				sources = nil
 				for _, group := range wildcardRoutes {
-					if model := mapFromModelInfoGroup(groups.rows[group.route], publicCatalog, &groupOptions{proxyVersion: proxyVersion}); model != nil {
+					if model := mapFromModelInfoGroup(groups.rows[group.route], publicCatalog, &groupOptions{proxyVersion: proxyVersion, modelOverrides: options.ModelOverrides}); model != nil {
 						sources = append(sources, wildcardSource{model: *model, deploymentFamilies: group.deploymentFamilies})
 					}
 				}
@@ -264,7 +265,7 @@ func discoverFromModelInfo(
 				if expanded == nil {
 					continue
 				}
-				if evidenced := applyWildcardEvidence(*expanded, wildcardRows, publishedWildcardIDs, publicCatalog, proxyVersion); evidenced != nil {
+				if evidenced := applyWildcardEvidence(*expanded, wildcardRows, publishedWildcardIDs, publicCatalog, proxyVersion, options.ModelOverrides); evidenced != nil {
 					models = append(models, *evidenced)
 				}
 			}
@@ -492,6 +493,7 @@ func discoverFromHealth(ctx context.Context, base, apiKey string, options Option
 				denyLevels:              slices.ContainsFunc(group, func(deployment healthDeployment) bool { return deployment.denyLevels }),
 				withholdMessages:        true,
 				proxyVersion:            proxyVersion,
+				modelOverrides:          options.ModelOverrides,
 			})
 		}
 		if model != nil {

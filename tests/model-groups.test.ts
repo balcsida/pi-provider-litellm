@@ -604,6 +604,96 @@ describe("reduceModelGroup", () => {
     expect(reduceModelGroup([router], catalog)).toMatchObject({ contextWindow: 200_000, maxTokens: 64_000 });
   });
 
+  describe("limit overrides and proxy-authoritative limits", () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    const deployment = (id: string, input?: number, output?: number) =>
+      row({ model_info: { id, mode: "chat", max_input_tokens: input, max_output_tokens: output } });
+    const resolver =
+      (
+        limitOverrides?: { contextWindow?: number; maxTokens?: number },
+        catalogModelId = "gpt-6.1-sol",
+      ): CatalogResolver =>
+      () => ({
+        provider: "openai-codex",
+        piProvider: "openai-codex",
+        catalogModelId,
+        contextWindow: 272_000,
+        maxTokens: 64_000,
+        ...(limitOverrides ? { limitOverrides } : {}),
+      });
+
+    it.each([
+      [500_000, 500_000],
+      [272_000, 500_000],
+    ])("lets an override replace the minimum (router %i)", (router, expected) => {
+      const reduced = reduceModelGroup(
+        [deployment("a", router, 100_000)],
+        resolver({ contextWindow: 500_000, maxTokens: 128_000 }),
+      );
+
+      expect(reduced).toMatchObject({ contextWindow: expected, maxTokens: 128_000 });
+    });
+
+    it("lets an override lower the router and catalog figures", () => {
+      const reduced = reduceModelGroup(
+        [deployment("a", 300_000, 100_000)],
+        resolver({ contextWindow: 100_000, maxTokens: 20_000 }),
+      );
+
+      expect(reduced).toMatchObject({ contextWindow: 100_000, maxTokens: 20_000 });
+    });
+
+    it("ignores an override without catalog authority", () => {
+      const split: CatalogResolver = (entry) =>
+        resolver({ contextWindow: 900_000 }, entry.model_info?.id === "a" ? "gpt-6.1-sol" : "gpt-6.1-mini")(entry);
+
+      expect(reduceModelGroup([deployment("a", 300_000), deployment("b", 400_000)], split)).toMatchObject({
+        contextWindow: 300_000,
+      });
+    });
+
+    it("keeps the group minimum", () => {
+      const mixed: CatalogResolver = (entry) =>
+        resolver(entry.model_info?.id === "a" ? { contextWindow: 500_000 } : undefined)(entry);
+
+      expect(reduceModelGroup([deployment("a", 500_000), deployment("b", 200_000)], mixed)).toMatchObject({
+        contextWindow: 200_000,
+      });
+    });
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])("ignores the invalid override %s", (value) => {
+      const reduced = reduceModelGroup(
+        [deployment("a", 300_000, 100_000)],
+        resolver({ contextWindow: value, maxTokens: value }),
+      );
+
+      expect(reduced).toMatchObject({ contextWindow: 272_000, maxTokens: 64_000 });
+    });
+
+    it("prefers the router figure under LITELLM_TRUST_PROXY_LIMITS=1", () => {
+      vi.stubEnv("LITELLM_TRUST_PROXY_LIMITS", "1");
+
+      expect(reduceModelGroup([deployment("a", 300_000, 100_000)], resolver())).toMatchObject({
+        contextWindow: 300_000,
+        maxTokens: 100_000,
+      });
+      expect(reduceModelGroup([deployment("a")], resolver())).toMatchObject({
+        contextWindow: 272_000,
+        maxTokens: 64_000,
+      });
+      expect(reduceModelGroup([deployment("a", 300_000)], resolver({ contextWindow: 500_000 }))).toMatchObject({
+        contextWindow: 500_000,
+      });
+    });
+
+    it.each([undefined, "0"])("keeps the minimum when LITELLM_TRUST_PROXY_LIMITS=%s", (value) => {
+      if (value !== undefined) vi.stubEnv("LITELLM_TRUST_PROXY_LIMITS", value);
+
+      expect(reduceModelGroup([deployment("a", 300_000)], resolver())).toMatchObject({ contextWindow: 272_000 });
+    });
+  });
+
   it("resolves deployment limits before taking the safe group minimum", () => {
     const explicit = row({
       model_info: { id: "explicit", mode: "chat", max_input_tokens: 100_000, max_output_tokens: 8_000 },
