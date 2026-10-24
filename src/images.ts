@@ -1,9 +1,8 @@
 import type {
   AssistantImages,
-  ImageApi,
   ImageContent,
   ImageModel,
-  ImagesOptions,
+  ModelCost,
   ProviderImages,
   Usage,
 } from "@earendil-works/pi-ai";
@@ -33,7 +32,7 @@ export function isImageGenerationMode(mode: unknown): boolean {
   return value !== undefined && IMAGE_GENERATION_MODE_PATTERN.test(value.trim());
 }
 
-function perMillion(value: unknown): number | undefined {
+export function perMillion(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value * 1_000_000 : undefined;
 }
 
@@ -119,18 +118,19 @@ function tokenCount(...values: unknown[]): number {
   return 0;
 }
 
-function parseUsage(
-  response: ImagesResponse,
-  model: ImageModel<ImageApi>,
+export function parseUsage(
+  raw:
+    | { input_tokens?: unknown; output_tokens?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown }
+    | undefined,
+  cost: ModelCost,
   responseCost: number | undefined,
 ): Usage | undefined {
-  const raw = response.usage;
   if (!raw && responseCost === undefined) return undefined;
   const input = tokenCount(raw?.input_tokens, raw?.prompt_tokens);
   const output = tokenCount(raw?.output_tokens, raw?.completion_tokens);
   const estimated = {
-    input: (model.cost.input / 1_000_000) * input,
-    output: (model.cost.output / 1_000_000) * output,
+    input: (cost.input / 1_000_000) * input,
+    output: (cost.output / 1_000_000) * output,
   };
   // LiteLLM's own cost is authoritative: it knows per-image prices that a token rate cannot express.
   const total = responseCost ?? estimated.input + estimated.output;
@@ -148,7 +148,13 @@ function parseUsage(
   };
 }
 
-function requestHeaders(
+/** LiteLLM's `x-litellm-response-cost` header, when it is a usable amount. */
+export function responseCost(headers: Record<string, string>): number | undefined {
+  const cost = Number.parseFloat(headers["x-litellm-response-cost"] ?? "");
+  return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
+}
+
+export function requestHeaders(
   apiKey: string,
   ...sources: (Record<string, string | null | undefined> | undefined)[]
 ): Record<string, string> {
@@ -167,7 +173,7 @@ function requestHeaders(
   return headers;
 }
 
-function errorDetail(body: string): string {
+export function errorDetail(body: string): string {
   try {
     const parsed = JSON.parse(body) as { error?: { message?: unknown } | unknown };
     const message =
@@ -181,7 +187,9 @@ function errorDetail(body: string): string {
   return body.slice(0, MAX_ERROR_DETAIL);
 }
 
-function requestSignal(options: ImagesOptions | undefined): AbortSignal | undefined {
+export function requestSignal(
+  options: { signal?: AbortSignal; timeoutMs?: number } | undefined,
+): AbortSignal | undefined {
   const signals = [
     options?.signal,
     options?.timeoutMs !== undefined ? AbortSignal.timeout(options.timeoutMs) : undefined,
@@ -242,8 +250,7 @@ export const generateImages: ProviderImages["generateImages"] = async (model, co
           : `LiteLLM image model ${model.id} returned no images`,
       );
     }
-    const costHeader = Number.parseFloat(responseHeaders["x-litellm-response-cost"] ?? "");
-    const usage = parseUsage(parsed, model, Number.isFinite(costHeader) && costHeader >= 0 ? costHeader : undefined);
+    const usage = parseUsage(parsed.usage, model.cost, responseCost(responseHeaders));
     if (usage) result.usage = usage;
     return result;
   } catch (error) {

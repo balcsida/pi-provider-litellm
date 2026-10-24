@@ -67,6 +67,14 @@
   wildcard). Requests use the credential's root like chat, return base64 blocks only (backend image URLs are never
   fetched), and prefer the `x-litellm-response-cost` header over the token-rate estimate. The PiG bridge cannot map
   `GenerateImages`, so the Go port withholds these groups (see `pig/PORTING.md`).
+- Decision routes live in `src/classifiers.ts`, outside the chat reducer too: a `/model/info` group becomes a
+  `litellm-decisions` classifier model only when every deployment is a decision deployment by LiteLLM's own rule, with
+  a declared `supported_endpoints` list deciding alone (it must list `/v1/systemone` or `/v1/decisions`) and the mode
+  (`evaluation` or `decisions`) deciding only without one; never from `/v1/models`, `/health`, or a wildcard. A chat
+  route that lists `/v1/decisions` is published as both. Requests post System One bodies (`bool` questions travel as
+  `noul`) to the credential's root at `/v1/systemone`, take text state only, and prefer the `x-litellm-response-cost`
+  header like images; the request helpers are shared with `src/images.ts`. The PiG bridge cannot map `Classify`, so
+  the Go port withholds these groups as well (see `pig/PORTING.md`).
 - Evidence-free `/v1/models` and wholly health-only `/health` groups take protocol and presentation metadata from
   the bounded Pi catalog lookup. `openai-responses` selects Responses; other or missing catalog APIs select Chat.
   A health-only row mixed with deployment details grants no catalog authority to that group.

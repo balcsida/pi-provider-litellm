@@ -375,6 +375,38 @@ and groups that mix image and other modes, or wildcard routes, are withheld. The
 need `/v1/images/edits`, which this provider does not call, and backends that answer with image URLs instead of
 base64 data are reported as errors rather than fetched.
 
+## Classification
+
+Decision routes are published as Pi classifier models (for example `litellm/decision-1`, backed by
+`azure_ai/Microsoft-Decision-1`, or a `typesafe/jev-latest` route). A route qualifies when every deployment behind it
+reports `mode: "evaluation"` or `"decisions"` in `/model/info`, or lists `/v1/systemone` or `/v1/decisions` in
+`supported_endpoints`; a declared endpoint list without them withholds the route. Like Pi's other classifiers they do
+not appear in `/model`; scripts reach them through Pi's `codemode` tool:
+
+```js
+const judge = await models.getModelOfType("classifier", "litellm", "decision-1");
+const result = await models.classify(judge, {
+  state: { text: "Please send me the report by Friday." },
+  questions: {
+    polite: {
+      type: "bool",
+      instructions: "Is the message polite?",
+      criteria: { true: "The message is polite.", false: "The message is rude." },
+    },
+  },
+});
+if (result.stopReason !== "stop") return result.errorMessage;
+return result.answers.polite.probability;
+```
+
+Question types are `bool`, `choice` and `score`. Requests go to the proxy's `/v1/systemone` (LiteLLM v1.104.2 and
+later) with the provider's own credential and headers, and are budgeted and logged by the proxy like chat requests. A
+`bool` question is sent as System One's `noul`. Usage cost comes from LiteLLM's `x-litellm-response-cost` header when
+present; otherwise it is estimated from `input_cost_per_token` and `output_cost_per_token`. Only routes found through
+`/model/info` qualify, and groups that mix decision and other deployments, or wildcard routes, are withheld. The state
+is text only: images in the context return an error without a request. A chat route that also lists `/v1/decisions`,
+such as OpenAI's GPT-6 Luna, is published as both a chat model and a classifier.
+
 ## Optional environment variables
 
 | Variable | Default | Effect |

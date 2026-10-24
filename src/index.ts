@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext, McpServerConfig } from "@earendil-
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
+import type { LiteLLMClassifierModel } from "./classifiers.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import {
   discoverModels,
@@ -34,6 +35,7 @@ import {
   createLiteLLMProvider,
   DEFAULT_LITELLM_BASE_URL,
   isPlaceholderHost,
+  toNativeClassifierModels,
   toNativeImageModels,
   toNativeModels,
 } from "./provider.js";
@@ -2653,7 +2655,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // critical path of every start -- is replaced by reading that catalog while it is fresh (models-store.ts). Nothing is
   // written: Pi owns the file. The stored models are handed over rather than an empty list, so that a store Pi keeps
   // somewhere else cannot leave the provider with nothing.
-  async function seedModels(definition: ProviderDefinition): Promise<(Model<LiteLLMApi> | LiteLLMImageModel)[]> {
+  async function seedModels(
+    definition: ProviderDefinition,
+  ): Promise<(Model<LiteLLMApi> | LiteLLMImageModel | LiteLLMClassifierModel)[]> {
     const disabledReason = discoveryDisabledReason() ?? (isHostOffline() ? "PI_OFFLINE" : null);
     if (disabledReason) {
       if (isVerboseDiscovery()) {
@@ -2685,6 +2689,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       return [
         ...toNativeModels(definition.name, result.baseUrl, result.models, definition.allowInsecureHttp),
         ...toNativeImageModels(definition.name, result.baseUrl, result.imageModels ?? [], definition.allowInsecureHttp),
+        ...toNativeClassifierModels(
+          definition.name,
+          result.baseUrl,
+          result.classifierModels ?? [],
+          definition.allowInsecureHttp,
+        ),
       ];
     } catch (error) {
       // No credentials yet is the normal unconfigured case; anything else is worth one line.

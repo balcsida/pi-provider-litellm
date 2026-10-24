@@ -141,7 +141,7 @@ describe("cold start discovery (issue #137)", () => {
     expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
   });
 
-  it("hands stored image models over too, without discovering", async () => {
+  it("hands stored image and classifier models over too, without discovering", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-stored-images-"));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";
     process.env.LITELLM_API_KEY = "env-key";
@@ -160,6 +160,18 @@ describe("cold start discovery (issue #137)", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
     });
+    (catalog.litellm.models as Record<string, unknown>[]).push({
+      type: "classifier",
+      id: "stored-classifier",
+      name: "stored-classifier",
+      api: "litellm-decisions",
+      provider: "litellm",
+      baseUrl: "https://proxy.example.com/v1",
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 65536,
+      litellmDiscoveryVersion: LITELLM_DISCOVERY_VERSION,
+    });
     await writeFile(join(agentDir, "models-store.json"), JSON.stringify(catalog), "utf8");
     const elsewhere = join(agentDir, "elsewhere", "models-store.json");
     await mkdir(dirname(elsewhere), { recursive: true });
@@ -171,7 +183,11 @@ describe("cold start discovery (issue #137)", () => {
 
     const runtime = await startup(agentDir, elsewhere);
 
-    expect(runtime.getAllModels("litellm").map((model) => model.id)).toEqual(["stored-model", "stored-image"]);
+    expect(runtime.getAllModels("litellm").map((model) => model.id)).toEqual([
+      "stored-model",
+      "stored-image",
+      "stored-classifier",
+    ]);
     expect(requested.filter((url) => url.includes("/model/info") || url.includes("/v1/models"))).toEqual([]);
   });
 

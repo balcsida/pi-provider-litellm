@@ -68,6 +68,7 @@ const nonRegistrySpecPrefixes = [
 export const allowedSourceModules = [
   "backend-identity",
   "budget",
+  "classifiers",
   "cost",
   "discover",
   "gcloud-token",
