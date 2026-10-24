@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 8,
+      litellmDiscoveryVersion: 9,
     });
   });
 
@@ -5200,7 +5200,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 8,
+          litellmDiscoveryVersion: 9,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
@@ -7137,5 +7137,100 @@ describe("Moonshot transport suppression", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
 
     expect(result.models[0]?.litellmPolicy?.suppressReasoningVisibility === true).toBe(suppress);
+  });
+});
+
+describe("prompt cache lifetimes", () => {
+  const claudeRow = (
+    model_name: string,
+    extra: Record<string, unknown> = {},
+    model = "anthropic/claude-sonnet-4-5",
+  ) => ({
+    model_name,
+    litellm_params: { model },
+    model_info: { mode: "chat", litellm_provider: "anthropic", ...extra },
+  });
+
+  async function discoverRows(rows: unknown[], ids?: string[]) {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: rows }),
+      ...(ids ? { "/v1/models": () => jsonResponse(200, { data: ids.map((id) => ({ id })) }) } : {}),
+    });
+    return (await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false })).models;
+  }
+
+  it("declares lifetimes for unanimous Claude evidence on native Messages", async () => {
+    const [model] = await discoverRows([claudeRow("claude")]);
+
+    expect(model).toMatchObject({ api: "anthropic-messages", promptCache: { short: 300, long: 3600 } });
+  });
+
+  it("declares lifetimes for a Claude-backed Chat Completions route", async () => {
+    const [model] = await discoverRows([claudeRow("claude-chat", { supported_endpoints: ["/v1/chat/completions"] })]);
+
+    expect(model).toMatchObject({
+      api: "openai-completions",
+      compat: { cacheControlFormat: "anthropic" },
+      promptCache: { short: 300, long: 3600 },
+    });
+  });
+
+  it("declares none for a Claude-backed route on Responses", async () => {
+    const [model] = await discoverRows([
+      claudeRow("claude-responses", { mode: "responses", supported_endpoints: ["/v1/responses"] }),
+    ]);
+
+    expect(model?.api).toBe("openai-responses");
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for a route identified only by its name", async () => {
+    const [model] = await discoverRows([{ model_name: "claude-sonnet-4-5", model_info: { mode: "chat" } }]);
+
+    expect(model?.compat).toMatchObject({ cacheControlFormat: "anthropic" });
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for the /v1/models fallback", async () => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "claude-sonnet-4-5" }] }),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models[0]?.compat).toMatchObject({ cacheControlFormat: "anthropic" });
+    expect(models[0]).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for an OpenAI-backed route", async () => {
+    const [model] = await discoverRows([claudeRow("gpt", {}, "openai/gpt-4o")]);
+
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for a group mixing Claude and OpenAI deployments", async () => {
+    const [model] = await discoverRows([
+      claudeRow("mixed", { id: "a" }),
+      claudeRow("mixed", { id: "b", litellm_provider: "openai" }, "openai/gpt-4o"),
+    ]);
+
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("lets a wildcard child inherit the lifetimes from its parent route", async () => {
+    const models = await discoverRows(
+      [
+        {
+          model_name: "team/*",
+          litellm_params: { model: "anthropic/*" },
+          model_info: { supported_endpoints: ["/v1/chat/completions"] },
+        },
+      ],
+      ["team/claude-sonnet-4-5"],
+    );
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({ id: "team/claude-sonnet-4-5", promptCache: { short: 300, long: 3600 } });
   });
 });
