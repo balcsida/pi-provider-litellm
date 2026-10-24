@@ -248,7 +248,17 @@ func mapFromModelInfoGroup(
 	if len(families) == 1 && family != "" {
 		model.LiteLLMBackendFamily = family
 	}
+	relaysAnthropicCache := api == types.APIAnthropicMessages ||
+		(api == types.APIOpenAICompletions && policy.Compat != nil && policy.Compat.CacheControlFormat == "anthropic")
+	if len(families) == 1 && family == types.FamilyClaude && relaysAnthropicCache {
+		model.PromptCache = claudePromptCache()
+	}
 	return model
+}
+
+// claudePromptCache is Anthropic's documented 5-minute and 1-hour cache lifetimes, fresh per call because maps are references.
+func claudePromptCache() ai.ModelPromptCache {
+	return ai.ModelPromptCache{"short": 300, "long": 3600}
 }
 
 // publishesVersionGatedTransport: whether a group that will be published has its transport decided by

@@ -51,6 +51,10 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+// Anthropic's documented 5-minute and 1-hour cache lifetimes; the values Pi's built-in Anthropic catalog uses.
+// shortcut: `long` assumes the host offers the 1-hour TTL (Bedrock only does for Claude 4.5+), gate it on
+// deployment routing if LiteLLM ever reports per-route TTL support.
+const CLAUDE_PROMPT_CACHE = { short: 300, long: 3600 } as const;
 const HEALTH_DETAIL_CONCURRENCY = 8;
 const reportedConflictingFamilyRoutes = new Set<string>();
 const reportedWithheldRepairRoutes = new Set<string>();
@@ -764,6 +768,10 @@ function mapFromModelInfoGroup(
     acceptsResponsesReasoningControl: reduced.acceptsResponsesReasoningControl,
     denyLevels: options.denyLevels,
   });
+  const relaysAnthropicCacheMarkers =
+    api === "anthropic-messages" ||
+    (api === "openai-completions" &&
+      (policy.compat as Model<"openai-completions">["compat"])?.cacheControlFormat === "anthropic");
   const hasConflictingFamily = reduced.deploymentFamilies.includes("conflicting");
   const unanimousMoonshot =
     reduced.deploymentFamilies.length > 0 && reduced.deploymentFamilies.every((family) => family === "kimi");
@@ -810,6 +818,9 @@ function mapFromModelInfoGroup(
       ? { litellmResponsesReasoningControl: true as const }
       : {}),
     ...(families.size === 1 && family ? { litellmBackendFamily: family } : {}),
+    ...(families.size === 1 && family === "claude" && relaysAnthropicCacheMarkers
+      ? { promptCache: { ...CLAUDE_PROMPT_CACHE } }
+      : {}),
     ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),
     // closeSerializerPolicy derives compat from `api`, a correlation its return type cannot carry.
   } as DiscoveredModel;
@@ -1071,6 +1082,7 @@ function applyWildcardEvidence(
     litellmBackendFamily: _family,
     litellmResponsesReasoningControl: _control,
     litellmPolicy: _policy,
+    promptCache: _promptCache,
     thinkingLevelMap: _levels,
     ...rest
   } = model;
@@ -1081,6 +1093,7 @@ function applyWildcardEvidence(
     compat: selected.compat,
     ...(selected.thinkingLevelMap ? { thinkingLevelMap: selected.thinkingLevelMap } : {}),
     ...(selected.litellmBackendFamily ? { litellmBackendFamily: selected.litellmBackendFamily } : {}),
+    ...(selected.promptCache ? { promptCache: selected.promptCache } : {}),
     ...(combinedPolicy ? { litellmPolicy: combinedPolicy } : {}),
     ...(selected.litellmResponsesReasoningControl ? { litellmResponsesReasoningControl: true as const } : {}),
   } as DiscoveredModel;
