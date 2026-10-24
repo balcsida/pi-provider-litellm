@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { BackendFamily, LITELLM_DISCOVERY_VERSION } from "./backend-identity.js";
+import type { DiscoveredClassifierModel } from "./classifiers.js";
 import type { DiscoveredImageModel } from "./images.js";
 import type { ProxyVersion } from "./proxy-version.js";
 
@@ -67,6 +68,11 @@ export interface DiscoveryResult {
   models: DiscoveredModel[];
   /** `mode: "image_generation"` routes from `/model/info`; absent when there are none. */
   imageModels?: DiscoveredImageModel[];
+  /**
+   * Decision routes from `/model/info` (`mode: "evaluation"`/`"decisions"`, or a decision endpoint in
+   * `supported_endpoints`); absent when there are none.
+   */
+  classifierModels?: DiscoveredClassifierModel[];
   source: DiscoverySource;
   // Present only when a `/model/info` discovery had to read it and the proxy
   // answered. Absent means unknown, not old: discovery asks only when it must.

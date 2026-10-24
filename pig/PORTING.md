@@ -166,6 +166,10 @@ Intentional differences from the TypeScript extension, all forced by PiG:
   image models served through `/v1/images/generations` (`src/images.ts`), but `internal/bridge` maps neither
   `GenerateImages` nor `GetAllModels`, so a PiG native provider cannot surface image models. The Go discovery keeps
   withholding those groups like any other non-chat mode; port `src/images.ts` once the SDK exposes both callbacks.
+  Classification is not ported either: `src/classifiers.ts` publishes decision route groups (`mode: "evaluation"` or
+  `"decisions"`, or a decision endpoint in `supported_endpoints`) as Pi classifier models served through
+  `/v1/systemone`, the bridge maps neither `Classify` nor `GetAllModels`, and the Go discovery keeps withholding those
+  groups like any other non-chat mode.
 
 ## Known PiG 0.5.2 issues
 

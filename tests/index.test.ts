@@ -465,7 +465,7 @@ describe("extension startup", () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,
       maxTokens: 4096,
-      litellmDiscoveryVersion: 7,
+      litellmDiscoveryVersion: 8,
     };
 
     await expect(
@@ -557,7 +557,7 @@ describe("extension startup", () => {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128_000,
         maxTokens: 4096,
-        litellmDiscoveryVersion: 7,
+        litellmDiscoveryVersion: 8,
       },
     ]);
     const credential = {

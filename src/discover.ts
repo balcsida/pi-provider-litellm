@@ -8,6 +8,7 @@ import {
   resolveCatalogProvider,
   routesOnlyThrough,
 } from "./backend-identity.js";
+import { type DiscoveredClassifierModel, mapFromClassifierModelInfoGroup } from "./classifiers.js";
 import { type DiscoveredImageModel, mapFromImageModelInfoGroup } from "./images.js";
 import {
   type CatalogResolution,
@@ -1309,10 +1310,15 @@ export async function discoverModels(
     const imageModels = [...groups.entries()]
       .map(([route, group]) => mapFromImageModelInfoGroup(route, group))
       .filter((model): model is DiscoveredImageModel => model !== undefined);
+    // Decision routes are a separate operation in Pi; the chat reducer withholds their modes.
+    const classifierModels = [...groups.entries()]
+      .map(([route, group]) => mapFromClassifierModelInfoGroup(route, group))
+      .filter((model): model is DiscoveredClassifierModel => model !== undefined);
     return {
       source: "model_info",
       models,
       ...(imageModels.length > 0 ? { imageModels } : {}),
+      ...(classifierModels.length > 0 ? { classifierModels } : {}),
       ...(proxyVersion ? { proxyVersion } : {}),
     };
   }
