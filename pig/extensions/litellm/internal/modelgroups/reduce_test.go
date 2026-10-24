@@ -2,6 +2,7 @@
 package modelgroups
 
 import (
+	"math"
 	"strconv"
 	"testing"
 
@@ -273,6 +274,74 @@ func TestReduceModelGroup(t *testing.T) {
 		}))
 		if got.ContextWindow != 200_000 || got.MaxTokens != 64_000 {
 			t.Fatalf("%v %v", got.ContextWindow, got.MaxTokens)
+		}
+	})
+
+	t.Run("limit overrides and proxy-authoritative limits", func(t *testing.T) {
+		deployment := func(id string, input, output *float64) types.ModelInfoEntry {
+			return row(idMode(id, "chat"), info(func(i *types.ModelInfoDetails) { i.MaxInputTokens, i.MaxOutputTokens = input, output }))
+		}
+		resolver := func(limitOverrides *types.LimitOverrides, catalogModelID string) CatalogResolver {
+			return fixed(CatalogResolution{
+				Provider: "openai-codex", PiProvider: "openai-codex", CatalogModelID: catalogModelID, ContextWindow: f(272_000), MaxTokens: f(64_000),
+				LimitOverrides: limitOverrides,
+			})
+		}
+		check := func(t *testing.T, entries []types.ModelInfoEntry, r CatalogResolver, context, maxTokens float64) {
+			t.Helper()
+			got := mustReduce(t, entries, r)
+			if got.ContextWindow != context || (maxTokens != 0 && got.MaxTokens != maxTokens) {
+				t.Fatalf("%v %v", got.ContextWindow, got.MaxTokens)
+			}
+		}
+		for _, router := range []float64{500_000, 272_000} {
+			t.Run("lets an override replace the minimum (router "+strconv.Itoa(int(router))+")", func(t *testing.T) {
+				check(t, []types.ModelInfoEntry{deployment("a", f(router), f(100_000))},
+					resolver(&types.LimitOverrides{ContextWindow: f(500_000), MaxTokens: f(128_000)}, "gpt-6.1-sol"), 500_000, 128_000)
+			})
+		}
+		t.Run("lets an override lower the router and catalog figures", func(t *testing.T) {
+			check(t, []types.ModelInfoEntry{deployment("a", f(300_000), f(100_000))},
+				resolver(&types.LimitOverrides{ContextWindow: f(100_000), MaxTokens: f(20_000)}, "gpt-6.1-sol"), 100_000, 20_000)
+		})
+		t.Run("ignores an override without catalog authority", func(t *testing.T) {
+			split := func(entry types.ModelInfoEntry) *CatalogResolution {
+				id := "gpt-6.1-mini"
+				if entry.ModelInfo.ID == "a" {
+					id = "gpt-6.1-sol"
+				}
+				return resolver(&types.LimitOverrides{ContextWindow: f(900_000)}, id)(entry)
+			}
+			check(t, []types.ModelInfoEntry{deployment("a", f(300_000), nil), deployment("b", f(400_000), nil)}, split, 300_000, 0)
+		})
+		t.Run("keeps the group minimum", func(t *testing.T) {
+			mixed := func(entry types.ModelInfoEntry) *CatalogResolution {
+				var o *types.LimitOverrides
+				if entry.ModelInfo.ID == "a" {
+					o = &types.LimitOverrides{ContextWindow: f(500_000)}
+				}
+				return resolver(o, "gpt-6.1-sol")(entry)
+			}
+			check(t, []types.ModelInfoEntry{deployment("a", f(500_000), nil), deployment("b", f(200_000), nil)}, mixed, 200_000, 0)
+		})
+		for _, value := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+			t.Run("ignores the invalid override "+strconv.FormatFloat(value, 'g', -1, 64), func(t *testing.T) {
+				check(t, []types.ModelInfoEntry{deployment("a", f(300_000), f(100_000))},
+					resolver(&types.LimitOverrides{ContextWindow: f(value), MaxTokens: f(value)}, "gpt-6.1-sol"), 272_000, 64_000)
+			})
+		}
+		t.Run("prefers the router figure under LITELLM_TRUST_PROXY_LIMITS=1", func(t *testing.T) {
+			t.Setenv("LITELLM_TRUST_PROXY_LIMITS", "1")
+			check(t, []types.ModelInfoEntry{deployment("a", f(300_000), f(100_000))}, resolver(nil, "gpt-6.1-sol"), 300_000, 100_000)
+			check(t, []types.ModelInfoEntry{deployment("a", nil, nil)}, resolver(nil, "gpt-6.1-sol"), 272_000, 64_000)
+			check(t, []types.ModelInfoEntry{deployment("a", f(300_000), nil)},
+				resolver(&types.LimitOverrides{ContextWindow: f(500_000)}, "gpt-6.1-sol"), 500_000, 0)
+		})
+		for _, value := range []string{"", "0"} {
+			t.Run("keeps the minimum when LITELLM_TRUST_PROXY_LIMITS="+value, func(t *testing.T) {
+				t.Setenv("LITELLM_TRUST_PROXY_LIMITS", value)
+				check(t, []types.ModelInfoEntry{deployment("a", f(300_000), nil)}, resolver(nil, "gpt-6.1-sol"), 272_000, 0)
+			})
 		}
 	})
 

@@ -118,6 +118,13 @@ type DiscoveryOptions struct {
 	// models.dev is not consulted at all.
 	ModelsDev          *bool
 	ModelsDevCachePath string
+	// ModelOverrides are Pi `models.json` `providers.<providerId>.modelOverrides.<modelId>` limits.
+	ModelOverrides map[string]map[string]LimitOverrides
+}
+
+// LimitOverrides: nil is an absent limit.
+type LimitOverrides struct {
+	ContextWindow, MaxTokens *float64
 }
 
 type ModelInfoParams struct {

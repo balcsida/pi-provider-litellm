@@ -110,7 +110,9 @@ type CatalogCost struct {
 
 // CatalogResolution: nil pointers and empty strings are TypeScript `undefined`.
 type CatalogResolution struct {
-	Provider       string
+	Provider string
+	// PiProvider is the Pi provider whose catalog entry resolved CatalogModelID, set only then, so the pair is Pi's providerId/model.id.
+	PiProvider     string
 	CatalogModelID string
 	SemanticFamily FamilyEvidence
 	SemanticModel  SemanticModel
@@ -125,7 +127,10 @@ type CatalogResolution struct {
 	Vision                   *bool
 	ContextWindow            *float64
 	MaxTokens                *float64
-	Cost                     *CatalogCost
+	// LimitOverrides is the user `modelOverrides` entry for the identified catalog model; read only under
+	// unanimous catalog authority.
+	LimitOverrides *types.LimitOverrides
+	Cost           *CatalogCost
 }
 
 // CatalogResolver resolves catalog evidence for one deployment; nil means none.
@@ -1071,6 +1076,13 @@ func maxOf(values ...float64) float64 {
 }
 
 func conservativeLimit(explicit, catalog *float64) *float64 {
+	// LITELLM_TRUST_PROXY_LIMITS=1 lets the router's own figure win over the catalog.
+	if os.Getenv("LITELLM_TRUST_PROXY_LIMITS") == "1" {
+		if limit := explicitLimit(explicit); limit != nil {
+			return limit
+		}
+		return explicitLimit(catalog)
+	}
 	var valid []float64
 	for _, candidate := range []*float64{explicitLimit(explicit), explicitLimit(catalog)} {
 		if candidate != nil {
@@ -1340,7 +1352,7 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 		info := infoOf(entry)
 		authority := catalogAuthority[i]
 		reasoningEvidence[i], visionEvidence[i] = info.SupportsReasoning, info.SupportsVision
-		var catalogContext, catalogMax *float64
+		var catalogContext, catalogMax, overrideContext, overrideMax *float64
 		if authority != nil {
 			if reasoningEvidence[i] == nil {
 				reasoningEvidence[i] = authority.Reasoning
@@ -1349,9 +1361,18 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 				visionEvidence[i] = authority.Vision
 			}
 			catalogContext, catalogMax = authority.ContextWindow, authority.MaxTokens
+			if authority.LimitOverrides != nil {
+				overrideContext, overrideMax = authority.LimitOverrides.ContextWindow, authority.LimitOverrides.MaxTokens
+			}
 		}
-		contextWindowEvidence[i] = conservativeLimit(info.MaxInputTokens, catalogContext)
-		maxTokensEvidence[i] = conservativeLimit(info.MaxOutputTokens, catalogMax)
+		contextWindowEvidence[i] = explicitLimit(overrideContext)
+		if contextWindowEvidence[i] == nil {
+			contextWindowEvidence[i] = conservativeLimit(info.MaxInputTokens, catalogContext)
+		}
+		maxTokensEvidence[i] = explicitLimit(overrideMax)
+		if maxTokensEvidence[i] == nil {
+			maxTokensEvidence[i] = conservativeLimit(info.MaxOutputTokens, catalogMax)
+		}
 	}
 	everyTrue := func(values []*bool) bool {
 		for _, value := range values {

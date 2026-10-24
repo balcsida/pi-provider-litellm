@@ -327,7 +327,7 @@ func (s *extensionState) runDiscovery(ctx context.Context, auth types.LiteLLMRun
 	options := discover.Options{
 		DiscoveryOptions: types.DiscoveryOptions{
 			Timeout: &timeout, Headers: auth.Headers, AllowInsecureHTTP: auth.AllowInsecureHTTP,
-			ModelsDev: &modelsDev, ModelsDevCachePath: cachePath,
+			ModelsDev: &modelsDev, ModelsDevCachePath: cachePath, ModelOverrides: readModelLimitOverrides(),
 		},
 		Silent: !isVerboseDiscovery(),
 		Report: func(message string) { reportDiagnostic(strings.TrimSuffix(message, "\n")) },

@@ -354,7 +354,7 @@ func TestDiscoverModelsViaModelInfo(t *testing.T) {
 				tc.params, tc.mode, endpoint)
 			// The synchronous fallback must work even when public-catalog loading exceeds its budget.
 			resolved := ResolveModelInfoCatalog(entryFrom(t, row), nil)
-			if resolved == nil || resolved.Provider != "chatgpt" || resolved.CatalogModelID != "gpt-5.6-sol" ||
+			if resolved == nil || resolved.Provider != "chatgpt" || resolved.PiProvider != "openai-codex" || resolved.CatalogModelID != "gpt-5.6-sol" ||
 				resolved.ContextWindow == nil || *resolved.ContextWindow != 272_000 ||
 				resolved.MaxTokens == nil || *resolved.MaxTokens != 128_000 {
 				t.Fatalf("resolved = %+v", resolved)
@@ -666,3 +666,66 @@ func firstModelWithContext(t *testing.T, ctx context.Context, base string, optio
 	}
 	return result.Models[0]
 }
+
+// Ports "applies a backend model's modelOverrides to a LiteLLM route backed by it" of tests/index.test.ts;
+// PiG's openai/gpt-4.1 catalog entry reports the same 1_047_576 / 32_768 figures as the Pi catalog.
+func TestModelOverridesApplyToARouteBackedByTheModel(t *testing.T) {
+	row := `{"model_name":"team-gpt","litellm_params":{"model":"openai/gpt-4.1"},` +
+		`"model_info":{"id":"d1","mode":"chat","max_input_tokens":1047576,"max_output_tokens":32768}}`
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]map[string]types.LimitOverrides
+		context   int
+		maxTokens int
+	}{
+		{"applies the override", map[string]map[string]types.LimitOverrides{
+			"openai": {"gpt-4.1": {ContextWindow: ptrTo(2_000_000.0), MaxTokens: ptrTo(50_000.0)}},
+		}, 2_000_000, 50_000},
+		{"ignores an override for another model", map[string]map[string]types.LimitOverrides{
+			"openai": {"gpt-4o": {ContextWindow: ptrTo(2_000_000.0)}},
+		}, 1_047_576, 32_768},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := mockEndpoints(t, map[string]http.HandlerFunc{"/model/info": jsonResponse(200, modelInfoBody(row))})
+			options, _ := testOptions(t)
+			options.ModelOverrides = tc.overrides
+
+			model := discover(t, base, options).Models[0]
+
+			if model.ContextWindow != tc.context || model.MaxTokens != tc.maxTokens {
+				t.Errorf("limits = %d / %d", model.ContextWindow, model.MaxTokens)
+			}
+		})
+	}
+}
+
+// Ports the ChatGPT cases of the same tests/index.test.ts block; PiG's openai-codex catalog lists gpt-6.1-sol at the
+// same 500_000 / 128_000 figures as the Pi catalog.
+func TestModelOverridesKeyByThePiProviderOfTheBackendModel(t *testing.T) {
+	row := `{"model_name":"team-gpt","litellm_params":{"model":"chatgpt/gpt-6.1-sol"},` +
+		`"model_info":{"id":"d1","mode":"chat","max_input_tokens":500000,"max_output_tokens":128000}}`
+	override := types.LimitOverrides{ContextWindow: ptrTo(800_000), MaxTokens: ptrTo(64_000)}
+	for _, tc := range []struct {
+		name      string
+		key       string
+		context   int
+		maxTokens int
+	}{
+		{"keys a ChatGPT route's modelOverrides by the Pi provider that identifies the backend model", "openai-codex", 800_000, 64_000},
+		{"ignores a ChatGPT route's modelOverrides keyed by the LiteLLM provider label", "chatgpt", 500_000, 128_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := mockEndpoints(t, map[string]http.HandlerFunc{"/model/info": jsonResponse(200, modelInfoBody(row))})
+			options, _ := testOptions(t)
+			options.ModelOverrides = map[string]map[string]types.LimitOverrides{tc.key: {"gpt-6.1-sol": override}}
+
+			model := discover(t, base, options).Models[0]
+
+			if model.ContextWindow != tc.context || model.MaxTokens != tc.maxTokens {
+				t.Errorf("limits = %d / %d", model.ContextWindow, model.MaxTokens)
+			}
+		})
+	}
+}
+
+func ptrTo(v float64) *float64 { return &v }
