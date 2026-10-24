@@ -189,7 +189,7 @@ func TestModelInfoA_ReducesMixedAzureDeploymentVersionsToChatCompletions(t *test
 	model := firstModel(t, base, options)
 
 	if model.ID != "gpt-production" || model.API != ai.APIOpenAICompletions || model.LiteLLMBackendFamily != types.FamilyOpenAI ||
-		model.LiteLLMDiscoveryVersion != 7 {
+		model.LiteLLMDiscoveryVersion != 9 {
 		t.Errorf("model = %+v", model)
 	}
 }

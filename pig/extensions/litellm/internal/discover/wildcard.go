@@ -3,6 +3,7 @@ package discover
 
 import (
 	"cmp"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -178,6 +179,7 @@ func applyWildcardEvidence(
 
 	result := model
 	result.LiteLLMBackendFamily, result.LiteLLMResponsesReasoningControl, result.LiteLLMPolicy, result.ThinkingLevelMap = "", false, nil, nil
+	result.PromptCache = nil
 	result.API = selected.API
 	result.Reasoning = selected.Reasoning
 	result.Compat = selected.Compat
@@ -186,6 +188,9 @@ func applyWildcardEvidence(
 	}
 	if selected.LiteLLMBackendFamily != "" {
 		result.LiteLLMBackendFamily = selected.LiteLLMBackendFamily
+	}
+	if selected.PromptCache != nil {
+		result.PromptCache = maps.Clone(selected.PromptCache)
 	}
 	if len(policies) > 0 {
 		result.LiteLLMPolicy = &types.LiteLLMModelPolicy{

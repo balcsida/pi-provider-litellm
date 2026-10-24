@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":7,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":9,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}
@@ -2149,4 +2149,88 @@ func TestFallbacks_MoonshotKeepsRequestSideReasoningSuppressionTransportScoped(t
 			}
 		})
 	}
+}
+
+// Ports the `prompt cache lifetimes` describe block of tests/discover.test.ts.
+
+func fbClaudeRow(name, extra, model string) string {
+	return fmt.Sprintf(`{"model_name":%q,"litellm_params":{"model":%q},"model_info":{"mode":"chat","litellm_provider":"anthropic"%s}}`,
+		name, model, extra)
+}
+
+func TestFallbacks_PromptCacheDeclaresLifetimesForUnanimousClaudeEvidenceOnNativeMessages(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(fbClaudeRow("claude", "", "anthropic/claude-sonnet-4-5")),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"anthropic-messages","promptCache":{"short":300,"long":3600}}`)
+}
+
+func TestFallbacks_PromptCacheDeclaresLifetimesForAClaudeBackedChatCompletionsRoute(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(fbClaudeRow("claude-chat", `,"supported_endpoints":["/v1/chat/completions"]`, "anthropic/claude-sonnet-4-5")),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"openai-completions","compat":{"cacheControlFormat":"anthropic"},`+
+		`"promptCache":{"short":300,"long":3600}}`)
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForAClaudeBackedRouteOnResponses(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(fbClaudeRow("claude-responses", `,"mode":"responses","supported_endpoints":["/v1/responses"]`,
+			"anthropic/claude-sonnet-4-5")),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"openai-responses"}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForARouteIdentifiedOnlyByItsName(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(`{"model_name":"claude-sonnet-4-5","model_info":{"mode":"chat"}}`),
+	})
+
+	fbMatch(t, result.Models[0], `{"compat":{"cacheControlFormat":"anthropic"}}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForTheV1ModelsFallback(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbStatus(404),
+		"/v1/models":  fbData(`{"id":"claude-sonnet-4-5"}`),
+	})
+
+	fbMatch(t, result.Models[0], `{"compat":{"cacheControlFormat":"anthropic"}}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForAnOpenAIBackedRoute(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(fbClaudeRow("gpt", "", "openai/gpt-4o")),
+	})
+
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForAGroupMixingClaudeAndOpenAIDeployments(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(
+			fbClaudeRow("mixed", `,"id":"a"`, "anthropic/claude-sonnet-4-5"),
+			fbClaudeRow("mixed", `,"id":"b","litellm_provider":"openai"`, "openai/gpt-4o")),
+	})
+
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheLetsAWildcardChildInheritTheLifetimesFromItsParentRoute(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(`{"model_name":"team/*","litellm_params":{"model":"anthropic/*"},` +
+			`"model_info":{"supported_endpoints":["/v1/chat/completions"]}}`),
+		"/v1/models": fbData(`{"id":"team/claude-sonnet-4-5"}`),
+	})
+
+	if len(result.Models) != 1 {
+		t.Fatalf("models = %v, want 1", fbIDs(result.Models))
+	}
+	fbMatch(t, result.Models[0], `{"id":"team/claude-sonnet-4-5","promptCache":{"short":300,"long":3600}}`)
 }
