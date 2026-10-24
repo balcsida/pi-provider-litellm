@@ -145,14 +145,14 @@ export const classify: ProviderClassifier["classify"] = async (model, context, o
     await options?.onResponse?.({ status: response.status, headers: responseHeaders }, model);
     const body = await response.text();
     if (!response.ok) throw new Error(`LiteLLM decisions request failed (${response.status}): ${errorDetail(body)}`);
+    // The proxy billed the request whatever the body holds; token counts are added once it parses.
+    const cost = responseCost(responseHeaders);
+    const billed = parseUsage(undefined, model.cost, cost);
+    if (billed) result.usage = billed;
     const parsed: unknown = JSON.parse(body);
     if (!isRecord(parsed)) throw new Error(`LiteLLM classifier ${model.id} returned an unexpected response`);
     // A malformed answer set was still billed.
-    const usage = parseUsage(
-      isRecord(parsed.usage) ? parsed.usage : undefined,
-      model.cost,
-      responseCost(responseHeaders),
-    );
+    const usage = parseUsage(isRecord(parsed.usage) ? parsed.usage : undefined, model.cost, cost);
     if (usage) result.usage = usage;
     const answers = isRecord(parsed.answers) ? parsed.answers : {};
     const parsedAnswers: Record<string, ClassifierAnswer> = {};

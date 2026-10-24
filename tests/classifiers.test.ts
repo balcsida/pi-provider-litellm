@@ -319,10 +319,14 @@ describe("classify", () => {
     expect(failed.stopReason).toBe("error");
     expect(failed.errorMessage).toBe("LiteLLM decisions request failed (503): Service Unavailable");
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>", { status: 200 }));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html>", { status: 200, headers: { "x-litellm-response-cost": "0.002" } }),
+    );
     const garbled = await classify(classifierModel(), context, { apiKey: "k" });
     expect(garbled.stopReason).toBe("error");
     expect(garbled.answers).toEqual({});
+    // The proxy charged for the request even though its reply could not be read.
+    expect(garbled.usage?.cost.total).toBeCloseTo(0.002, 9);
   });
 
   it.each([
