@@ -738,6 +738,7 @@ describe("discoverModels via /model/info", () => {
     // The synchronous fallback must work even when public-catalog loading exceeds its budget.
     expect(resolveModelInfoCatalog(entry)).toMatchObject({
       provider: "chatgpt",
+      piProvider: "openai-codex",
       catalogModelId: "gpt-5.6-sol",
       contextWindow: 272_000,
       maxTokens: 128_000,

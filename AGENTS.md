@@ -80,6 +80,10 @@
   A health-only row mixed with deployment details grants no catalog authority to that group.
 - ` (no metadata)` is the evidence-free fallback cache enrichment marker. Reduced `/model/info` groups and health
   groups with deployment details use ` (incomplete metadata)`, which remains ineligible for route-name enrichment.
+- Per-deployment limit precedence: a Pi `models.json` `modelOverrides` entry for the catalog model (read from
+  `catalogAuthority`, so only under unanimous authority) → the router's explicit figure versus the catalog figure
+  (minimum by default, router-first under `LITELLM_TRUST_PROXY_LIMITS=1`) → default; the group minimum applies last.
+  The Go port must mirror it.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - `/litellm-refresh` is the explicit refresh that Pi's `PI_OFFLINE` otherwise blocks. It passes `allowNetwork: true`
   but keeps the `LITELLM_OFFLINE=1` and zero-timeout gates, and models.dev stays off under `PI_OFFLINE`; do not widen it

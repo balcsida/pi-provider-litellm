@@ -54,6 +54,8 @@ export interface ReasoningPolicy {
 
 export interface CatalogResolution {
   provider?: string;
+  // The Pi provider whose catalog entry resolved catalogModelId; set only then, so the pair is Pi's providerId/model.id.
+  piProvider?: string;
   catalogModelId?: string;
   semanticFamily?: FamilyEvidence;
   semanticModel?: SemanticModel;
@@ -68,6 +70,8 @@ export interface CatalogResolution {
   vision?: boolean;
   contextWindow?: number;
   maxTokens?: number;
+  // User `modelOverrides` for the identified catalog model; read only under unanimous catalog authority.
+  limitOverrides?: { contextWindow?: number; maxTokens?: number };
   cost?: Partial<DiscoveredModel["cost"]>;
 }
 
@@ -657,6 +661,8 @@ function min(values: readonly number[]): number {
 }
 
 function conservativeLimit(explicit: number | undefined, catalog: number | undefined): number | undefined {
+  // LITELLM_TRUST_PROXY_LIMITS=1 lets the router's own figure win over the catalog.
+  if (process.env.LITELLM_TRUST_PROXY_LIMITS === "1") return explicitLimit(explicit) ?? explicitLimit(catalog);
   const valid = [explicitLimit(explicit), explicitLimit(catalog)].filter(
     (value): value is number => value !== undefined,
   );
@@ -819,11 +825,15 @@ export function reduceModelGroup(
   const visionEvidence = deployments.map(
     (entry, index) => wireBoolean(entry.model_info?.supports_vision) ?? catalogAuthority[index]?.vision,
   );
-  const contextWindowEvidence = deployments.map((entry, index) =>
-    conservativeLimit(entry.model_info?.max_input_tokens, catalogAuthority[index]?.contextWindow),
+  const contextWindowEvidence = deployments.map(
+    (entry, index) =>
+      explicitLimit(catalogAuthority[index]?.limitOverrides?.contextWindow) ??
+      conservativeLimit(entry.model_info?.max_input_tokens, catalogAuthority[index]?.contextWindow),
   );
-  const maxTokensEvidence = deployments.map((entry, index) =>
-    conservativeLimit(entry.model_info?.max_output_tokens, catalogAuthority[index]?.maxTokens),
+  const maxTokensEvidence = deployments.map(
+    (entry, index) =>
+      explicitLimit(catalogAuthority[index]?.limitOverrides?.maxTokens) ??
+      conservativeLimit(entry.model_info?.max_output_tokens, catalogAuthority[index]?.maxTokens),
   );
   const reasoning = reasoningEvidence.every((value) => value ?? false);
   const explicitlyUnsupported = deployments.some(

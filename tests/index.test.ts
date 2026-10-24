@@ -3924,4 +3924,96 @@ describe("models.json provider config", () => {
 
     expect(pi.providers[0]?.name).toBe("Gateway // prod");
   });
+
+  // `modelsJson` is written verbatim when a string, so a test can hand the reader JSONC.
+  async function discoverWithModelsJson(
+    modelsJson: unknown,
+    deployment: { model: string; input: number; output: number } = {
+      model: "openai/gpt-4.1",
+      input: 1_047_576,
+      output: 32_768,
+    },
+  ) {
+    const agentDir = await makeAgentDir();
+    if (typeof modelsJson === "string") await writeFile(join(agentDir, "models.json"), modelsJson, "utf8");
+    else await writeModels(agentDir, modelsJson);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/model/info")) {
+        return jsonResponse(200, {
+          data: [
+            {
+              model_name: "team-gpt",
+              litellm_params: { model: deployment.model },
+              model_info: {
+                id: "d1",
+                mode: "chat",
+                max_input_tokens: deployment.input,
+                max_output_tokens: deployment.output,
+              },
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    const models = (await refreshProvider(pi.providers[0]!, {
+      allowNetwork: true,
+      force: true,
+      credential: { type: "api_key", key: "sk-test", env: { LITELLM_BASE_URL: "https://proxy.example.com" } },
+    })) as Array<{ id: string; contextWindow: number; maxTokens: number }>;
+    return models.find((model) => model.id === "team-gpt");
+  }
+
+  const discoverWithOverride = (override: unknown) =>
+    discoverWithModelsJson({ providers: { openai: { modelOverrides: { "gpt-4.1": override } } } });
+
+  // Pi's openai-codex catalog lists gpt-6.1-sol at 500_000 / 128_000.
+  const chatgptDeployment = { model: "chatgpt/gpt-6.1-sol", input: 500_000, output: 128_000 };
+  const chatgptOverride = { contextWindow: 800_000, maxTokens: 64_000 };
+
+  it("applies a backend model's modelOverrides to a LiteLLM route backed by it", async () => {
+    const model = await discoverWithOverride({ contextWindow: 2_000_000, maxTokens: 50_000 });
+
+    expect(model).toMatchObject({ contextWindow: 2_000_000, maxTokens: 50_000 });
+  });
+
+  it("ignores a malformed modelOverrides value", async () => {
+    const model = await discoverWithOverride("2000000");
+
+    expect(model).toMatchObject({ contextWindow: 1_047_576, maxTokens: 32_768 });
+  });
+
+  it("keys a ChatGPT route's modelOverrides by the Pi provider that identifies the backend model", async () => {
+    const model = await discoverWithModelsJson(
+      { providers: { "openai-codex": { modelOverrides: { "gpt-6.1-sol": chatgptOverride } } } },
+      chatgptDeployment,
+    );
+
+    expect(model).toMatchObject({ contextWindow: 800_000, maxTokens: 64_000 });
+  });
+
+  it("ignores a ChatGPT route's modelOverrides keyed by the LiteLLM provider label", async () => {
+    const model = await discoverWithModelsJson(
+      { providers: { chatgpt: { modelOverrides: { "gpt-6.1-sol": chatgptOverride } } } },
+      chatgptDeployment,
+    );
+
+    expect(model).toMatchObject({ contextWindow: 500_000, maxTokens: 128_000 });
+  });
+
+  it("reads modelOverrides from a models.json with a BOM, comments and trailing commas", async () => {
+    const model = await discoverWithModelsJson(`\uFEFF// overrides
+{
+  "providers": {
+    "openai": { "modelOverrides": { "gpt-4.1": { "contextWindow": 2000000, }, }, },
+  },
+}
+`);
+
+    expect(model).toMatchObject({ contextWindow: 2_000_000, maxTokens: 32_768 });
+  });
 });
