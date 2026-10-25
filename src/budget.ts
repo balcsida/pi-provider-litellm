@@ -311,6 +311,65 @@ export function formatBudgetDetails(
   return lines.join("\n");
 }
 
+// LiteLLM refuses a used-up budget with `type: "budget_exceeded"` (status 422 since 1.104, 429 or 400 before), and
+// /mcp with the bare message, whose wording varies by level and check.
+const BUDGET_EXCEEDED = /budget_exceeded|Budget has been exceeded!|ExceededBudget:|exceeded budget for model=/;
+// The refusals of a level's own budget. Budget windows and per-model budgets reset on schedules of their own.
+const EXCEEDED_LEVEL =
+  /Budget has been exceeded! (Key|Team|TeamMember|User|Organization)=\S*( in Team=)?|ExceededBudget: (User)=.+? over budget\./;
+const EXCEEDED_LEVELS: Record<string, BudgetLevelName> = {
+  Key: "key",
+  Team: "team",
+  TeamMember: "member",
+  User: "user",
+  Organization: "org",
+};
+const LEVEL_LABELS: Record<BudgetLevelName, string> = {
+  key: "key",
+  user: "user",
+  team: "team",
+  member: "team member",
+  org: "organization",
+};
+
+export const isBudgetExceeded = (text: string): boolean => BUDGET_EXCEEDED.test(text);
+
+// Local time in one fixed format, which the Go port prints the same way.
+function resetClock(resetAt: number): string {
+  const at = new Date(resetAt);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+// Starts with "out of budget", which Pi and PiG never retry. A refusal whose level is not tracked keeps the proxy's
+// text, as that names the budget.
+export function formatBudgetExceeded(errorText: string, levels: BudgetLevels, now: number): string {
+  const match = EXCEEDED_LEVEL.exec(errorText);
+  if (!match) return `out of budget. ${errorText}`;
+  const name = match[2] ? "member" : EXCEEDED_LEVELS[match[1] ?? match[3]!]!;
+  const l = levels[name];
+  const amounts = l ? ` (${money(l.spend, 2)} of ${money(l.maxBudget, Number.isInteger(l.maxBudget) ? 0 : 2)})` : "";
+  const reset = formatRelativeReset(l?.resetAt, now);
+  const resets = reset ? ` and resets in ${reset} (${resetClock(l!.resetAt!)})` : "";
+  return `out of budget. The ${LEVEL_LABELS[name]} budget is used up${amounts}${resets}.`;
+}
+
+export function setupLiteLLMBudgetErrors(
+  pi: ExtensionAPI,
+  providerNames: ReadonlySet<string>,
+  levelsAfterError?: (ctx: ExtensionContext, name: string) => Promise<BudgetLevels>,
+): void {
+  pi.on("message_end", async (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant" || message.stopReason !== "error" || !providerNames.has(message.provider)) return;
+    const text = message.errorMessage ?? "";
+    if (!isBudgetExceeded(text)) return;
+    const levels = (await levelsAfterError?.(ctx, message.provider).catch(() => undefined)) ?? {};
+    const explained = formatBudgetExceeded(text, levels, Date.now());
+    return { message: { ...message, errorMessage: `LiteLLM (${JSON.stringify(message.provider)}): ${explained}` } };
+  });
+}
+
 export function budgetDisplaySetting(budgetSettings: unknown): { display: BudgetDisplay; warning?: string } {
   const display = obj(budgetSettings)?.display;
   if (display === undefined || display === "all" || display === "tightest") return { display: display ?? "all" };
@@ -344,7 +403,10 @@ interface ProviderState {
   inFlight?: Promise<PollOutcome>;
 }
 
-export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): void {
+export function setupLiteLLMBudget(
+  pi: ExtensionAPI,
+  options: BudgetOptions,
+): (ctx: ExtensionContext, name: string) => Promise<BudgetLevels> {
   const displayNames = new Map(options.providers.map(({ name, displayName }) => [name, displayName]));
   const states = new Map<string, ProviderState>();
   // Keyed like the MCP registration identity in index.ts, because custom headers can carry gateway credentials.
@@ -558,4 +620,12 @@ export function setupLiteLLMBudget(pi: ExtensionAPI, options: BudgetOptions): vo
       }
     },
   });
+
+  // The levels a budget refusal is explained with, read again unless a poll ran within the last minute.
+  return async (ctx, name) => {
+    const state = stateFor(name);
+    const stale = state.lastPollAt === undefined || Date.now() - state.lastPollAt >= POLL_MIN_INTERVAL_MS;
+    if (ctx?.hasUI && !gated() && (stale || state.inFlight)) await poll(ctx, name);
+    return state.levels;
+  };
 }

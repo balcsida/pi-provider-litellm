@@ -1,3 +1,4 @@
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type BudgetEndpoint,
@@ -5,9 +6,11 @@ import {
   type BudgetTheme,
   budgetDisplaySetting,
   formatBudgetDetails,
+  formatBudgetExceeded,
   formatBudgetStatus,
   formatCompactAmount,
   formatRelativeReset,
+  isBudgetExceeded,
   mergeKeyHeaders,
   pollBudget,
 } from "../src/budget.js";
@@ -500,6 +503,86 @@ describe("formatBudgetDetails", () => {
     expect(formatBudgetDetails("litellm", {}, denied, NOW)).toBe(
       'LiteLLM ("litellm") budget\n  Not readable with this credential: key (500), user (500)',
     );
+  });
+});
+
+describe("budget refusals", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  const TEAM_TEXT = "Budget has been exceeded! Team=T Current cost: 512.3, Max budget: 500.0";
+  // How Pi and PiG word LiteLLM's refusal of a Chat Completions request.
+  const CHAT = `422: ${JSON.stringify({ message: TEAM_TEXT, type: "budget_exceeded", param: null, code: "422" })}`;
+  const TEAM = { team: { spend: 512.3, maxBudget: 500, resetAt: RESET } };
+  const BEFORE_RESET = RESET - 2 * DAY - 3_600_000;
+
+  it("recognises LiteLLM's refusals on model routes and /mcp", () => {
+    expect(isBudgetExceeded(CHAT)).toBe(true);
+    expect(isBudgetExceeded(JSON.stringify({ detail: TEAM_TEXT }))).toBe(true);
+    expect(isBudgetExceeded('{"detail":"ExceededBudget: User=U1 over budget. Spend=101, Budget=100"}')).toBe(true);
+    expect(isBudgetExceeded('{"detail":"LiteLLM Team: T, exceeded budget for model=m"}')).toBe(true);
+    expect(isBudgetExceeded('429: {"message":"Rate limit reached","type":"rate_limit_error"}')).toBe(false);
+  });
+
+  it("names the used-up level with its spend, limit, and reset in local time", () => {
+    vi.stubEnv("TZ", "Asia/Tokyo");
+    expect(formatBudgetExceeded(CHAT, TEAM, BEFORE_RESET)).toBe(
+      "out of budget. The team budget is used up ($512.30 of $500) and resets in 2d (2026-11-01 09:00).",
+    );
+  });
+
+  it("tells each level's refusal apart", () => {
+    const explain = (text: string) => formatBudgetExceeded(text, {}, BEFORE_RESET);
+    expect(explain("Budget has been exceeded! Key=K2 (sk-...AZBg) Current cost: 10.2, Max budget: 10.0")).toBe(
+      "out of budget. The key budget is used up.",
+    );
+    expect(
+      explain("Budget has been exceeded! Key=hashed-k2 Current cost: 9.9, Estimated request cost: 0.2, Max budget: 10"),
+    ).toBe("out of budget. The key budget is used up.");
+    expect(explain("Budget has been exceeded! User=U1 in Team=T Current cost: 51, Max budget: 50")).toBe(
+      "out of budget. The team member budget is used up.",
+    );
+    expect(explain("Budget has been exceeded! TeamMember=U1:T Current cost: 51, Max budget: 50")).toBe(
+      "out of budget. The team member budget is used up.",
+    );
+    expect(explain("Budget has been exceeded! User=U1 Current cost: 101, Max budget: 100")).toBe(
+      "out of budget. The user budget is used up.",
+    );
+    expect(explain("ExceededBudget: User=U1 over budget. Spend=101, Budget=100")).toBe(
+      "out of budget. The user budget is used up.",
+    );
+    expect(explain("Budget has been exceeded! Organization=O1 Current cost: 1001, Max budget: 1000")).toBe(
+      "out of budget. The organization budget is used up.",
+    );
+  });
+
+  it("keeps the proxy's text for budgets the footer does not track or that reset on their own schedule", () => {
+    for (const text of [
+      "Budget has been exceeded! Tag=prod Current cost: 11, Max budget: 10",
+      "Budget has been exceeded! EndUser=E1 Current cost: 11, Max budget: 10",
+      "ExceededBudget: End User=E1 over budget. Spend=11, Budget=10",
+      "Budget has been exceeded! Project=P1 Current cost: 11, Max budget: 10",
+      "Budget has been exceeded! Model access group=g Current cost: 11, Max budget: 10",
+      "Budget has been exceeded! Current cost: 1001, Max budget: 1000",
+      "ExceededBudget: Key over 1d budget. Spend=$10.5000, Limit=$10.00",
+      "ExceededBudget: Team=T over 1d budget. Spend=$10.5000, Limit=$10.00",
+      "LiteLLM Team: T, exceeded budget for model=m",
+    ]) {
+      expect(formatBudgetExceeded(text, TEAM, BEFORE_RESET)).toBe(`out of budget. ${text}`);
+    }
+  });
+
+  it("leaves out a reset that is unknown or already past", () => {
+    const used = "out of budget. The team budget is used up ($512.30 of $500).";
+    expect(formatBudgetExceeded(CHAT, { team: { spend: 512.3, maxBudget: 500 } }, BEFORE_RESET)).toBe(used);
+    expect(formatBudgetExceeded(CHAT, TEAM, RESET + 1)).toBe(used);
+  });
+
+  it("is final for Pi's retry policy, which retries LiteLLM's own text when it holds a 5xx-like number", () => {
+    const retryable = (errorMessage: string) =>
+      isRetryableAssistantError({ stopReason: "error", errorMessage } as never);
+    expect(retryable(CHAT)).toBe(true);
+    expect(retryable(formatBudgetExceeded(CHAT, TEAM, BEFORE_RESET))).toBe(false);
+    expect(retryable(formatBudgetExceeded("Budget has been exceeded! Tag=t500 Current cost: 501", {}, 0))).toBe(false);
   });
 });
 

@@ -18,7 +18,7 @@ import type { ExtensionAPI, ExtensionContext, McpServerConfig } from "@earendil-
 // A namespace import, so a Pi without `VERSION` reaches the version check instead of failing to link.
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
-import { budgetDisplaySetting, setupLiteLLMBudget } from "./budget.js";
+import { budgetDisplaySetting, isBudgetExceeded, setupLiteLLMBudget, setupLiteLLMBudgetErrors } from "./budget.js";
 import type { LiteLLMClassifierModel } from "./classifiers.js";
 import { setupLiteLLMCostTracking } from "./cost.js";
 import {
@@ -2501,8 +2501,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // LiteLLM 1.102.0 and later answer `initialize` with 403 when the key has no MCP servers granted,
   // and Pi warns at every start about a server that fails to connect. Asking first lets such a
   // server be registered disabled: Pi neither connects to it nor warns, and /mcp still lists it, so
-  // the user can enable it once servers are granted.
-  async function mcpAccessRefused(definition: ProviderDefinition, url: string): Promise<boolean> {
+  // the user can enable it once servers are granted. A used-up budget fails every MCP request until
+  // it resets, so it is refused the same way, with a notice.
+  async function mcpAccessRefused(
+    definition: ProviderDefinition,
+    url: string,
+  ): Promise<"no-servers" | "out-of-budget" | undefined> {
     try {
       const stored = readStoredCredential(definition.name, join(getAgentDir(), "auth.json"));
       // The check must send the credential Pi will send. Like seeding, it runs no key helper and
@@ -2515,11 +2519,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         definition.apiKeyConfig?.startsWith("!") ||
         useGcloudToken
       ) {
-        return false;
+        return undefined;
       }
       const auth = await authForCredential(definition, stored, false);
       // The credential goes only to its own root.
-      if (`${auth.baseUrl}/mcp` !== url) return false;
+      if (`${auth.baseUrl}/mcp` !== url) return undefined;
       // The credential and headers Pi's client sends, so the proxy answers as it will answer Pi.
       const headers = { ...auth.headers, Authorization: `Bearer ${auth.apiKey}` };
       const response = await fetch(url, {
@@ -2538,7 +2542,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         redirect: "manual",
         signal: AbortSignal.timeout(getSeedTimeoutMs()),
       });
-      await response.body?.cancel().catch(() => undefined);
+      // Only a refusal is read: a granted session can answer with an open event stream.
+      const refusal = response.ok ? undefined : await response.text().catch(() => "");
+      if (refusal === undefined) await response.body?.cancel().catch(() => undefined);
       // Pi opens its own session; end the one this check opened.
       const session = response.headers.get("mcp-session-id");
       if (session) {
@@ -2551,9 +2557,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           .then((closed) => closed.body?.cancel())
           .catch(() => undefined);
       }
-      return response.status === 403;
+      // The budget refusal's status is configurable on the proxy, so its text is checked first.
+      if (refusal !== undefined && isBudgetExceeded(refusal)) return "out-of-budget";
+      return response.status === 403 ? "no-servers" : undefined;
     } catch {
-      return false;
+      return undefined;
     }
   }
 
@@ -2574,6 +2582,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     try {
       pi.registerMcpServer(definition.name, refused ? { ...config, enabled: false } : config);
       attempt.registered = true;
+      if (refused === "out-of-budget") {
+        notifyMcp(
+          `LiteLLM MCP (${JSON.stringify(definition.name)}): out of budget, so its MCP server is off for this ` +
+            "session. Turn it on in /mcp once the budget resets.",
+        );
+      }
     } catch (error) {
       // The claim stays, so the refusal is reported once rather than on every turn.
       notifyMcp(
@@ -2878,10 +2892,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   setupLiteLLMCostTracking(pi, [...providerNames]);
 
+  let budgetLevels: ReturnType<typeof setupLiteLLMBudget> | undefined;
   if (budgetEnabled) {
     const { display, warning } = budgetDisplaySetting(settings?.budget);
     const definitionNamed = (name: string) => definitions.find((definition) => definition.name === name)!;
-    setupLiteLLMBudget(pi, {
+    budgetLevels = setupLiteLLMBudget(pi, {
       providers: definitions.map(({ name, displayName }) => ({ name, displayName })),
       display,
       displayWarning: warning,
@@ -2892,6 +2907,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       missingCredentials: (name) => missingCredentials(definitionNamed(name)),
     });
   }
+  setupLiteLLMBudgetErrors(pi, providerNames, budgetLevels);
 
   if (skillsEnabled) {
     for (const tool of createSkillToolDefinitions(resolveDefaultRuntimeAuth)) {
