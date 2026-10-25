@@ -305,6 +305,77 @@ describe("LiteLLM MCP server registration", () => {
     expect(stderr).not.toHaveBeenCalled();
   });
 
+  // 422 is LiteLLM 1.104.0's default, 429 and 400 older releases', and the proxy's operator can choose another.
+  it.each([422, 429, 400, 403])(
+    "registers the server disabled, with one notice, when the proxy refuses a used-up budget at initialize (%i)",
+    async (status) => {
+      const checks: Request[] = [];
+      mockProxy((request) => {
+        checks.push(request);
+        return Response.json({ detail: "Budget has been exceeded! Team=T Current cost: 2, Max budget: 1" }, { status });
+      });
+      process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+      process.env.LITELLM_API_KEY = "sk-default";
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const pi = await load(await makeAgentDir());
+      await startTurn(pi);
+      await startTurn(pi);
+
+      expect(pi.mcpServers.get("litellm")).toEqual({
+        url: "https://proxy.example.com/mcp",
+        auth: { provider: "litellm" },
+        enabled: false,
+      });
+      expect(checks).toHaveLength(1);
+      expect(stderrText(stderr)).toBe(
+        'LiteLLM MCP ("litellm"): out of budget, so its MCP server is off for this session. ' +
+          "Turn it on in /mcp once the budget resets.\n",
+      );
+    },
+  );
+
+  it("reads no more than the start of a refusal's body", async () => {
+    let pulls = 0;
+    mockProxy(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  '{"detail":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}',
+                ),
+              );
+            },
+            // 16 MB more, a bound only for when the check reads everything.
+            pull(controller) {
+              if (++pulls > 1000) controller.close();
+              else controller.enqueue(new Uint8Array(16 * 1024).fill(32));
+            },
+          }),
+          { status: 422 },
+        ),
+    );
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")?.enabled).toBe(false);
+    expect(pulls).toBeLessThan(10);
+  });
+
+  it("registers the server enabled, without a notice, after any other refusal", async () => {
+    mockProxy(() => Response.json({ detail: "Unprocessable" }, { status: 422 }));
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")?.enabled).toBeUndefined();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
   it("checks with the credential and headers Pi sends, and ends the session the check opened", async () => {
     const requests: Request[] = [];
     mockProxy((request) => {

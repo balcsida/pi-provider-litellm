@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type BudgetOptions, formatBudgetDetails, setupLiteLLMBudget } from "../src/budget.js";
-import { AUTH, fixture, mockProxy, ok, status } from "./budget-helpers.js";
+import {
+  type BudgetOptions,
+  formatBudgetDetails,
+  setupLiteLLMBudget,
+  setupLiteLLMBudgetErrors,
+} from "../src/budget.js";
+import { AUTH, fixture, mockProxy, ok, RESET, status } from "./budget-helpers.js";
 import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
 
 vi.unmock("@earendil-works/pi-coding-agent");
@@ -42,7 +47,7 @@ let resolveAuth: ReturnType<typeof vi.fn>;
 
 function setup(): void {
   resolveAuth = vi.fn(async (_ctx: unknown, name: string) => auths[name]);
-  setupLiteLLMBudget(
+  const levels = setupLiteLLMBudget(
     pi as never,
     {
       providers,
@@ -55,6 +60,7 @@ function setup(): void {
       ...overrides,
     } as BudgetOptions,
   );
+  setupLiteLLMBudgetErrors(pi as never, new Set(providers.map(({ name }) => name)), levels);
 }
 
 function command(args: string, ctx: unknown): Promise<void> | void {
@@ -73,6 +79,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("budget footer", () => {
@@ -626,6 +633,107 @@ describe("/litellm-budget", () => {
   });
 });
 
+describe("budget refusals", () => {
+  const TEAM_TEXT = "Budget has been exceeded! Team=T Current cost: 1000.5, Max budget: 1000.0";
+  const REFUSAL = `422: ${JSON.stringify({ message: TEAM_TEXT, type: "budget_exceeded", param: null, code: "422" })}`;
+  const spentTeam = () => {
+    const body = fixture("team-info");
+    return ok({ ...body, team_info: { ...body.team_info, spend: 1000.5 } });
+  };
+  const TEAM_ROUTES = { "/key/info": TEAM_KEY, "/v2/user/info": USER_INFO, "/team/info?team_id=T": spentTeam };
+  const EXPLAINED =
+    'LiteLLM ("litellm"): out of budget. The team budget is used up ($1,000.50 of $1,000) and resets in 2d (2026-11-01 00:00).';
+  const refusal = (provider = "litellm", errorMessage = REFUSAL) => ({
+    role: "assistant",
+    provider,
+    model: "m",
+    stopReason: "error",
+    errorMessage,
+  });
+  const end = async (message: unknown, ctx: unknown) => {
+    const result = await pi.handlers.get("message_end")![0]!({ message }, ctx);
+    return result?.message.errorMessage;
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(RESET - 2 * 86_400_000 - 3_600_000);
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  it("explains a refusal with the level's spend, limit, and reset, polled for every refusal", async () => {
+    const seen = mockProxy(TEAM_ROUTES);
+    setup();
+    const ctx = makeCtx();
+    const polls = () => seen.filter((path) => path === "/key/info").length;
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(polls()).toBe(1);
+
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+    expect(polls()).toBe(2);
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+    expect(polls()).toBe(3);
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, "LiteLLM user $0.34/$100 · team $1k/$1k · member $0.15/$50");
+  });
+
+  it("explains a refusal with the figures of the credential it refused, right after a login", async () => {
+    mockProxy(
+      { "/key/info": TEAM_KEY, "/v2/user/info": USER_INFO, "/team/info?team_id=T": TEAM_INFO },
+      { token: "sk-a", gateway: "g1" },
+    );
+    auths = { litellm: { ...AUTH, apiKey: "sk-a" } };
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Key B is charged to a team whose budget is used up.
+    mockProxy(TEAM_ROUTES, { token: "sk-b", gateway: "g1" });
+    auths.litellm = { ...AUTH, apiKey: "sk-b" };
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+  });
+
+  it("waits for a poll in flight, and polls when none ran yet", async () => {
+    const seen = mockProxy(TEAM_ROUTES);
+    const polls = () => seen.filter((path) => path === "/key/info").length;
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+    expect(polls()).toBe(1);
+
+    pi = createPi();
+    setup();
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+    expect(polls()).toBe(2);
+  });
+
+  it("polls neither without UI nor while discovery is off, and still says the budget is used up", async () => {
+    const seen = mockProxy(TEAM_ROUTES);
+    setup();
+    expect(await end(refusal(), makeCtx({ hasUI: false }))).toBe(
+      'LiteLLM ("litellm"): out of budget. The team budget is used up.',
+    );
+    pi = createPi();
+    overrides = { disabledReason: () => "LITELLM_OFFLINE=1" };
+    setup();
+    expect(await end(refusal(), makeCtx())).toBe('LiteLLM ("litellm"): out of budget. The team budget is used up.');
+    expect(seen).toEqual([]);
+  });
+
+  it("leaves other errors, other providers, and finished messages alone", async () => {
+    const seen = mockProxy(TEAM_ROUTES);
+    setup();
+    const ctx = makeCtx();
+    expect(await end(refusal("litellm", '429: {"message":"Rate limit reached"}'), ctx)).toBeUndefined();
+    expect(await end(refusal("openai"), ctx)).toBeUndefined();
+    expect(await end({ ...refusal(), stopReason: "stop" }, ctx)).toBeUndefined();
+    expect(await end({ role: "user", content: REFUSAL }, ctx)).toBeUndefined();
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("through the extension", () => {
   async function agentDir(settings?: unknown): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "pi-litellm-budget-"));
@@ -658,6 +766,26 @@ describe("through the extension", () => {
     expect(disabled.commands.has("litellm-budget")).toBe(false);
     expect(disabled.handlers.has("turn_end")).toBe(false);
     expect(disabled.handlers.has("model_select")).toBe(false);
+  });
+
+  it("explains budget refusals through every message_end handler, also with budget.enabled false", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no network in this test"));
+    const loaded = createPi();
+    await (await loadExtension(await agentDir({ litellm: { budget: { enabled: false } } })))(loaded);
+    let message: any = {
+      role: "assistant",
+      provider: "litellm",
+      model: "m",
+      content: [],
+      stopReason: "error",
+      errorMessage: '{"error":{"message":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}}',
+    };
+    const ctx = { hasUI: true, ui: { setStatus: vi.fn(), notify: vi.fn(), theme: PLAIN } };
+    for (const handler of loaded.handlers.get("message_end") ?? []) {
+      message = (await handler({ message }, ctx))?.message ?? message;
+    }
+    expect(message.errorMessage).toBe('LiteLLM ("litellm"): out of budget. The team budget is used up.');
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("polls through Pi's provider auth with the configured headers", async () => {

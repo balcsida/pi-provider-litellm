@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MichaelKinsy/PiG/ai"
+	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/fixtures"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
 )
@@ -1648,4 +1651,260 @@ func TestBudgetShutdownDoesNotWaitForAStuckHost(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown waited for the host's SetStatus")
 	}
+}
+
+// ---- budget refusals ----
+
+const (
+	refusalTeamText = "Budget has been exceeded! Team=T Current cost: 512.3, Max budget: 500.0"
+	// How Pi and PiG word LiteLLM's refusal of a Chat Completions request.
+	refusalChat = `422: {"message":"` + refusalTeamText + `","type":"budget_exceeded","param":null,"code":"422"}`
+)
+
+var (
+	refusalTeam        = budgetLevels{budgetTeam: {Spend: 512.3, MaxBudget: 500, ResetAt: budgetReset}}
+	refusalBeforeReset = budgetReset - 2*budgetDay - 3_600_000
+)
+
+// setLocalZone replaces time.Local for the test; resetClock prints in it.
+func setLocalZone(t *testing.T, zone *time.Location) {
+	t.Helper()
+	previous := time.Local
+	time.Local = zone
+	t.Cleanup(func() { time.Local = previous })
+}
+
+func TestBudgetRefusals(t *testing.T) {
+	t.Run("recognises LiteLLM's refusals on model routes and /mcp", func(t *testing.T) {
+		for text, want := range map[string]bool{
+			refusalChat:                            true,
+			`{"detail":"` + refusalTeamText + `"}`: true,
+			`{"detail":"ExceededBudget: User=U1 over budget. Spend=101, Budget=100"}`: true,
+			`{"detail":"LiteLLM Team: T, exceeded budget for model=m"}`:               true,
+			`429: {"message":"Rate limit reached","type":"rate_limit_error"}`:         false,
+		} {
+			if got := isBudgetExceeded(text); got != want {
+				t.Errorf("isBudgetExceeded(%q) = %v, want %v", text, got, want)
+			}
+		}
+	})
+
+	t.Run("names the used-up level with its spend, limit, and reset in local time", func(t *testing.T) {
+		setLocalZone(t, time.FixedZone("JST", 9*3600))
+		want := "out of budget. The team budget is used up ($512.30 of $500) and resets in 2d (2026-11-01 09:00)."
+		if got := formatBudgetExceeded(refusalChat, refusalTeam, refusalBeforeReset); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("tells each level's refusal apart", func(t *testing.T) {
+		for text, want := range map[string]string{
+			"Budget has been exceeded! Key=K2 (sk-...AZBg) Current cost: 10.2, Max budget: 10.0":                     "key",
+			"Budget has been exceeded! Key=hashed-k2 Current cost: 9.9, Estimated request cost: 0.2, Max budget: 10": "key",
+			"Budget has been exceeded! User=U1 in Team=T Current cost: 51, Max budget: 50":                           "team member",
+			"Budget has been exceeded! TeamMember=U1:T Current cost: 51, Max budget: 50":                             "team member",
+			"Budget has been exceeded! User=U1 Current cost: 101, Max budget: 100":                                   "user",
+			"ExceededBudget: User=U1 over budget. Spend=101, Budget=100":                                             "user",
+			"Budget has been exceeded! Organization=O1 Current cost: 1001, Max budget: 1000":                         "organization",
+		} {
+			if got, wantText := formatBudgetExceeded(text, nil, refusalBeforeReset), "out of budget. The "+want+" budget is used up."; got != wantText {
+				t.Errorf("%q: got %q, want %q", text, got, wantText)
+			}
+		}
+	})
+
+	t.Run("keeps the proxy's text for budgets the footer does not track or that reset on their own schedule", func(t *testing.T) {
+		for _, text := range []string{
+			"Budget has been exceeded! Tag=prod Current cost: 11, Max budget: 10",
+			"Budget has been exceeded! EndUser=E1 Current cost: 11, Max budget: 10",
+			"ExceededBudget: End User=E1 over budget. Spend=11, Budget=10",
+			"Budget has been exceeded! Project=P1 Current cost: 11, Max budget: 10",
+			"Budget has been exceeded! Model access group=g Current cost: 11, Max budget: 10",
+			"Budget has been exceeded! Current cost: 1001, Max budget: 1000",
+			"ExceededBudget: Key over 1d budget. Spend=$10.5000, Limit=$10.00",
+			"ExceededBudget: Team=T over 1d budget. Spend=$10.5000, Limit=$10.00",
+			"LiteLLM Team: T, exceeded budget for model=m",
+		} {
+			if got, want := formatBudgetExceeded(text, refusalTeam, refusalBeforeReset), "out of budget. "+text; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		}
+	})
+
+	t.Run("leaves out a reset that is unknown or already past", func(t *testing.T) {
+		used := "out of budget. The team budget is used up ($512.30 of $500)."
+		noReset := budgetLevels{budgetTeam: {Spend: 512.3, MaxBudget: 500}}
+		if got := formatBudgetExceeded(refusalChat, noReset, refusalBeforeReset); got != used {
+			t.Errorf("no reset: got %q", got)
+		}
+		if got := formatBudgetExceeded(refusalChat, refusalTeam, budgetReset+1); got != used {
+			t.Errorf("past reset: got %q", got)
+		}
+	})
+
+	// Pi's isRetryableAssistantError is ported against PiG's own classifier, ai.IsRetryableAssistantError.
+	t.Run("is final for PiG's retry policy, which retries LiteLLM's own text when it holds a 5xx-like number", func(t *testing.T) {
+		retryable := func(errorMessage string) bool {
+			return ai.IsRetryableAssistantError(ai.AssistantMessage{StopReason: ai.StopReasonError, ErrorMessage: errorMessage})
+		}
+		if !retryable(refusalChat) {
+			t.Error("LiteLLM's own text is no longer retried by the classifier")
+		}
+		if retryable(formatBudgetExceeded(refusalChat, refusalTeam, refusalBeforeReset)) {
+			t.Error("the explained refusal is retried")
+		}
+		if retryable(formatBudgetExceeded("Budget has been exceeded! Tag=t500 Current cost: 501", nil, 0)) {
+			t.Error("a refusal with an untracked level is retried")
+		}
+	})
+}
+
+// refusalRig runs setupBudgetErrors over a controller whose clock stands two days and an hour before the reset.
+type refusalRig struct {
+	*budgetRig
+	handler hookFunc
+	seen    *budgetRecorder
+}
+
+func newRefusalRig(t *testing.T, mutate ...func(*budgetOptions)) *refusalRig {
+	t.Helper()
+	setLocalZone(t, time.UTC)
+	team := budgetObject(t, "team-info")
+	team["team_info"].(map[string]any)["spend"] = 1000.5
+	seen := mockBudgetProxy(t, map[string]func() budgetReply{
+		"/key/info": budgetJSON(budgetObject(t, "key-info-team-user")), "/v2/user/info": budgetJSON(budgetObject(t, "user-info-v2")),
+		"/team/info?team_id=T": budgetJSON(team),
+	})
+	rig := newBudgetRig(t, mutate...)
+	rig.clock.start = time.UnixMilli(refusalBeforeReset)
+	return &refusalRig{budgetRig: rig, handler: refusalHandler(t, rig.c), seen: seen}
+}
+
+func refusalHandler(t *testing.T, c *budgetController) hookFunc {
+	t.Helper()
+	dir := hermeticAgentDir(t)
+	writeFileIn(t, dir, "settings.json", `{"litellm":{}}`)
+	parsed := readGlobalLiteLLMSettings()
+	state := newExtensionState(parsed, getProviderDefinitions(parsed), newPolicyStore(filepath.Join(dir, policiesFilename)))
+	hooks := &recordingHooks{}
+	setupBudgetErrors(hooks, state, c)
+	return hooks.events[sdk.EventMessageEnd][0]
+}
+
+func refusalMessage(provider, errorMessage string) map[string]any {
+	return map[string]any{"role": "assistant", "provider": provider, "model": "m", "stopReason": "error", "errorMessage": errorMessage}
+}
+
+// end runs the handler and returns the rewritten error text, or "" when it left the message alone.
+func (r *refusalRig) end(t *testing.T, message map[string]any) string {
+	t.Helper()
+	result, err := r.handler(&fakeHookHost{fakeBudgetHost: r.host}, map[string]any{"message": message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		return ""
+	}
+	return result.(map[string]any)["message"].(map[string]any)["errorMessage"].(string)
+}
+
+const refusalText = "Budget has been exceeded! Team=T Current cost: 1000.5, Max budget: 1000.0"
+
+func TestBudgetRefusalsThroughTheController(t *testing.T) {
+	explained := `LiteLLM ("litellm"): out of budget. The team budget is used up ($1,000.50 of $1,000) and resets in 2d (2026-11-01 00:00).`
+	refusal := `422: {"message":"` + refusalText + `","type":"budget_exceeded"}`
+
+	t.Run("explains a refusal with the level's spend, limit, and reset, polled for every refusal", func(t *testing.T) {
+		rig := newRefusalRig(t)
+		rig.sessionStart()
+		for want, label := range []string{"session start", "first refusal", "second refusal"} {
+			if want > 0 {
+				if got := rig.end(t, refusalMessage("litellm", refusal)); got != explained {
+					t.Fatalf("%s: got %q, want %q", label, got, explained)
+				}
+			}
+			if polls := budgetKeyPolls(rig.seen); polls != want+1 {
+				t.Fatalf("after the %s: polls = %d, want %d", label, polls, want+1)
+			}
+		}
+		rig.wantLast("LiteLLM user $0.34/$100 · team $1k/$1k · member $0.15/$50")
+	})
+
+	t.Run("explains a refusal with the figures of the credential it refused, right after a login", func(t *testing.T) {
+		setLocalZone(t, time.UTC)
+		routes := budgetTeamKeyRoutes(t)
+		routes["/team/info?team_id=T"] = budgetJSON(budgetObject(t, "team-info"))
+		mockBudgetProxy(t, routes, budgetExpect{"sk-a", "g1"})
+		rig := newBudgetRig(t)
+		rig.clock.start = time.UnixMilli(refusalBeforeReset)
+		a := budgetAuth()
+		a.APIKey = "sk-a"
+		rig.host.setAuth("litellm", &a)
+		rig.sessionStart()
+
+		// Key B is charged to a team whose budget is used up.
+		spent := budgetObject(t, "team-info")
+		spent["team_info"].(map[string]any)["spend"] = 1000.5
+		routes["/team/info?team_id=T"] = budgetJSON(spent)
+		mockBudgetProxy(t, routes, budgetExpect{"sk-b", "g1"})
+		b := budgetAuth()
+		b.APIKey = "sk-b"
+		rig.host.setAuth("litellm", &b)
+		refused := &refusalRig{budgetRig: rig, handler: refusalHandler(t, rig.c)}
+		if got := refused.end(t, refusalMessage("litellm", refusal)); got != explained {
+			t.Fatalf("got %q, want %q", got, explained)
+		}
+	})
+
+	// The proxy answers on its own goroutine, so the session's poll may finish before the refusal arrives, which then
+	// polls again: only the result is pinned, not the number of polls.
+	t.Run("waits for a poll in flight, and polls when none ran yet", func(t *testing.T) {
+		rig := newRefusalRig(t)
+		rig.c.sessionStart(rig.host)
+		if got := rig.end(t, refusalMessage("litellm", refusal)); got != explained {
+			t.Fatalf("in flight: got %q", got)
+		}
+		fresh := newRefusalRig(t)
+		if got := fresh.end(t, refusalMessage("litellm", refusal)); got != explained {
+			t.Fatalf("none ran: got %q", got)
+		}
+		if polls := budgetKeyPolls(fresh.seen); polls != 1 {
+			t.Fatalf("none ran: polls = %d", polls)
+		}
+	})
+
+	t.Run("polls neither without UI nor while discovery is off, and still says the budget is used up", func(t *testing.T) {
+		plain := `LiteLLM ("litellm"): out of budget. The team budget is used up.`
+		rig := newRefusalRig(t)
+		rig.host.ui = false
+		if got := rig.end(t, refusalMessage("litellm", refusal)); got != plain {
+			t.Fatalf("no UI: got %q", got)
+		}
+		off := newRefusalRig(t, func(o *budgetOptions) { o.disabledReason = func() string { return "LITELLM_OFFLINE=1" } })
+		if got := off.end(t, refusalMessage("litellm", refusal)); got != plain {
+			t.Fatalf("offline: got %q", got)
+		}
+		if paths := append(rig.seen.paths(), off.seen.paths()...); len(paths) != 0 {
+			t.Fatalf("requests = %v", paths)
+		}
+	})
+
+	t.Run("leaves other errors, other providers, and finished messages alone", func(t *testing.T) {
+		rig := newRefusalRig(t)
+		finished := refusalMessage("litellm", refusal)
+		finished["stopReason"] = "stop"
+		for name, message := range map[string]map[string]any{
+			"other error":    refusalMessage("litellm", `429: {"message":"Rate limit reached"}`),
+			"other provider": refusalMessage("openai", refusal),
+			"finished":       finished,
+			"user message":   {"role": "user", "content": refusal},
+		} {
+			if got := rig.end(t, message); got != "" {
+				t.Errorf("%s: rewritten to %q", name, got)
+			}
+		}
+		if paths := rig.seen.paths(); len(paths) != 0 {
+			t.Fatalf("requests = %v", paths)
+		}
+	})
 }

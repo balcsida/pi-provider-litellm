@@ -736,8 +736,9 @@ func setupFallbackWarning(e hookRegistrar, s *extensionState) {
 func setupHooks(hooks hookRegistrar, state *extensionState) {
 	setupSessionState(hooks, state)
 	setupSessionHeader(hooks, state)
-	setupCostTracking(hooks, state) // before any budget handler: its after_provider_response handler must run first
-	setupBudget(hooks, state)       // after setupCostTracking: its after_provider_response handler must run second
+	setupCostTracking(hooks, state)     // before any budget handler: its after_provider_response handler must run first
+	budget := setupBudget(hooks, state) // after setupCostTracking: its after_provider_response handler must run second
+	setupBudgetErrors(hooks, state, budget)
 	setupFallbackWarning(hooks, state)
 	setupRequestPolicy(hooks, state)
 	setupSkills(hooks, state) // its before_agent_start handler runs before the MCP sync, as in the TypeScript

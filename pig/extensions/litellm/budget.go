@@ -4,6 +4,7 @@ package litellm
 // pure; budgetController owns the per-provider state, the timers and the single background goroutine per poll.
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"maps"
 	"math"
 	"math/big"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -518,6 +520,56 @@ func formatRelativeReset(resetAt, nowMs int64) string {
 		return fmt.Sprintf("%dh", ms/3_600_000)
 	}
 	return fmt.Sprintf("%dm", max(1, ms/60_000))
+}
+
+// budgetExceededPattern is BUDGET_EXCEEDED: LiteLLM's refusal of a used-up budget on model routes and /mcp.
+var budgetExceededPattern = regexp.MustCompile(`budget_exceeded|Budget has been exceeded!|ExceededBudget:|exceeded budget for model=`)
+
+// exceededLevelPattern is EXCEEDED_LEVEL: the refusals of a level's own budget. Groups: 1 level and 2 " in Team="
+// of the "Budget has been exceeded!" form, 3 the level of the "ExceededBudget:" form.
+var exceededLevelPattern = regexp.MustCompile(
+	`Budget has been exceeded! (Key|Team|TeamMember|User|Organization)=\S*( in Team=)?|ExceededBudget: (User)=.+? over budget\.`)
+
+var exceededLevels = map[string]budgetLevelName{
+	"Key": budgetKey, "Team": budgetTeam, "TeamMember": budgetMember, "User": budgetUser, "Organization": budgetOrg,
+}
+
+var levelLabels = map[budgetLevelName]string{
+	budgetKey: "key", budgetUser: "user", budgetTeam: "team", budgetMember: "team member", budgetOrg: "organization",
+}
+
+func isBudgetExceeded(text string) bool { return budgetExceededPattern.MatchString(text) }
+
+// resetClock prints local time in one fixed format, as the TypeScript does.
+func resetClock(resetAt int64) string {
+	return time.UnixMilli(resetAt).In(time.Local).Format("2006-01-02 15:04")
+}
+
+// formatBudgetExceeded starts with "out of budget", which Pi and PiG never retry. A refusal whose level is not
+// tracked keeps the proxy's text, as that names the budget.
+func formatBudgetExceeded(errorText string, levels budgetLevels, nowMs int64) string {
+	match := exceededLevelPattern.FindStringSubmatch(errorText)
+	if match == nil {
+		return "out of budget. " + errorText
+	}
+	name := exceededLevels[cmp.Or(match[1], match[3])]
+	if match[2] != "" {
+		name = budgetMember
+	}
+	level, tracked := levels[name]
+	amounts := ""
+	if tracked {
+		decimals := 2
+		if level.MaxBudget == math.Trunc(level.MaxBudget) {
+			decimals = 0
+		}
+		amounts = fmt.Sprintf(" (%s of %s)", money(level.Spend, 2), money(level.MaxBudget, decimals))
+	}
+	resets := ""
+	if reset := formatRelativeReset(level.ResetAt, nowMs); reset != "" {
+		resets = fmt.Sprintf(" and resets in %s (%s)", reset, resetClock(level.ResetAt))
+	}
+	return fmt.Sprintf("out of budget. The %s budget is used up%s%s.", levelLabels[name], amounts, resets)
 }
 
 func (l budgetLevel) percent() int { return int(math.Floor(l.Spend / l.MaxBudget * 100)) }
@@ -1154,15 +1206,61 @@ func (c *budgetController) command(host budgetHost, args string) {
 	}
 }
 
-// setupBudget is setupLiteLLMBudget. The factory calls it as `setupBudget(e, state)`.
+// levelsAfterError returns a copy of the provider's levels for explaining a budget refusal. With a UI and polling
+// not gated, it polls for each refusal, joining a poll in flight, because only a poll notices that the credential
+// changed since the last one. mu is never held across the wait.
+func (c *budgetController) levelsAfterError(host budgetHost, name string) budgetLevels {
+	c.mu.Lock()
+	state := c.stateFor(name)
+	var flight *budgetFlight
+	if host.HasUI() && !c.gated() {
+		flight = c.pollLocked(host, name)
+	}
+	c.mu.Unlock()
+	if flight != nil {
+		<-flight.done
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(state.levels)
+}
+
+// setupBudgetErrors is setupLiteLLMBudgetErrors: it rewrites a configured provider's budget refusal. c is nil
+// when the budget feature is off, which explains the refusal without figures. Register it after setupCostTracking
+// and before setupRequestPolicy, whose message_end handler stays last.
+func setupBudgetErrors(e hookRegistrar, s *extensionState, c *budgetController) {
+	e.OnEvent(sdk.EventMessageEnd, func(h hookHost, data map[string]any) (any, error) {
+		message, ok := data["message"].(map[string]any)
+		if !ok || message["role"] != "assistant" || message["stopReason"] != "error" {
+			return nil, nil
+		}
+		provider, _ := message["provider"].(string)
+		text, _ := message["errorMessage"].(string)
+		if !s.providerNames[provider] || !isBudgetExceeded(text) {
+			return nil, nil
+		}
+		var levels budgetLevels
+		now := time.Now()
+		if c != nil {
+			levels, now = c.levelsAfterError(h, provider), c.options.now()
+		}
+		updated := maps.Clone(message)
+		updated["errorMessage"] = fmt.Sprintf("LiteLLM (%s): %s", jsonString(provider),
+			formatBudgetExceeded(text, levels, now.UnixMilli()))
+		return map[string]any{"message": updated}, nil
+	})
+}
+
+// setupBudget is setupLiteLLMBudget. The factory calls it as `setupBudget(e, state)`; it returns nil when the
+// feature is off.
 //
 // The active provider is tracked from model_select (PiG 0.5.1 emits it from coding/session.go with the selected model
 // in data["model"]), and also from before_agent_start, which runs the same logic when the provider differs
 // from the tracked one, and turn_end, through ModelProvider(): a host that does not emit model_select still
 // shows a provider switch on the next prompt.
-func setupBudget(e hookRegistrar, s *extensionState) {
+func setupBudget(e hookRegistrar, s *extensionState) *budgetController {
 	if !isFeatureEnabled(s.settings, "budget") {
-		return
+		return nil
 	}
 	var budgetSettings any
 	if s.settings != nil {
@@ -1224,4 +1322,5 @@ func setupBudget(e hookRegistrar, s *extensionState) {
 			c.command(h, args)
 			return nil
 		})
+	return c
 }
