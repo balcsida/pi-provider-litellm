@@ -1206,18 +1206,15 @@ func (c *budgetController) command(host budgetHost, args string) {
 	}
 }
 
-// levelsAfterError returns a copy of the provider's levels for explaining a budget refusal. It waits for a poll
-// when the host has a UI, polling is not gated, and either the last poll is at least pollMinInterval old (or none
-// ran) or a poll is in flight. mu is never held across the wait.
+// levelsAfterError returns a copy of the provider's levels for explaining a budget refusal. With a UI and polling
+// not gated, it polls for each refusal, joining a poll in flight, because only a poll notices that the credential
+// changed since the last one. mu is never held across the wait.
 func (c *budgetController) levelsAfterError(host budgetHost, name string) budgetLevels {
 	c.mu.Lock()
 	state := c.stateFor(name)
 	var flight *budgetFlight
 	if host.HasUI() && !c.gated() {
-		stale := state.lastPollAt.IsZero() || c.options.now().Sub(state.lastPollAt) >= pollMinInterval
-		if stale || state.inFlight != nil {
-			flight = c.pollLocked(host, name)
-		}
+		flight = c.pollLocked(host, name)
 	}
 	c.mu.Unlock()
 	if flight != nil {

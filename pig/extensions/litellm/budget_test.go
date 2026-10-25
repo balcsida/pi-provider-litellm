@@ -1814,36 +1814,55 @@ func TestBudgetRefusalsThroughTheController(t *testing.T) {
 	explained := `LiteLLM ("litellm"): out of budget. The team budget is used up ($1,000.50 of $1,000) and resets in 2d (2026-11-01 00:00).`
 	refusal := `422: {"message":"` + refusalText + `","type":"budget_exceeded"}`
 
-	t.Run("explains a refusal with the level's spend, limit, and reset, polling again only after a minute", func(t *testing.T) {
+	t.Run("explains a refusal with the level's spend, limit, and reset, polled for every refusal", func(t *testing.T) {
 		rig := newRefusalRig(t)
 		rig.sessionStart()
-		if budgetKeyPolls(rig.seen) != 1 {
-			t.Fatalf("polls = %d", budgetKeyPolls(rig.seen))
-		}
-		if got := rig.end(t, refusalMessage("litellm", refusal)); got != explained {
-			t.Fatalf("got %q, want %q", got, explained)
-		}
-		if budgetKeyPolls(rig.seen) != 1 {
-			t.Fatalf("polls = %d", budgetKeyPolls(rig.seen))
-		}
-		rig.advance(60 * time.Second)
-		if got := rig.end(t, refusalMessage("litellm", refusal)); !strings.Contains(got, "The team budget is used up ($1,000.50 of $1,000)") {
-			t.Fatalf("got %q", got)
-		}
-		if budgetKeyPolls(rig.seen) != 2 {
-			t.Fatalf("polls = %d", budgetKeyPolls(rig.seen))
+		for want, label := range []string{"session start", "first refusal", "second refusal"} {
+			if want > 0 {
+				if got := rig.end(t, refusalMessage("litellm", refusal)); got != explained {
+					t.Fatalf("%s: got %q, want %q", label, got, explained)
+				}
+			}
+			if polls := budgetKeyPolls(rig.seen); polls != want+1 {
+				t.Fatalf("after the %s: polls = %d, want %d", label, polls, want+1)
+			}
 		}
 		rig.wantLast("LiteLLM user $0.34/$100 · team $1k/$1k · member $0.15/$50")
 	})
 
+	t.Run("explains a refusal with the figures of the credential it refused, right after a login", func(t *testing.T) {
+		setLocalZone(t, time.UTC)
+		routes := budgetTeamKeyRoutes(t)
+		routes["/team/info?team_id=T"] = budgetJSON(budgetObject(t, "team-info"))
+		mockBudgetProxy(t, routes, budgetExpect{"sk-a", "g1"})
+		rig := newBudgetRig(t)
+		rig.clock.start = time.UnixMilli(refusalBeforeReset)
+		a := budgetAuth()
+		a.APIKey = "sk-a"
+		rig.host.setAuth("litellm", &a)
+		rig.sessionStart()
+
+		// Key B is charged to a team whose budget is used up.
+		spent := budgetObject(t, "team-info")
+		spent["team_info"].(map[string]any)["spend"] = 1000.5
+		routes["/team/info?team_id=T"] = budgetJSON(spent)
+		mockBudgetProxy(t, routes, budgetExpect{"sk-b", "g1"})
+		b := budgetAuth()
+		b.APIKey = "sk-b"
+		rig.host.setAuth("litellm", &b)
+		refused := &refusalRig{budgetRig: rig, handler: refusalHandler(t, rig.c)}
+		if got := refused.end(t, refusalMessage("litellm", refusal)); got != explained {
+			t.Fatalf("got %q, want %q", got, explained)
+		}
+	})
+
+	// The proxy answers on its own goroutine, so the session's poll may finish before the refusal arrives, which then
+	// polls again: only the result is pinned, not the number of polls.
 	t.Run("waits for a poll in flight, and polls when none ran yet", func(t *testing.T) {
 		rig := newRefusalRig(t)
 		rig.c.sessionStart(rig.host)
 		if got := rig.end(t, refusalMessage("litellm", refusal)); got != explained {
 			t.Fatalf("in flight: got %q", got)
-		}
-		if polls := budgetKeyPolls(rig.seen); polls != 1 {
-			t.Fatalf("in flight: polls = %d, want the one in flight", polls)
 		}
 		fresh := newRefusalRig(t)
 		if got := fresh.end(t, refusalMessage("litellm", refusal)); got != explained {

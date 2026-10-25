@@ -544,6 +544,43 @@ func TestMcpRegistersTheServerDisabledWithOneNoticeWhenTheProxyRefusesAUsedUpBud
 	}
 }
 
+// spacesReader serves left spaces, a bound only for when the check reads everything.
+type spacesReader struct{ left int }
+
+func (r *spacesReader) Read(p []byte) (int, error) {
+	if r.left <= 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.left)
+	for i := range p[:n] {
+		p[i] = ' '
+	}
+	r.left -= n
+	return n, nil
+}
+
+func TestMcpReadsNoMoreThanTheStartOfARefusalsBody(t *testing.T) {
+	_, _, m := mcpFixture(t, "")
+	const size = 16 << 20
+	filler := &spacesReader{left: size}
+	mcpProxy(t, func(*http.Request) (*http.Response, error) {
+		response, _ := mcpAnswer(422, nil)
+		refusal := strings.NewReader(`{"detail":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}`)
+		response.Body = io.NopCloser(io.MultiReader(refusal, filler))
+		return response, nil
+	})
+	defaultEnv(t, "https://proxy.example.com")
+	collectDiagnostics(t)
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	if got := mcpJSON(t, f); !strings.Contains(got, `"enabled":false`) {
+		t.Fatalf("servers = %s", got)
+	}
+	if read := size - filler.left; read > mcpRefusalBodyLimit {
+		t.Fatalf("read %d bytes of the body, want at most %d", read, mcpRefusalBodyLimit)
+	}
+}
+
 func TestMcpRegistersTheServerEnabledWithoutANoticeAfterAnyOtherRefusal(t *testing.T) {
 	_, state, m := mcpFixture(t, "")
 	mcpProxy(t, mcpBudgetAnswer(422, `{"detail":"Unprocessable"}`))
