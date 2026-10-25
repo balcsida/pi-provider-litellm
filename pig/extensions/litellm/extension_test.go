@@ -810,6 +810,27 @@ func TestHookRegistration(t *testing.T) {
 		}
 	})
 
+	t.Run("explains budget refusals through every message_end handler, also with budget.enabled false", func(t *testing.T) {
+		hooks, _, host := wire(t, `{"litellm":{"budget":{"enabled":false}}}`)
+		if got := counts(hooks)[sdk.EventMessageEnd]; got != 3 {
+			t.Fatalf("message_end handlers = %d, want cost, budget errors and request policy", got)
+		}
+		message := map[string]any{"role": "assistant", "provider": providerName, "model": "m", "content": []any{},
+			"stopReason": "error", "errorMessage": `{"error":{"message":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}}`}
+		// The host hands each handler the message the previous one returned.
+		for index := range hooks.events[sdk.EventMessageEnd] {
+			if updated, ok := hooks.only(t, sdk.EventMessageEnd, index, host, map[string]any{"message": message}).(map[string]any); ok {
+				message = updated["message"].(map[string]any)
+			}
+		}
+		if want := `LiteLLM ("litellm"): out of budget. The team budget is used up.`; message["errorMessage"] != want {
+			t.Fatalf("errorMessage = %v, want %q", message["errorMessage"], want)
+		}
+		if len(host.texts()) != 0 || len(host.notifications()) != 0 {
+			t.Fatalf("the disabled budget reached the UI: %q %v", host.texts(), host.notifications())
+		}
+	})
+
 	t.Run("registers the session, MCP and Skills handlers in the TypeScript order", func(t *testing.T) {
 		hooks, _, _ := wire(t, "")
 		got := counts(hooks)
@@ -933,12 +954,12 @@ func TestHookDataKeysAndScoping(t *testing.T) {
 	t.Run("message_end does not query the registry for a provider that is not configured", func(t *testing.T) {
 		hooks, _, host := wire(t, "")
 		message := map[string]any{"role": "assistant", "provider": "openai", "model": "gpt-5", "content": []any{}}
-		hooks.only(t, sdk.EventMessageEnd, 1, host, map[string]any{"message": message})
+		hooks.only(t, sdk.EventMessageEnd, 2, host, map[string]any{"message": message})
 		if host.finds != 0 {
 			t.Fatalf("finds = %d", host.finds)
 		}
 		message["provider"] = providerName
-		hooks.only(t, sdk.EventMessageEnd, 1, host, map[string]any{"message": message})
+		hooks.only(t, sdk.EventMessageEnd, 2, host, map[string]any{"message": message})
 		if host.finds != 1 {
 			t.Fatalf("a configured provider's message did not query the registry: finds = %d", host.finds)
 		}

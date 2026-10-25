@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -150,18 +151,30 @@ func (m *mcpSync) dropLocked(registrar mcpRegistrar, definition providerDefiniti
 	}
 }
 
+// mcpRefusal is what the access check learned: why the server is off, or mcpNotRefused.
+type mcpRefusal int
+
+const (
+	mcpNotRefused mcpRefusal = iota
+	mcpNoServers
+	mcpOutOfBudget
+)
+
+// mcpRefusalBodyLimit bounds how much of a refusal's body is read.
+const mcpRefusalBodyLimit = 64 << 10
+
 // mcpAccessRefused is mcpAccessRefused. LiteLLM 1.102.0 and later answer `initialize` with 403 when the key
 // has no MCP servers granted, and a host warns at every start about a server that fails to connect. Asking
 // first lets such a server be registered disabled: the host neither connects to it nor warns, and the user
 // can enable it once servers are granted. Ending ctx ends the check, which then counts as not refused.
-func mcpAccessRefused(ctx context.Context, definition providerDefinition, url string) bool {
+func mcpAccessRefused(ctx context.Context, definition providerDefinition, url string) mcpRefusal {
 	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
 	// The check must send the credential the host will send. Like seeding, it runs no key helper and mints
 	// no ADC token, and resolving without them would fall through to another key.
 	if (stored != nil && stored.Type == "api_key" && strings.HasPrefix(stored.Key, "!")) ||
 		strings.HasPrefix(definition.APIKeyConfig, "!") ||
 		usesGcloudToken(definition) {
-		return false
+		return mcpNotRefused
 	}
 	budget := time.Duration(seedTimeoutMsBudget()) * time.Millisecond
 	ctx, cancel := context.WithTimeout(ctx, budget)
@@ -170,19 +183,19 @@ func mcpAccessRefused(ctx context.Context, definition providerDefinition, url st
 	if stored != nil && stored.Type == "oauth" {
 		resolved, err := credentialRoot(definition, credentialInfoFromStored(stored))
 		if err != nil {
-			return false
+			return mcpNotRefused
 		}
 		apiKey, root = stored.Access, resolved
 	} else {
 		auth, err := resolveAPIKeyAuth(ctx, definition, processEnv, credentialFromStored(stored), false)
 		if err != nil || auth == nil {
-			return false
+			return mcpNotRefused
 		}
 		apiKey, root = auth.Auth.APIKey, auth.Auth.BaseURL
 	}
 	// The credential goes only to its own root.
 	if apiKey == "" || root+"/mcp" != url {
-		return false
+		return mcpNotRefused
 	}
 	// The credential and headers the host's client sends, so the proxy answers as it will answer the host.
 	headers := http.Header{}
@@ -198,14 +211,19 @@ func mcpAccessRefused(ctx context.Context, definition providerDefinition, url st
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"pig","version":"0"}}}`
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
-		return false
+		return mcpNotRefused
 	}
 	request.Header = headers.Clone()
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return false
+		return mcpNotRefused
+	}
+	// Only a refusal is read: a granted session can answer with an open event stream.
+	var refusal []byte
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		refusal, _ = io.ReadAll(io.LimitReader(response.Body, mcpRefusalBodyLimit))
 	}
 	response.Body.Close()
 	// The host opens its own session; end the one this check opened. Like the TypeScript `void fetch`, on its
@@ -227,7 +245,14 @@ func mcpAccessRefused(ctx context.Context, definition providerDefinition, url st
 			}
 		})
 	}
-	return response.StatusCode == http.StatusForbidden
+	// The budget refusal's status is configurable on the proxy, so its text is checked first.
+	if isBudgetExceeded(string(refusal)) {
+		return mcpOutOfBudget
+	}
+	if response.StatusCode == http.StatusForbidden {
+		return mcpNoServers
+	}
+	return mcpNotRefused
 }
 
 // sync is syncMcpServer.
@@ -251,13 +276,16 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 	attempt := &mcpAttempt{identity: identity}
 	m.attempts[definition.Name] = attempt
 	m.mu.Unlock()
-	refused := m.settingsErr == nil && m.accessRefused(definition, config.URL, identity)
+	refused := mcpNotRefused
+	if m.settingsErr == nil {
+		refused = m.accessRefused(definition, config.URL, identity)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.attempts[definition.Name] != attempt {
 		return
 	}
-	if refused {
+	if refused != mcpNotRefused {
 		config.Enabled = new(false)
 	}
 	err := m.settingsErr
@@ -270,13 +298,17 @@ func (m *mcpSync) sync(registrar mcpRegistrar, definition providerDefinition) {
 		return
 	}
 	attempt.registered = true
+	if refused == mcpOutOfBudget {
+		m.state.notifyMcp(fmt.Sprintf("LiteLLM MCP (%s): out of budget, so its MCP server is off for this session. "+
+			"Turn it on in /mcp once the budget resets.", jsonString(definition.Name)), "warning")
+	}
 }
 
 // earlyCheck is an access check running ahead of the first sync; refused is set before done closes.
 type earlyCheck struct {
 	identity string
 	done     chan struct{}
-	refused  bool
+	refused  mcpRefusal
 }
 
 // startChecks starts the access checks while the extension loads, as the TypeScript overlaps them with
@@ -311,7 +343,7 @@ func (m *mcpSync) startChecks() {
 }
 
 // accessRefused answers from the early check when it was for this config, and asks the proxy otherwise.
-func (m *mcpSync) accessRefused(definition providerDefinition, url, identity string) bool {
+func (m *mcpSync) accessRefused(definition providerDefinition, url, identity string) mcpRefusal {
 	m.mu.Lock()
 	check := m.early[definition.Name]
 	delete(m.early, definition.Name)

@@ -513,6 +513,52 @@ func TestMcpRegistersTheServerDisabledWithoutANoticeWhenTheProxyRefusesTheKeyAtI
 	}
 }
 
+func mcpBudgetAnswer(status int, body string) func(*http.Request) (*http.Response, error) {
+	return func(*http.Request) (*http.Response, error) {
+		response, _ := mcpAnswer(status, nil)
+		response.Body = io.NopCloser(strings.NewReader(body))
+		return response, nil
+	}
+}
+
+func TestMcpRegistersTheServerDisabledWithOneNoticeWhenTheProxyRefusesAUsedUpBudgetAtInitialize(t *testing.T) {
+	// 422 is LiteLLM 1.104.0's default, 429 and 400 older releases', and the proxy's operator can choose another.
+	for _, status := range []int{422, 429, 400, 403} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			_, state, m := mcpFixture(t, "")
+			checks := mcpProxy(t, mcpBudgetAnswer(status, `{"detail":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}`))
+			defaultEnv(t, "https://proxy.example.com")
+			diagnostics := collectDiagnostics(t)
+			f := newFakeRegistrar()
+			m.syncAll(f)
+			m.syncAll(f)
+			want := `{"litellm":{"type":"http","enabled":false,"url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+			if got := mcpJSON(t, f); got != want {
+				t.Fatalf("servers = %s, want %s", got, want)
+			}
+			notice := `LiteLLM MCP ("litellm"): out of budget, so its MCP server is off for this session. Turn it on in /mcp once the budget resets.`
+			if len(*checks) != 1 || len(*diagnostics) != 1 || (*diagnostics)[0] != notice || len(state.pendingMessages) != 0 {
+				t.Fatalf("checks = %d, diagnostics = %q, pending = %v", len(*checks), *diagnostics, state.pendingMessages)
+			}
+		})
+	}
+}
+
+func TestMcpRegistersTheServerEnabledWithoutANoticeAfterAnyOtherRefusal(t *testing.T) {
+	_, state, m := mcpFixture(t, "")
+	mcpProxy(t, mcpBudgetAnswer(422, `{"detail":"Unprocessable"}`))
+	defaultEnv(t, "https://proxy.example.com")
+	diagnostics := collectDiagnostics(t)
+	f := newFakeRegistrar()
+	m.syncAll(f)
+	if got := mcpJSON(t, f); strings.Contains(got, "enabled") {
+		t.Fatalf("servers = %s", got)
+	}
+	if len(*diagnostics) != 0 || len(state.pendingMessages) != 0 {
+		t.Fatalf("diagnostics = %q, pending = %v", *diagnostics, state.pendingMessages)
+	}
+}
+
 func TestMcpChecksWithTheCredentialAndHeadersTheHostSendsAndEndsTheSessionTheCheckOpened(t *testing.T) {
 	_, _, m := mcpFixture(t, "")
 	checks := mcpProxy(t, func(r *http.Request) (*http.Response, error) {
