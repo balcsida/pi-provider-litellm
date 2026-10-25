@@ -723,6 +723,19 @@ function piLiteral(value: string): string {
   return escaped.startsWith("!") ? `$${escaped}` : escaped;
 }
 
+// The first 64 KiB of a body, as much as the MCP access check reads of a refusal.
+async function readBodyPrefix(response: Response, limit = 64 * 1024): Promise<string> {
+  if (!response.body) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  for await (const chunk of response.body) {
+    text += decoder.decode(chunk, { stream: true });
+    // Leaving the loop cancels the rest of the stream.
+    if (text.length >= limit) break;
+  }
+  return text;
+}
+
 /**
  * LiteLLM's /model/info is the metadata authority, so models.dev is an opt-in escape hatch.
  * Without a cache path and with refresh suppressed, discovery reads neither the models.dev
@@ -2542,8 +2555,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         redirect: "manual",
         signal: AbortSignal.timeout(getSeedTimeoutMs()),
       });
-      // Only a refusal is read: a granted session can answer with an open event stream.
-      const refusal = response.ok ? undefined : await response.text().catch(() => "");
+      // Only a refusal is read, and only its start: a granted session can answer with an open event stream.
+      const refusal = response.ok ? undefined : await readBodyPrefix(response).catch(() => "");
       if (refusal === undefined) await response.body?.cancel().catch(() => undefined);
       // Pi opens its own session; end the one this check opened.
       const session = response.headers.get("mcp-session-id");

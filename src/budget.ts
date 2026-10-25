@@ -621,11 +621,10 @@ export function setupLiteLLMBudget(
     },
   });
 
-  // The levels a budget refusal is explained with, read again unless a poll ran within the last minute.
+  // The levels a budget refusal is explained with. Polled for each refusal, joining a poll in flight, because only a
+  // poll notices that the credential changed since the last one.
   return async (ctx, name) => {
-    const state = stateFor(name);
-    const stale = state.lastPollAt === undefined || Date.now() - state.lastPollAt >= POLL_MIN_INTERVAL_MS;
-    if (ctx?.hasUI && !gated() && (stale || state.inFlight)) await poll(ctx, name);
-    return state.levels;
+    if (ctx?.hasUI && !gated()) await poll(ctx, name);
+    return stateFor(name).levels;
   };
 }

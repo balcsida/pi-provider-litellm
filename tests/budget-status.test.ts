@@ -661,7 +661,7 @@ describe("budget refusals", () => {
     vi.stubEnv("TZ", "UTC");
   });
 
-  it("explains a refusal with the level's spend, limit, and reset, polling again only after a minute", async () => {
+  it("explains a refusal with the level's spend, limit, and reset, polled for every refusal", async () => {
     const seen = mockProxy(TEAM_ROUTES);
     setup();
     const ctx = makeCtx();
@@ -671,11 +671,27 @@ describe("budget refusals", () => {
     expect(polls()).toBe(1);
 
     expect(await end(refusal(), ctx)).toBe(EXPLAINED);
-    expect(polls()).toBe(1);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(await end(refusal(), ctx)).toContain("The team budget is used up ($1,000.50 of $1,000)");
     expect(polls()).toBe(2);
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
+    expect(polls()).toBe(3);
     expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(KEY, "LiteLLM user $0.34/$100 · team $1k/$1k · member $0.15/$50");
+  });
+
+  it("explains a refusal with the figures of the credential it refused, right after a login", async () => {
+    mockProxy(
+      { "/key/info": TEAM_KEY, "/v2/user/info": USER_INFO, "/team/info?team_id=T": TEAM_INFO },
+      { token: "sk-a", gateway: "g1" },
+    );
+    auths = { litellm: { ...AUTH, apiKey: "sk-a" } };
+    setup();
+    const ctx = makeCtx();
+    await emit(pi, "session_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Key B is charged to a team whose budget is used up.
+    mockProxy(TEAM_ROUTES, { token: "sk-b", gateway: "g1" });
+    auths.litellm = { ...AUTH, apiKey: "sk-b" };
+    expect(await end(refusal(), ctx)).toBe(EXPLAINED);
   });
 
   it("waits for a poll in flight, and polls when none ran yet", async () => {

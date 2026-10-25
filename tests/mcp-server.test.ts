@@ -334,6 +334,37 @@ describe("LiteLLM MCP server registration", () => {
     },
   );
 
+  it("reads no more than the start of a refusal's body", async () => {
+    let pulls = 0;
+    mockProxy(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  '{"detail":"Budget has been exceeded! Team=T Current cost: 2, Max budget: 1"}',
+                ),
+              );
+            },
+            // 16 MB more, a bound only for when the check reads everything.
+            pull(controller) {
+              if (++pulls > 1000) controller.close();
+              else controller.enqueue(new Uint8Array(16 * 1024).fill(32));
+            },
+          }),
+          { status: 422 },
+        ),
+    );
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const pi = await load(await makeAgentDir());
+
+    expect(pi.mcpServers.get("litellm")?.enabled).toBe(false);
+    expect(pulls).toBeLessThan(10);
+  });
+
   it("registers the server enabled, without a notice, after any other refusal", async () => {
     mockProxy(() => Response.json({ detail: "Unprocessable" }, { status: 422 }));
     process.env.LITELLM_BASE_URL = "https://proxy.example.com";

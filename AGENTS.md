@@ -131,9 +131,10 @@
 - Before each new registration, `mcpAccessRefused` sends one `initialize`, with the credential and headers Pi will send,
   to that credential's own root, and a 403 registers the server with `enabled: false`: LiteLLM 1.102.0+ refuses a key
   with no MCP servers, and Pi warns about a failed server at every start and still turns on `codemode` for it. A
-  non-2xx reply whose body `isBudgetExceeded` recognises registers it disabled too, with one `out of budget` notice,
-  because every MCP call fails until the budget resets. Only a refusal's body is read: a 2xx reply can be an open
-  event stream. Any other answer or a failed check registers it enabled, and so does a configured key helper
+  non-2xx reply whose body `isBudgetExceeded` recognises, checked before the status because the proxy's operator sets
+  it, registers it disabled too, with one `out of budget` notice, because every MCP call fails until the budget resets.
+  Only a refusal's body is read, at most 64 KiB: a 2xx reply can be an open event stream. Any other answer or a failed
+  check registers it enabled, and so does a configured key helper
   (`!command`) or ADC: like seeding, the check runs neither, and resolving without them falls through to another key.
   The check `DELETE`s the session it opened, and `syncMcpServer` claims the attempt before awaiting it, so a login that
   starts meanwhile drops the claim and the registration never lands.
@@ -156,8 +157,8 @@
   `LiteLLM ("<name>"): out of budget. ...`. Keep `out of budget` in it: Pi's and PiG's retry policies treat it as final,
   and retry LiteLLM's own text when it holds a 5xx-like number. Only a level's own `max_budget` refusal names a level;
   budget windows, per-model budgets and untracked levels keep the proxy's text. Figures and the reset come from the
-  budget state, polled again unless a poll ran within a minute or one is in flight, under the automatic-poll gates; with
-  `budget.enabled: false` it still rewrites, without figures. The reset clock is local `YYYY-MM-DD HH:MM`, which the Go
+  budget state, polled for each refusal under the automatic-poll gates (joining a poll in flight), because only a poll
+  notices a changed credential; with `budget.enabled: false` it still rewrites, without figures. The reset clock is local `YYYY-MM-DD HH:MM`, which the Go
   port prints the same way.
 - A JWT credential (three dot-separated parts, LiteLLM's own `is_jwt` test), such as a Direct OIDC login's, has no key
   row (LiteLLM 1.102 answers `/key/info` with 500); its team, member, and org come from the user's only team in
