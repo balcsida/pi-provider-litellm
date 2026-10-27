@@ -58,6 +58,8 @@ const CLAUDE_PROMPT_CACHE = { short: 300, long: 3600 } as const;
 // OpenAI's and Azure's documented 30-minute default minimum for GPT-5.6 and later. No `long`: the
 // 12-hour lifetime needs `prompt_cache_options.ttl`, which Pi's long retention does not request.
 const OPENAI_PROMPT_CACHE = { short: 1800 } as const;
+// Relays (OpenRouter, Copilot, resellers) document no lifetime of their own and may bill or route differently.
+const OPENAI_PROMPT_CACHE_ROUTES: ReadonlySet<string> = new Set(["openai", "azure", "azure_ai"]);
 const HEALTH_DETAIL_CONCURRENCY = 8;
 const reportedConflictingFamilyRoutes = new Set<string>();
 const reportedWithheldRepairRoutes = new Set<string>();
@@ -829,7 +831,12 @@ function mapFromModelInfoGroup(
       ? { promptCache: { ...CLAUDE_PROMPT_CACHE } }
       : {}),
     ...(api === "openai-responses" &&
-    identities.every((identity) => identity?.family === "openai" && isGpt56OrNewerModel(identity.modelId))
+    identities.every(
+      (identity, index) =>
+        identity?.family === "openai" &&
+        isGpt56OrNewerModel(identity.modelId) &&
+        routesOnlyThrough(entries[index]!, OPENAI_PROMPT_CACHE_ROUTES),
+    )
       ? { promptCache: { ...OPENAI_PROMPT_CACHE } }
       : {}),
     ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),

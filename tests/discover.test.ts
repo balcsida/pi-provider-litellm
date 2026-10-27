@@ -7244,9 +7244,10 @@ describe("prompt cache lifetimes", () => {
     const models = await discoverRows([
       gptRow("sol", "openai/gpt-6.1-sol"),
       gptRow("luna", "azure/team-deployment", { base_model: "azure/gpt-5.6-luna" }),
+      gptRow("astra", "azure_ai/gpt-6-astra"),
     ]);
 
-    expect(models).toHaveLength(2);
+    expect(models).toHaveLength(3);
     for (const model of models) {
       expect(model).toMatchObject({ api: "openai-responses", promptCache: { short: 1800 } });
       expect(model.promptCache).not.toHaveProperty("long");
@@ -7260,6 +7261,20 @@ describe("prompt cache lifetimes", () => {
 
     expect(model?.api).toBe("openai-completions");
     expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for GPT-5.6 and later served through a relay or without a declared route", async () => {
+    const models = await discoverRows([
+      gptRow("openrouter", "openrouter/openai/gpt-6.1-sol"),
+      gptRow("copilot", "github_copilot/gpt-6.1-sol"),
+      gptRow("unprefixed", "gpt-6.1-sol"),
+    ]);
+
+    expect(models).toHaveLength(3);
+    for (const model of models) {
+      expect(model.api).toBe("openai-responses");
+      expect(model).not.toHaveProperty("promptCache");
+    }
   });
 
   it("declares none for GPT models before 5.6", async () => {
