@@ -3,7 +3,7 @@ name: litellm-example
 description: "PiG with the LiteLLM provider extension, fused."
 
 release:
-  version: 4.5.0
+  version: 4.6.0
 
 build:
   extensionRealization: fused
