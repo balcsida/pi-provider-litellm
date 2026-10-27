@@ -27,7 +27,7 @@ const (
 )
 
 // DiscoveryVersion is LITELLM_DISCOVERY_VERSION.
-const DiscoveryVersion = 9
+const DiscoveryVersion = 10
 
 // BackendFamily is a backend vendor family; the empty string means no family.
 type BackendFamily string

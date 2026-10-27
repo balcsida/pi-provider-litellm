@@ -59,8 +59,10 @@ aliases come from settings and from the multi-provider environment variables, as
 - **Prompt cache lifetimes.** Discovery sets `promptCache` (`short` 300, `long` 3600) exactly like the TypeScript
   rule: unanimous Claude backend-family evidence in the `/model/info` mapper, on `anthropic-messages` or on
   `openai-completions` with `cacheControlFormat == "anthropic"`; never on Responses, the `/v1/models` fallback or a
-  route identified only by its name. A wildcard child takes its selected parent's value. `promptCache` is part of
-  `modelsCatalogRecord`, so it crosses the SDK wire and needs no sidecar entry. `DiscoveryVersion` is 9, in step
+  route identified only by its name. GPT-5.6 and later get `short` 1800 alone, again like the TypeScript rule: every
+  deployment's backend identity must be OpenAI-family GPT-5.6+, on `openai-responses` only. A wildcard child takes
+  its selected parent's value, reduced from the backend row its id substitutes into. `promptCache` is part of
+  `modelsCatalogRecord`, so it crosses the SDK wire and needs no sidecar entry. `DiscoveryVersion` is 10, in step
   with `LITELLM_DISCOVERY_VERSION` (the Go side stayed at 7 through TypeScript's 8, which only added the classifier routes it withholds).
 
 ## Conventions
