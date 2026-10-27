@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 9,
+      litellmDiscoveryVersion: 10,
     });
   });
 
@@ -5200,7 +5200,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 9,
+          litellmDiscoveryVersion: 10,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
@@ -7232,5 +7232,74 @@ describe("prompt cache lifetimes", () => {
 
     expect(models).toHaveLength(1);
     expect(models[0]).toMatchObject({ id: "team/claude-sonnet-4-5", promptCache: { short: 300, long: 3600 } });
+  });
+
+  const gptRow = (model_name: string, model: string, extra: Record<string, unknown> = {}) => ({
+    model_name,
+    litellm_params: { model },
+    model_info: { mode: "responses", supported_endpoints: ["/v1/responses"], ...extra },
+  });
+
+  it("declares the 30-minute lifetime for GPT-5.6 and later on Responses", async () => {
+    const models = await discoverRows([
+      gptRow("sol", "openai/gpt-6.1-sol"),
+      gptRow("luna", "azure/team-deployment", { base_model: "azure/gpt-5.6-luna" }),
+    ]);
+
+    expect(models).toHaveLength(2);
+    for (const model of models) {
+      expect(model).toMatchObject({ api: "openai-responses", promptCache: { short: 1800 } });
+      expect(model.promptCache).not.toHaveProperty("long");
+    }
+  });
+
+  it("declares none for GPT-5.6 and later on Chat Completions", async () => {
+    const [model] = await discoverRows([
+      gptRow("sol-chat", "openai/gpt-6.1-sol", { mode: "chat", supported_endpoints: ["/v1/chat/completions"] }),
+    ]);
+
+    expect(model?.api).toBe("openai-completions");
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for GPT models before 5.6", async () => {
+    const [model] = await discoverRows([gptRow("gpt", "openai/gpt-5.5")]);
+
+    expect(model?.api).toBe("openai-responses");
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for a group mixing GPT-6.1 and earlier deployments", async () => {
+    const [model] = await discoverRows([
+      gptRow("gpt", "openai/gpt-6.1-sol", { id: "a" }),
+      gptRow("gpt", "openai/gpt-5.5", { id: "b" }),
+    ]);
+
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("declares none for a GPT route identified only by its name", async () => {
+    const [model] = await discoverRows([{ model_name: "gpt-6.1-sol", model_info: { mode: "responses" } }]);
+
+    expect(model?.api).toBe("openai-responses");
+    expect(model).not.toHaveProperty("promptCache");
+  });
+
+  it("gives a GPT-6.1 child of an OpenAI wildcard route the 30-minute lifetime", async () => {
+    const models = await discoverRows(
+      [
+        {
+          model_name: "openai/*",
+          litellm_params: { model: "openai/*" },
+          model_info: { supported_endpoints: ["/v1/responses"] },
+        },
+      ],
+      ["openai/gpt-6.1-sol", "openai/gpt-5.5"],
+    );
+
+    expect(models.map(({ id, promptCache }) => ({ id, promptCache }))).toEqual([
+      { id: "openai/gpt-6.1-sol", promptCache: { short: 1800 } },
+      { id: "openai/gpt-5.5", promptCache: undefined },
+    ]);
   });
 });
