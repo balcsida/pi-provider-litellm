@@ -109,7 +109,8 @@ func mapFromModelInfoGroup(
 		if identity != nil {
 			entryFamily = identity.Family
 		}
-		openAIGpt56 = openAIGpt56 && entryFamily == types.FamilyOpenAI && isGpt56OrNewerModel(identity.ModelID)
+		openAIGpt56 = openAIGpt56 && entryFamily == types.FamilyOpenAI && isGpt56OrNewerModel(identity.ModelID) &&
+			backend.RoutesOnlyThrough(entry, openAIPromptCacheRoutes)
 		if i == 0 {
 			family = entryFamily
 		}
@@ -263,6 +264,9 @@ func mapFromModelInfoGroup(
 	}
 	return model
 }
+
+// Relays (OpenRouter, Copilot, resellers) document no lifetime of their own and may bill or route differently.
+var openAIPromptCacheRoutes = map[string]bool{"openai": true, "azure": true, "azure_ai": true}
 
 // claudePromptCache is Anthropic's documented 5-minute and 1-hour cache lifetimes, fresh per call because maps are references.
 func claudePromptCache() ai.ModelPromptCache {

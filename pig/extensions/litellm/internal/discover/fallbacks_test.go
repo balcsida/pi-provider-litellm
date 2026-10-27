@@ -2244,11 +2244,12 @@ func TestFallbacks_PromptCacheDeclaresTheThirtyMinuteLifetimeForGpt56AndLaterOnR
 	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
 		"/model/info": fbData(
 			fbGptRow("sol", "openai/gpt-6.1-sol", ""),
-			fbGptRow("luna", "azure/team-deployment", `,"base_model":"azure/gpt-5.6-luna"`)),
+			fbGptRow("luna", "azure/team-deployment", `,"base_model":"azure/gpt-5.6-luna"`),
+			fbGptRow("astra", "azure_ai/gpt-6-astra", "")),
 	})
 
-	if len(result.Models) != 2 {
-		t.Fatalf("models = %v, want 2", fbIDs(result.Models))
+	if len(result.Models) != 3 {
+		t.Fatalf("models = %v, want 3", fbIDs(result.Models))
 	}
 	for _, model := range result.Models {
 		fbMatch(t, model, `{"api":"openai-responses","promptCache":{"short":1800}}`)
@@ -2266,6 +2267,23 @@ func TestFallbacks_PromptCacheDeclaresNoneForGpt56AndLaterOnChatCompletions(t *t
 
 	fbMatch(t, result.Models[0], `{"api":"openai-completions"}`)
 	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForGpt56AndLaterServedThroughARelayOrWithoutADeclaredRoute(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(
+			fbGptRow("openrouter", "openrouter/openai/gpt-6.1-sol", ""),
+			fbGptRow("copilot", "github_copilot/gpt-6.1-sol", ""),
+			fbGptRow("unprefixed", "gpt-6.1-sol", "")),
+	})
+
+	if len(result.Models) != 3 {
+		t.Fatalf("models = %v, want 3", fbIDs(result.Models))
+	}
+	for _, model := range result.Models {
+		fbMatch(t, model, `{"api":"openai-responses"}`)
+		fbLacks(t, model, "promptCache")
+	}
 }
 
 func TestFallbacks_PromptCacheDeclaresNoneForGptModelsBefore56(t *testing.T) {
