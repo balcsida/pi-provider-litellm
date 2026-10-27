@@ -100,13 +100,17 @@ func mapFromModelInfoGroup(
 	}
 	families := map[types.BackendFamily]bool{}
 	var family types.BackendFamily
+	openAIGpt56 := true
 	for i, entry := range entries {
 		withoutName := entry
 		withoutName.ModelName = ""
 		var entryFamily types.BackendFamily
-		if identity := backend.ResolveIdentity(withoutName); identity != nil {
+		identity := backend.ResolveIdentity(withoutName)
+		if identity != nil {
 			entryFamily = identity.Family
 		}
+		openAIGpt56 = openAIGpt56 && entryFamily == types.FamilyOpenAI && isGpt56OrNewerModel(identity.ModelID) &&
+			backend.RoutesOnlyThrough(entry, openAIPromptCacheRoutes)
 		if i == 0 {
 			family = entryFamily
 		}
@@ -253,8 +257,16 @@ func mapFromModelInfoGroup(
 	if len(families) == 1 && family == types.FamilyClaude && relaysAnthropicCache {
 		model.PromptCache = claudePromptCache()
 	}
+	// OpenAI's and Azure's documented 30-minute default minimum for GPT-5.6 and later. No `long`: the 12-hour
+	// lifetime needs `prompt_cache_options.ttl`, which Pi's long retention does not request.
+	if api == types.APIOpenAIResponses && openAIGpt56 {
+		model.PromptCache = ai.ModelPromptCache{"short": 1800}
+	}
 	return model
 }
+
+// Relays (OpenRouter, Copilot, resellers) document no lifetime of their own and may bill or route differently.
+var openAIPromptCacheRoutes = map[string]bool{"openai": true, "azure": true, "azure_ai": true}
 
 // claudePromptCache is Anthropic's documented 5-minute and 1-hour cache lifetimes, fresh per call because maps are references.
 func claudePromptCache() ai.ModelPromptCache {

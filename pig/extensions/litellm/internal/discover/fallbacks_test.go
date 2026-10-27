@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":9,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":10,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}
@@ -2233,4 +2233,98 @@ func TestFallbacks_PromptCacheLetsAWildcardChildInheritTheLifetimesFromItsParent
 		t.Fatalf("models = %v, want 1", fbIDs(result.Models))
 	}
 	fbMatch(t, result.Models[0], `{"id":"team/claude-sonnet-4-5","promptCache":{"short":300,"long":3600}}`)
+}
+
+func fbGptRow(name, model, extra string) string {
+	return fmt.Sprintf(`{"model_name":%q,"litellm_params":{"model":%q},`+
+		`"model_info":{"mode":"responses","supported_endpoints":["/v1/responses"]%s}}`, name, model, extra)
+}
+
+func TestFallbacks_PromptCacheDeclaresTheThirtyMinuteLifetimeForGpt56AndLaterOnResponses(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(
+			fbGptRow("sol", "openai/gpt-6.1-sol", ""),
+			fbGptRow("luna", "azure/team-deployment", `,"base_model":"azure/gpt-5.6-luna"`),
+			fbGptRow("astra", "azure_ai/gpt-6-astra", "")),
+	})
+
+	if len(result.Models) != 3 {
+		t.Fatalf("models = %v, want 3", fbIDs(result.Models))
+	}
+	for _, model := range result.Models {
+		fbMatch(t, model, `{"api":"openai-responses","promptCache":{"short":1800}}`)
+		if _, ok := model.PromptCache["long"]; ok {
+			t.Errorf("%s promptCache = %v, want no long lifetime", model.ID, model.PromptCache)
+		}
+	}
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForGpt56AndLaterOnChatCompletions(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(`{"model_name":"sol-chat","litellm_params":{"model":"openai/gpt-6.1-sol"},` +
+			`"model_info":{"mode":"chat","supported_endpoints":["/v1/chat/completions"]}}`),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"openai-completions"}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForGpt56AndLaterServedThroughARelayOrWithoutADeclaredRoute(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(
+			fbGptRow("openrouter", "openrouter/openai/gpt-6.1-sol", ""),
+			fbGptRow("copilot", "github_copilot/gpt-6.1-sol", ""),
+			fbGptRow("unprefixed", "gpt-6.1-sol", "")),
+	})
+
+	if len(result.Models) != 3 {
+		t.Fatalf("models = %v, want 3", fbIDs(result.Models))
+	}
+	for _, model := range result.Models {
+		fbMatch(t, model, `{"api":"openai-responses"}`)
+		fbLacks(t, model, "promptCache")
+	}
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForGptModelsBefore56(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(fbGptRow("gpt", "openai/gpt-5.5", "")),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"openai-responses"}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForAGroupMixingGpt61AndEarlierDeployments(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(
+			fbGptRow("gpt", "openai/gpt-6.1-sol", `,"id":"a"`),
+			fbGptRow("gpt", "openai/gpt-5.5", `,"id":"b"`)),
+	})
+
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheDeclaresNoneForAGptRouteIdentifiedOnlyByItsName(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(`{"model_name":"gpt-6.1-sol","model_info":{"mode":"responses"}}`),
+	})
+
+	fbMatch(t, result.Models[0], `{"api":"openai-responses"}`)
+	fbLacks(t, result.Models[0], "promptCache")
+}
+
+func TestFallbacks_PromptCacheGivesAGpt61ChildOfAnOpenAIWildcardRouteTheThirtyMinuteLifetime(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info": fbData(`{"model_name":"openai/*","litellm_params":{"model":"openai/*"},` +
+			`"model_info":{"supported_endpoints":["/v1/responses"]}}`),
+		"/v1/models": fbData(`{"id":"openai/gpt-6.1-sol"}`, `{"id":"openai/gpt-5.5"}`),
+	})
+
+	if len(result.Models) != 2 {
+		t.Fatalf("models = %v, want 2", fbIDs(result.Models))
+	}
+	fbMatch(t, result.Models[0], `{"id":"openai/gpt-6.1-sol","promptCache":{"short":1800}}`)
+	fbMatch(t, result.Models[1], `{"id":"openai/gpt-5.5"}`)
+	fbLacks(t, result.Models[1], "promptCache")
 }

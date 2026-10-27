@@ -55,6 +55,11 @@ const DEFAULT_TIMEOUT_MS = 5000;
 // shortcut: `long` assumes the host offers the 1-hour TTL (Bedrock only does for Claude 4.5+), gate it on
 // deployment routing if LiteLLM ever reports per-route TTL support.
 const CLAUDE_PROMPT_CACHE = { short: 300, long: 3600 } as const;
+// OpenAI's and Azure's documented 30-minute default minimum for GPT-5.6 and later. No `long`: the
+// 12-hour lifetime needs `prompt_cache_options.ttl`, which Pi's long retention does not request.
+const OPENAI_PROMPT_CACHE = { short: 1800 } as const;
+// Relays (OpenRouter, Copilot, resellers) document no lifetime of their own and may bill or route differently.
+const OPENAI_PROMPT_CACHE_ROUTES: ReadonlySet<string> = new Set(["openai", "azure", "azure_ai"]);
 const HEALTH_DETAIL_CONCURRENCY = 8;
 const reportedConflictingFamilyRoutes = new Set<string>();
 const reportedWithheldRepairRoutes = new Set<string>();
@@ -130,6 +135,12 @@ function gptGeneration(modelId: string): [major: number, minor: number] | undefi
 export function isGpt55OrNewerModel(modelId: string): boolean {
   const generation = gptGeneration(modelId);
   return generation !== undefined && (generation[0] > 5 || (generation[0] === 5 && generation[1] >= 5));
+}
+
+// GPT-5.6 and later keep a cached prefix for at least 30 minutes by default.
+function isGpt56OrNewerModel(modelId: string): boolean {
+  const generation = gptGeneration(modelId);
+  return generation !== undefined && (generation[0] > 5 || (generation[0] === 5 && generation[1] >= 6));
 }
 
 // GPT-6 also rejects an omitted effort there: it falls back to its default effort.
@@ -726,7 +737,8 @@ function mapFromModelInfoGroup(
   const protocols = entries.map((entry) => modelProtocol(reduced.id, entry, options.proxyVersion));
   const protocol = protocols.find((candidate) => candidate.api === "openai-completions") ?? protocols[0]!;
   const api = reduced.api === "anthropic-messages" ? reduced.api : protocol.api;
-  const families = new Set(entries.map((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.family));
+  const identities = entries.map((entry) => resolveBackendIdentity({ ...entry, model_name: undefined }));
+  const families = new Set(identities.map((identity) => identity?.family));
   const [family] = families;
   const hasBackendEvidence = entries.some(hasReadableBackendEvidence);
   const reasoningPolicy =
@@ -788,10 +800,7 @@ function mapFromModelInfoGroup(
   );
   // One GPT-5.5+ deployment is enough: a tool request routed to it fails with
   // reasoning attached, while dropping reasoning elsewhere only loses effort.
-  const chatBackendIds =
-    api === "openai-completions"
-      ? entries.flatMap((entry) => resolveBackendIdentity({ ...entry, model_name: undefined })?.modelId ?? [])
-      : [];
+  const chatBackendIds = api === "openai-completions" ? identities.flatMap((identity) => identity?.modelId ?? []) : [];
   const modelPolicy: LiteLLMModelPolicy | undefined = chatBackendIds.some(isGpt55OrNewerModel)
     ? {
         normalizeStrictToolMessages: false,
@@ -820,6 +829,15 @@ function mapFromModelInfoGroup(
     ...(families.size === 1 && family ? { litellmBackendFamily: family } : {}),
     ...(families.size === 1 && family === "claude" && relaysAnthropicCacheMarkers
       ? { promptCache: { ...CLAUDE_PROMPT_CACHE } }
+      : {}),
+    ...(api === "openai-responses" &&
+    identities.every(
+      (identity, index) =>
+        identity?.family === "openai" &&
+        isGpt56OrNewerModel(identity.modelId) &&
+        routesOnlyThrough(entries[index]!, OPENAI_PROMPT_CACHE_ROUTES),
+    )
+      ? { promptCache: { ...OPENAI_PROMPT_CACHE } }
       : {}),
     ...(modelPolicy ? { litellmPolicy: modelPolicy } : {}),
     // closeSerializerPolicy derives compat from `api`, a correlation its return type cannot carry.

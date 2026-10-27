@@ -87,6 +87,12 @@ func IsGpt55OrNewerModel(modelID string) bool {
 	return ok && (major > 5 || (major == 5 && minor >= 5))
 }
 
+// isGpt56OrNewerModel: GPT-5.6 and later keep a cached prefix for at least 30 minutes by default.
+func isGpt56OrNewerModel(modelID string) bool {
+	major, minor, ok := gptGeneration(modelID)
+	return ok && (major > 5 || (major == 5 && minor >= 6))
+}
+
 // IsGpt6OrNewerModel: GPT-6 also rejects an omitted effort there: it falls back to its default effort.
 func IsGpt6OrNewerModel(modelID string) bool {
 	major, _, ok := gptGeneration(modelID)
