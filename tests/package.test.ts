@@ -409,7 +409,7 @@ describe("dependency security overrides", () => {
       "basic-ftp": "6.0.1",
       "brace-expansion": "5.0.9",
       nanoid: "3.3.18",
-      undici: "8.10.2",
+      undici: "8.12.3",
       protobufjs: "8.7.1",
     };
     for (const [name, floor] of Object.entries(floors)) {
