@@ -372,9 +372,9 @@ func (s *extensionState) seedModels(definition providerDefinition) []types.Disco
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seedTimeoutMsBudget())*time.Millisecond)
 	defer cancel()
 	stored := readStoredCredential(definition.Name, filepath.Join(agentDir(), "auth.json"))
-	// executeHelpers false: activation must never run the user's key helper as a side effect, so
-	// helper-backed setups keep waiting for the host's own refresh.
-	auth, err := s.authForCredential(ctx, definition, credentialFromStored(stored), false)
+	// Activation must not run the user's key helper as a side effect, so helper-backed setups keep waiting
+	// for the host's own refresh; LITELLM_STARTUP_KEY_HELPER=1 is the launcher's opt-in to run it here.
+	auth, err := s.authForCredential(ctx, definition, credentialFromStored(stored), os.Getenv(envStartupKeyHelper) == "1")
 	if err != nil {
 		return skip(err.Error())
 	}

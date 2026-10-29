@@ -8,6 +8,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 export const MANAGED_ENV_VARS = [
   "LITELLM_API_KEY",
   "LITELLM_API_KEY_HELPER",
+  "LITELLM_STARTUP_KEY_HELPER",
   "LITELLM_BASE_URL",
   "LITELLM_DISPLAY_NAME",
   "LITELLM_HEADERS",

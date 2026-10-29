@@ -18,7 +18,7 @@ import (
 )
 
 var hermeticVars = []string{
-	envBaseURL, envAPIKey, envAPIKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
+	envBaseURL, envAPIKey, envAPIKeyHelper, envStartupKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
 	envVerboseDiscovery, envModelsDev, envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
 	envPIOffline, envPIGOffline, "PIG_USE_PI_DIRS", "PIG_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
 	envProviders, envProvidersJSON, "LITELLM_TRUST_PROXY_LIMITS",
