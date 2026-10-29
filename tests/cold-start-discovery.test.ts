@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -381,6 +381,31 @@ describe("cold start discovery (issue #137)", () => {
 
     expect(Date.now() - startedAt).toBeLessThan(15_000);
   }, 70_000);
+
+  it("runs the key helper at activation only with LITELLM_STARTUP_KEY_HELPER=1", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-helper-"));
+    const marker = join(agentDir, "helper-ran");
+    const helperPath = join(agentDir, "helper.sh");
+    await writeFile(helperPath, `#!/usr/bin/env bash\ntouch "${marker}"\nprintf %s helper-key\n`, { mode: 0o700 });
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    delete process.env.LITELLM_API_KEY;
+    process.env.LITELLM_API_KEY_HELPER = helperPath;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/model/info")) {
+        return jsonResponse(200, { data: [{ model_name: "gpt-4o", model_info: { mode: "chat" } }] });
+      }
+      throw new Error(`unexpected URL: ${String(input)}`);
+    });
+
+    expect((await startup(agentDir)).getModels("litellm")).toEqual([]);
+    await expect(access(marker)).rejects.toThrow();
+
+    process.env.LITELLM_STARTUP_KEY_HELPER = "1";
+    const runtime = await startup(agentDir);
+
+    await expect(access(marker)).resolves.toBeUndefined();
+    expect(runtime.getModels("litellm").map((model) => model.id)).toEqual(["gpt-4o"]);
+  });
 
   it("does not discover when no credentials are configured", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-litellm-cold-nocreds-"));

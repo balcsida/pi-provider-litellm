@@ -67,6 +67,7 @@ const ENV_CLI_JWT_EXPIRATION_HOURS = "LITELLM_CLI_JWT_EXPIRATION_HOURS";
 const ENV_OFFLINE = "LITELLM_OFFLINE";
 const ENV_VERBOSE_DISCOVERY = "LITELLM_VERBOSE_DISCOVERY";
 const ENV_MODELS_DEV = "LITELLM_MODELS_DEV";
+const ENV_STARTUP_KEY_HELPER = "LITELLM_STARTUP_KEY_HELPER";
 const MODELS_DEV_CACHE_FILENAME = "litellm-models-dev.json";
 const DEFAULT_TIMEOUT_MS = 5000;
 const SEED_TIMEOUT_MS = 3000;
@@ -2727,9 +2728,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const agentDir = getAgentDir();
     try {
       const stored = readStoredCredential(definition.name, join(agentDir, "auth.json"));
-      // executeHelpers:false — activation must never run the user's key helper as a side effect,
-      // so helper-backed setups keep waiting for Pi's own refresh.
-      const auth = await authForCredential(definition, stored, false);
+      // Activation must not run the user's key helper as a side effect, so helper-backed setups keep waiting
+      // for Pi's own refresh; LITELLM_STARTUP_KEY_HELPER=1 is the launcher's opt-in to run it here.
+      const auth = await authForCredential(definition, stored, process.env[ENV_STARTUP_KEY_HELPER] === "1");
       const storedModels = await readStoredModels({
         agentDir,
         provider: definition.name,

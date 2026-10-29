@@ -41,6 +41,7 @@ const (
 	envOffline                  = "LITELLM_OFFLINE"
 	envVerboseDiscovery         = "LITELLM_VERBOSE_DISCOVERY"
 	envModelsDev                = "LITELLM_MODELS_DEV"
+	envStartupKeyHelper         = "LITELLM_STARTUP_KEY_HELPER"
 	envPIOffline                = "PI_OFFLINE"
 	envPIGOffline               = "PIG_OFFLINE"
 	modelsDevCacheFilename      = "litellm-models-dev.json"

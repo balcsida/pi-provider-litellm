@@ -394,6 +394,22 @@ func TestSeedModels(t *testing.T) {
 			}
 		})
 	})
+	t.Run("runs the API key helper with LITELLM_STARTUP_KEY_HELPER=1", func(t *testing.T) {
+		state, definition := startup(t)
+		server, _ := proxy(t, 200, nil)
+		marker := filepath.Join(t.TempDir(), "ran")
+		t.Setenv(envBaseURL, server.URL)
+		helper := filepath.Join(t.TempDir(), "helper.sh")
+		if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch "+marker+"\nprintf sk-helper\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envAPIKeyHelper, helper)
+		t.Setenv(envStartupKeyHelper, "1")
+		seed := state.seedModels(definition)
+		if _, err := os.Stat(marker); err != nil || len(seed) != 1 || seed[0].ID != "fresh-model" {
+			t.Fatalf("marker err=%v seed=%+v", err, seed)
+		}
+	})
 	t.Run("never runs an API key helper", func(t *testing.T) {
 		state, definition := startup(t)
 		marker := filepath.Join(t.TempDir(), "ran")
