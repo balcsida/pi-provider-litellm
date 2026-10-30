@@ -132,6 +132,7 @@ jobs:
             -e . \
             --provider litellm \
             --model claude-messages \
+            --thinking off \
             --no-tools \
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
