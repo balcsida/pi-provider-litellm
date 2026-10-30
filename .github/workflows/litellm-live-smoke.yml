@@ -20,10 +20,14 @@ jobs:
       LITELLM_BASE_URL: http://127.0.0.1:4000
       LITELLM_API_KEY: sk-ci-litellm-smoke
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
-      LITELLM_IMAGE: docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09
-      # One cheap Claude backend published three ways, so every wire protocol the
-      # extension selects is exercised against a real model.
-      ANTHROPIC_SMOKE_MODEL: claude-haiku-4-5
+      LITELLM_IMAGE: docker.litellm.ai/berriai/litellm@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06 # v1.106.6
+      # Cheap Claude backends published three ways, so every wire protocol the extension
+      # selects is exercised against a real model. Each route needs its own backend id:
+      # LiteLLM keeps model metadata per backend model, so routes sharing an id report one
+      # route's supported_endpoints for all of them and discovery picks the wrong protocol.
+      ANTHROPIC_SMOKE_MODEL_MESSAGES: claude-haiku-4-5
+      ANTHROPIC_SMOKE_MODEL_CHAT: claude-haiku-4-5-20251001
+      ANTHROPIC_SMOKE_MODEL_RESPONSES: claude-sonnet-4-6
       LITELLM_SMOKE_MODELS: claude-messages claude-chat claude-responses
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_SMOKE_EXPECT_APIS: claude-messages=anthropic-messages claude-chat=openai-completions claude-responses=openai-responses
@@ -63,7 +67,7 @@ jobs:
                 # output limit, which caps the Pi CLI request below like the runner's own.
                 max_output_tokens: 16
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_MESSAGES}
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-chat
               model_info:
@@ -71,13 +75,15 @@ jobs:
                 # An endpoint list without /v1/messages keeps a Claude route on Chat Completions.
                 supported_endpoints: ["/v1/chat/completions"]
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_CHAT}
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-responses
               model_info:
+                # Not supported_endpoints: LiteLLM 1.106 sends a Claude route that lists
+                # /v1/responses through its OpenAI-compatible path, which needs an api_base.
                 mode: responses
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_RESPONSES}
                 api_key: os.environ/ANTHROPIC_API_KEY
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
@@ -123,11 +129,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$PI_CODING_AGENT_DIR"
+          # Populate Pi's model store first: on a cold store, --model does not resolve a
+          # route that discovery is still fetching and Pi falls back to another model.
+          ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
+          grep -F claude-messages /tmp/pi-litellm-models.txt
           messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ./node_modules/.bin/pi \
             -e . \
             --provider litellm \
             --model claude-messages \
+            --thinking off \
             --no-tools \
             --no-session \
             -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
