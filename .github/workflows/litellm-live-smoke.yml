@@ -1,8 +1,9 @@
 # Live counterpart of litellm-smoke.yml: the same LiteLLM proxy and smoke runner, with
 # the upstream being the real Anthropic API instead of VidaiMock. Manual only, because
 # every run spends real credits (a few hundred Haiku tokens). Needs the repository
-# secret ANTHROPIC_API_KEY: an Anthropic Console API key (sk-ant-api...), not a
-# Claude.ai subscription login, which the API and LiteLLM do not accept.
+# secret ANTHROPIC_API_KEY: an Anthropic Console API key (sk-ant-api...). The monthly
+# Console credits of a Max, Ultra or Team plan cover it once the plan is linked to the
+# key's Console organization; a Claude.ai login token is not an API key.
 name: LiteLLM Live Smoke
 
 on:
