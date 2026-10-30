@@ -2077,6 +2077,27 @@ describe("discoverModels via /model/info", () => {
     expect(String(stderr.mock.calls[0]?.[0])).toContain(route);
   });
 
+  it("sends route diagnostics to the report option instead of stderr", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const report = vi.fn();
+    const route = `reported-conflict-${process.pid}-${Date.now()}-${Math.random()}`;
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: route, litellm_params: { model: "anthropic/claude-opus-4-7" }, model_info: { id: "a" } },
+            { model_name: route, litellm_params: { model: "anthropic/claude-sonnet-4-6" }, model_info: { id: "b" } },
+          ],
+        }),
+    });
+
+    await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false, report });
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledOnce();
+    expect(report.mock.calls[0]?.[0]).toMatch(new RegExp(`provider evidence.*${route}$`));
+  });
+
   it("withholds different concrete catalog identities from one provider across a route group", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const route = `same-provider-group-conflict-${process.pid}-${Date.now()}-${Math.random()}`;

@@ -330,7 +330,7 @@ func (s *extensionState) runDiscovery(ctx context.Context, auth types.LiteLLMRun
 			ModelsDev: &modelsDev, ModelsDevCachePath: cachePath, ModelOverrides: readModelLimitOverrides(),
 		},
 		Silent: !isVerboseDiscovery(),
-		Report: func(message string) { reportDiagnostic(strings.TrimSuffix(message, "\n")) },
+		Report: func(message string) { s.notifyMcp(message, "warning") },
 	}
 	if isVerboseDiscovery() {
 		options.OnProgress = func(message string) { reportDiagnostic("LiteLLM: " + message) }
@@ -461,6 +461,7 @@ func (s *extensionState) newProvider(definition providerDefinition, seed []types
 		Models:            seed,
 		AllowInsecureHTTP: definition.AllowInsecureHTTP,
 		Policies:          s.policies,
+		Report:            func(message string) { s.notifyMcp(message, "warning") },
 		ResolveCredentialRoot: func(credential *ai.Credential, requestRoot, apiKey string) (string, error) {
 			return s.resolveRoot(definition, credential, requestRoot, apiKey)
 		},
@@ -520,7 +521,8 @@ func notify(ctx interface {
 	reportDiagnostic(message)
 }
 
-// notifyMcp is notifyMcp: it buffers until session_start while the terminal is starting.
+// notifyMcp is notifyMcp: it buffers until session_start while the terminal is starting. Provider and
+// discovery diagnostics go through it too, because raw stderr paints over the running TUI.
 func (s *extensionState) notifyMcp(message, level string) {
 	text := strings.TrimRight(message, " \t\r\n")
 	s.mu.Lock()

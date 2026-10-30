@@ -2449,6 +2449,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let sessionStarted = false;
   const pendingMcpMessages = new Map<string, "info" | "warning">();
 
+  // Also carries provider and discovery diagnostics: raw stderr would paint over the running TUI.
   function notifyMcp(message: string, level: "info" | "warning" = "warning"): void {
     const text = message.trimEnd();
     if (mcpUI) mcpUI.notify(text, level);
@@ -2701,6 +2702,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       modelOverrides: await readModelLimitOverrides(),
       silent: !isVerboseDiscovery(),
       onProgress: isVerboseDiscovery() ? (message) => process.stderr.write(`LiteLLM: ${message}\n`) : undefined,
+      report: (message) => notifyMcp(message),
     });
     signal?.throwIfAborted();
     return { ...result, baseUrl: normalizeBaseUrl(auth.baseUrl, auth.allowInsecureHttp) };
@@ -2824,6 +2826,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         if (disabledReason) throw new Error(`discovery disabled (${disabledReason})`);
         return runDiscovery(await authForCredential(definition, credential), signal);
       },
+      report: (message) => notifyMcp(message),
     });
     Object.assign(provider, { headers: resolveHeaders(definition) });
     const refreshModels = provider.refreshModels!;

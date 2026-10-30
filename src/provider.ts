@@ -48,6 +48,8 @@ export type LiteLLMProviderOptions = {
   allowInsecureHttp?: boolean;
   resolveCredentialRoot: (credential?: Credential, requestBaseUrl?: string, apiKey?: string) => string | undefined;
   discover(credential: Credential, signal?: AbortSignal): Promise<DiscoveryResult & { baseUrl?: string }>;
+  /** Shows a diagnostic line. Defaults to stderr, which paints over Pi's TUI once it is running. */
+  report?: (message: string) => void;
 };
 
 // Chat models may omit `type`.
@@ -220,7 +222,9 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
   const reportUnavailable = (message: string): void => {
     if (reportedAvailabilityDiagnostics.has(message)) return;
     reportedAvailabilityDiagnostics.add(message);
-    process.stderr.write(`LiteLLM (${options.id}): ${message}\n`);
+    const line = `LiteLLM (${options.id}): ${message}`;
+    if (options.report) options.report(line);
+    else process.stderr.write(`${line}\n`);
   };
   type ActiveRoot = { root: string; canonical: string; hostname: string };
   const resolveActiveRoot = (credential: Credential | undefined, hiddenCount: number): ActiveRoot | undefined => {

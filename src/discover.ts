@@ -650,7 +650,12 @@ export async function fetchJson<T>(
 
 const DIAGNOSTIC_ROUTE_SAMPLE = 3;
 
+type Report = (message: string) => void;
+
+const writeStderr: Report = (message) => process.stderr.write(`${message}\n`);
+
 function reportBoundedRoutes(
+  report: Report,
   reported: Set<string>,
   routes: readonly string[],
   describe: (count: number) => string,
@@ -660,7 +665,7 @@ function reportBoundedRoutes(
   for (const route of unreported) reported.add(route);
   const hidden = unreported.length - DIAGNOSTIC_ROUTE_SAMPLE;
   const sample = unreported.slice(0, DIAGNOSTIC_ROUTE_SAMPLE).join(", ");
-  process.stderr.write(`${describe(unreported.length)}: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}\n`);
+  report(`${describe(unreported.length)}: ${sample}${hidden > 0 ? ` (+${hidden} more)` : ""}`);
 }
 
 // Reported routes, so a persistent misconfiguration is announced once rather than on
@@ -673,8 +678,9 @@ const reportedAmbiguousRoutes = new Set<string>();
 // supplies complete prices; limits and other catalog-derived metadata may still use
 // conservative defaults. Report that degradation regardless of
 // LITELLM_VERBOSE_DISCOVERY, carrying only a count and bounded public route ids.
-function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
+function reportAmbiguousCatalogAuthority(report: Report, routes: readonly string[]): void {
   reportBoundedRoutes(
+    report,
     reportedAmbiguousRoutes,
     routes,
     (count) =>
@@ -685,8 +691,9 @@ function reportAmbiguousCatalogAuthority(routes: readonly string[]): void {
 
 const reportedIncompatibleModeRoutes = new Set<string>();
 
-function reportIncompatibleDeploymentModes(routes: readonly string[]): void {
+function reportIncompatibleDeploymentModes(report: Report, routes: readonly string[]): void {
   reportBoundedRoutes(
+    report,
     reportedIncompatibleModeRoutes,
     routes,
     (count) =>
@@ -893,9 +900,10 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
 async function discoverFromHealth(
   base: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean },
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; report?: Report; silent?: boolean },
 ): Promise<DiscoveredModel[]> {
   const progress = options.silent ? undefined : options.onProgress;
+  const report = options.report ?? writeStderr;
   progress?.("Querying /health endpoint...");
   const healthResult = await fetchJson<HealthResponse>(`${base}/health`, apiKey, options);
   if (!healthResult.ok) return [];
@@ -971,11 +979,11 @@ async function discoverFromHealth(
       });
     })
     .filter((model): model is DiscoveredModel => model !== undefined);
-  reportIncompatibleDeploymentModes(incompatibleModeRoutes);
-  reportAmbiguousCatalogAuthority(ambiguousRoutes);
-  reportConflictingFamilyEvidence(conflictingFamilyRoutes);
-  reportWithheldToolRepair(withheldRepairRoutes);
-  reportWithheldToolRepairForModels(discovered);
+  reportIncompatibleDeploymentModes(report, incompatibleModeRoutes);
+  reportAmbiguousCatalogAuthority(report, ambiguousRoutes);
+  reportConflictingFamilyEvidence(report, conflictingFamilyRoutes);
+  reportWithheldToolRepair(report, withheldRepairRoutes);
+  reportWithheldToolRepairForModels(report, discovered);
   return discovered;
 }
 
@@ -1210,10 +1218,11 @@ function mapFromWildcardExpansion(
 export async function discoverModels(
   baseUrl: string,
   apiKey: string,
-  options: DiscoveryOptions & { onProgress?: (message: string) => void; silent?: boolean } = {},
+  options: DiscoveryOptions & { onProgress?: (message: string) => void; report?: Report; silent?: boolean } = {},
 ): Promise<DiscoveryResult> {
   const base = normalizeBaseUrl(baseUrl, options.allowInsecureHttp);
   const progress = options.silent ? undefined : options.onProgress;
+  const report = options.report ?? writeStderr;
   progress?.("Querying /model/info endpoint...");
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   // An empty `/model/info` list is treated like an unavailable endpoint: some proxies
@@ -1265,10 +1274,10 @@ export async function discoverModels(
     let models = reducedGroups
       .map(({ model }) => model)
       .filter((model): model is DiscoveredModel => model !== undefined);
-    reportIncompatibleDeploymentModes(incompatibleModeRoutes);
-    reportAmbiguousCatalogAuthority(ambiguousRoutes);
-    reportConflictingFamilyEvidence(conflictingFamilyRoutes);
-    reportWithheldToolRepair(withheldRepairRoutes);
+    reportIncompatibleDeploymentModes(report, incompatibleModeRoutes);
+    reportAmbiguousCatalogAuthority(report, ambiguousRoutes);
+    reportConflictingFamilyEvidence(report, conflictingFamilyRoutes);
+    reportWithheldToolRepair(report, withheldRepairRoutes);
     // LiteLLM's /model/info does NOT expand wildcard model_name entries (e.g.
     // "lemonade/*" backed by model: openai/* + check_provider_endpoint: true)
     // — it returns the literal wildcard only. The discovered ids live in
@@ -1338,7 +1347,7 @@ export async function discoverModels(
         models = [...models, ...expanded];
       }
     }
-    reportWithheldToolRepair(withheldRepairRoutes);
+    reportWithheldToolRepair(report, withheldRepairRoutes);
     models = deduplicateModels(models);
     if (process.env.LITELLM_VERBOSE_DISCOVERY === "1") {
       const defaultedWildcards = wildcardRoutes.filter(({ route }) => defaultedContextRoutes.has(route));
@@ -1352,6 +1361,7 @@ export async function discoverModels(
             ),
       );
       reportBoundedRoutes(
+        report,
         reportedDefaultedContextRoutes,
         defaulted.map((model) => JSON.stringify(model.id)),
         (count) =>
@@ -1536,8 +1546,9 @@ function deploymentFamily(entry: ModelInfoEntry): CatalogResolution["semanticFam
   return adapterFamily === identityFamily ? identityFamily : "conflicting";
 }
 
-function reportConflictingFamilyEvidence(routes: readonly string[]): void {
+function reportConflictingFamilyEvidence(report: Report, routes: readonly string[]): void {
   reportBoundedRoutes(
+    report,
     reportedConflictingFamilyRoutes,
     routes,
     (count) =>
@@ -1546,8 +1557,9 @@ function reportConflictingFamilyEvidence(routes: readonly string[]): void {
   );
 }
 
-function reportWithheldToolRepair(routes: readonly string[]): void {
+function reportWithheldToolRepair(report: Report, routes: readonly string[]): void {
   reportBoundedRoutes(
+    report,
     reportedWithheldRepairRoutes,
     routes,
     (count) =>
@@ -1558,8 +1570,9 @@ function reportWithheldToolRepair(routes: readonly string[]): void {
   );
 }
 
-function reportWithheldToolRepairForModels(models: readonly DiscoveredModel[]): void {
+function reportWithheldToolRepairForModels(report: Report, models: readonly DiscoveredModel[]): void {
   reportWithheldToolRepair(
+    report,
     models
       .filter(
         (model) =>

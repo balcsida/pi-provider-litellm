@@ -252,6 +252,23 @@ describe("createLiteLLMProvider", () => {
     );
   });
 
+  it("sends availability diagnostics to the report option instead of stderr", async () => {
+    const report = vi.fn();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const value = controller({
+      discover: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+      report,
+    });
+
+    await expect(value.refreshModels?.(context([native("stored")], true))).rejects.toThrow("offline");
+    expect(stderr).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/^LiteLLM \(litellm\): keeping cached models .*network refresh failed$/),
+    );
+  });
+
   it("restores mixed legacy and current-version entries per entry", async () => {
     const discover = vi.fn(async () => discovered("fresh"));
     const legacy = { ...native("legacy"), name: "legacy (no metadata)" };
