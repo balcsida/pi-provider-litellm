@@ -157,7 +157,9 @@ jobs:
               model_info:
                 mode: responses
               litellm_params:
-                model: openai/gpt-4o-mini
+                # Its own backend id: LiteLLM keeps model metadata per backend model, so
+                # sharing gpt-4o-mini would report the Chat-only endpoint list here too.
+                model: openai/gpt-4.1-mini
                 api_base: http://host.docker.internal:8100/v1
                 api_key: sk-vidaimock
             - model_name: grouped-vidaimock
