@@ -75,7 +75,11 @@ jobs:
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-responses
               model_info:
-                mode: responses
+                mode: chat
+                # Not mode: responses. On this LiteLLM, a Responses-mode sibling of the
+                # same backend leaks model_alias_map into the Chat route's request body,
+                # which Anthropic rejects with 400. The endpoint list selects Responses too.
+                supported_endpoints: ["/v1/responses"]
               litellm_params:
                 model: anthropic/${ANTHROPIC_SMOKE_MODEL}
                 api_key: os.environ/ANTHROPIC_API_KEY
