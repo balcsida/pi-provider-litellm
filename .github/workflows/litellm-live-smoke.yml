@@ -59,6 +59,9 @@ jobs:
             - model_name: claude-messages
               model_info:
                 mode: chat
+                # Discovery takes the smaller of this and the catalog figure as the model's
+                # output limit, which caps the Pi CLI request below like the runner's own.
+                max_output_tokens: 16
               litellm_params:
                 model: anthropic/${ANTHROPIC_SMOKE_MODEL}
                 api_key: os.environ/ANTHROPIC_API_KEY
