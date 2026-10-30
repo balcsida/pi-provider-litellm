@@ -127,6 +127,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$PI_CODING_AGENT_DIR"
+          # Populate Pi's model store first: on a cold store, --model does not resolve a
+          # route that discovery is still fetching and Pi falls back to another model.
+          ./node_modules/.bin/pi -e . --list-models litellm 2>&1 | tee /tmp/pi-litellm-models.txt
+          grep -F claude-messages /tmp/pi-litellm-models.txt
           messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ./node_modules/.bin/pi \
             -e . \
