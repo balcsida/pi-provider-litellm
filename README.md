@@ -2,7 +2,7 @@
 
 LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.99.2+ is required; on older Pi, install `npm:pi-provider-litellm@3.4.0`.
 
-Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, and Google ADC token auth. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
+Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, budget status, image generation and classifier routes, and Google ADC token auth. A [Go port](#pig) brings it to PiG, without image generation and classifier routes. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
 ## Install
 
@@ -429,7 +429,7 @@ such as OpenAI's GPT-6 Luna, is published as both a chat model and a classifier.
 | `LITELLM_GCLOUD_TOKEN_AUTH` | unset | If set to a non-empty value other than `0`, use Google Application Default Credentials as the LiteLLM bearer token source. This takes precedence over `LITELLM_API_KEY_HELPER` and `LITELLM_API_KEY` when no stored `/login litellm` credential exists. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google default ADC path | Optional path to an ADC JSON file used by `LITELLM_GCLOUD_TOKEN_AUTH`. If unset, the extension checks the default gcloud ADC locations. |
 | `LITELLM_OFFLINE` | unset | If `1`, disable all model and MCP discovery, including post-login discovery; use cached models only when their stored canonical proxy root exactly matches the active credential root, including any path prefix. URL-standard host casing and default ports are canonicalized, but paths remain case-sensitive. |
-| `PI_OFFLINE` | unset | Pi documents it as disabling automatic network activity, including model catalog refreshes. Through Pi 1.2.0, any set value (including `0` or an empty string) disables startup model discovery and `/model` network refreshes. Run `/litellm-refresh`, or unset it, to discover; cached models can still be used offline. |
+| `PI_OFFLINE` | unset | Pi documents it as disabling automatic network activity, including model catalog refreshes. Through Pi 1.4.0, any set value (including `0` or an empty string) disables startup model discovery and `/model` network refreshes. Run `/litellm-refresh`, or unset it, to discover; cached models can still be used offline. |
 | `LITELLM_DISCOVERY_TIMEOUT_MS` | `5000` | Background and explicit discovery fetch timeout in ms; `0` disables automatic discovery |
 | `LITELLM_CLI_JWT_EXPIRATION_HOURS` | `24` | CLI SSO token lifetime fallback for older proxies whose poll response omits `expires_in`; mirror a non-default proxy setting locally |
 | `LITELLM_VERBOSE_DISCOVERY` | unset | If `1`, enable progress messages during model discovery (login, refresh, startup), including startup skip reasons and defaulted `/model/info` context windows. Progress messages are off by default |
@@ -486,7 +486,9 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 ## PiG
 
 A Go port for [PiG](https://github.com/MichaelKinsy/PiG) lives in [`pig/`](pig/README.md). It reads the same
-settings, environment variables and `auth.json` entries; see [pig/README.md](pig/README.md) to install it.
+settings, environment variables and `auth.json` entries; see [pig/README.md](pig/README.md) to install it. A PiG native
+provider cannot yet surface image or classifier models, so the port does not publish image generation or decision
+routes.
 
 ## Mocked LiteLLM smoke workflow
 
@@ -513,13 +515,15 @@ npm run supply-chain:guard
 npm pack --dry-run
 ```
 
+Changes to the Go port in `pig/` are verified separately; see [pig/README.md](pig/README.md) for its `go test` and `pig package validate` steps.
+
 The published npm package contains only `src`, `README.md`, `LICENSE`, and the `package.json` npm always includes. Pi loads the TypeScript source entrypoint for both npm and Git installs. The package does not expose a JavaScript or TypeScript library import; load it through Pi.
 
 ## Release
 
-Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, then `npm publish` runs `prepublishOnly` to check the source, build `dist` for verification, verify the package contents, and publish to npm with provenance before the workflow creates a GitHub release.
+Releases are driven by semver tags named `v*.*.*`. The GitHub release workflow installs from the lockfile, then `npm publish` runs `prepublishOnly` to check the source, build `dist` for verification, verify the package contents, and publish to npm with provenance before the workflow creates a GitHub release. The same tag publishes the Go port from `pig/` as `pig-provider-litellm`.
 
-Before tagging a release, keep `package.json` and `package-lock.json` versions in sync and verify the dry-run package contents.
+Before tagging a release, keep the `package.json`, `package-lock.json` and `pig/package.json` versions in sync and verify the dry-run package contents.
 
 ## Model catalog
 
@@ -610,7 +614,7 @@ The development probe runs against minimized snapshots with `npm run probe:proxy
 | "no credentials" warning at startup | Env vars not set and no OAuth credential — run `/login litellm` |
 | No models, or no new routes, while `PI_OFFLINE` is set | Pi skips every model network refresh, including the one `/model` starts. Run `/litellm-refresh`, or unset `PI_OFFLINE` (`PI_OFFLINE=0` is not enough) |
 | `No models available` at startup, gone after a restart | A Pi startup race, not discovery — see [`No models available` at startup](#no-models-available-at-startup) |
-| "discovered no models" | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
+| `/litellm-refresh` reports `refreshed 0 models` | Proxy returned an empty list — check pi's startup log and verify `/model/info`, `/v1/models`, or `/health` responds |
 | `/model/info` returning 401/403/404 or an empty list | Expected behavior with virtual keys — extension falls back to `/v1/models` |
 | Discovery times out | Increase `LITELLM_DISCOVERY_TIMEOUT_MS` or set `LITELLM_OFFLINE=1` to fall back on cached models. Offline mode does not recover a root mismatch, including a different path prefix — see [Model host enforcement](#model-host-enforcement) |
 | A provider shows no models | The base URL is missing, invalid, still the placeholder, or its full root, including any path prefix, differs from the root in the cached catalog. Check stderr and see [Model host enforcement](#model-host-enforcement) |
