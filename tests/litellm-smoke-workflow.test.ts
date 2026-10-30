@@ -268,7 +268,7 @@ describe("LiteLLM smoke workflow", () => {
   it("selects the unlicensed image for pull requests", () => {
     expect(readWorkflow()).toContain(
       "LITELLM_IMAGE: $" +
-        "{{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database@sha256:8b229a4b48fbe62d7f994b502106c3c1dbab958c07934fb446ac0e048a62745e' || 'docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09' }}",
+        "{{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database@sha256:7ef0e78fe00ad5ea7ea45666cc1d1f02cb7076aee69091543bf397de52db33ce' || 'docker.litellm.ai/berriai/litellm@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06' }}",
     );
   });
 
