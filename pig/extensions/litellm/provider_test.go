@@ -890,6 +890,23 @@ func TestDiscoveryCacheVersionTransition(t *testing.T) {
 			t.Fatalf("diagnostics = %v", *diagnostics)
 		}
 	})
+	t.Run("sends the warning to the Report option instead of the diagnostic stream", func(t *testing.T) {
+		diagnostics := collectDiagnostics(t)
+		var reported []string
+		h := newHarness(t, func(o *providerOptions) {
+			o.Discover = func(context.Context, ai.Credential) (*discoveredCatalog, error) {
+				return nil, errors.New("refresh failed")
+			}
+			o.Report = func(message string) { reported = append(reported, message) }
+		})
+		v2 := restorableV2(t)
+		h.policies.replace("litellm", []types.DiscoveredModel{v2})
+		refresh(h.provider, storedEntry(t, legacyModel(t), v2), true, false)
+		if len(*diagnostics) != 0 || len(reported) != 1 ||
+			!strings.HasPrefix(reported[0], "LiteLLM (litellm): ") || !strings.Contains(reported[0], "required network refresh failed") {
+			t.Fatalf("diagnostics = %v reported = %v", *diagnostics, reported)
+		}
+	})
 }
 
 func TestReducedDiscoveryMetadataSurvivesTheProviderCache(t *testing.T) {

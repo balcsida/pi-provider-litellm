@@ -40,6 +40,8 @@ type providerOptions struct {
 	// ResolveCredentialRoot returns "" when nothing configures a root.
 	ResolveCredentialRoot func(credential *ai.Credential, requestRoot, apiKey string) (string, error)
 	Discover              func(ctx context.Context, credential ai.Credential) (*discoveredCatalog, error)
+	// Report shows a diagnostic line; nil writes it through reportDiagnostic.
+	Report func(message string)
 }
 
 // toNativeModels projects discovered models onto a provider and its normalized proxy root.
@@ -191,8 +193,14 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 		first := !reported[message]
 		reported[message] = true
 		reportedMu.Unlock()
-		if first {
-			reportDiagnostic(fmt.Sprintf("LiteLLM (%s): %s", options.ID, message))
+		if !first {
+			return
+		}
+		line := fmt.Sprintf("LiteLLM (%s): %s", options.ID, message)
+		if options.Report != nil {
+			options.Report(line)
+		} else {
+			reportDiagnostic(line)
 		}
 	}
 	policies := options.Policies
