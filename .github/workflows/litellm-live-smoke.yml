@@ -21,9 +21,14 @@ jobs:
       LITELLM_API_KEY: sk-ci-litellm-smoke
       LITELLM_MASTER_KEY: sk-ci-litellm-smoke
       LITELLM_IMAGE: docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09
-      # One cheap Claude backend published three ways, so every wire protocol the
-      # extension selects is exercised against a real model.
-      ANTHROPIC_SMOKE_MODEL: claude-haiku-4-5
+      # Cheap Claude backends published three ways, so every wire protocol the extension
+      # selects is exercised against a real model. Each route needs its own backend id:
+      # this LiteLLM keeps model metadata per backend model, so serving one route rewrites
+      # the supported_endpoints of every sibling on the same id, and a discovery that runs
+      # after the Responses route was served would see Responses on all of them.
+      ANTHROPIC_SMOKE_MODEL_MESSAGES: claude-haiku-4-5
+      ANTHROPIC_SMOKE_MODEL_CHAT: claude-haiku-4-5-20251001
+      ANTHROPIC_SMOKE_MODEL_RESPONSES: claude-sonnet-4-6
       LITELLM_SMOKE_MODELS: claude-messages claude-chat claude-responses
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
       LITELLM_SMOKE_EXPECT_APIS: claude-messages=anthropic-messages claude-chat=openai-completions claude-responses=openai-responses
@@ -63,7 +68,7 @@ jobs:
                 # output limit, which caps the Pi CLI request below like the runner's own.
                 max_output_tokens: 16
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_MESSAGES}
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-chat
               model_info:
@@ -71,7 +76,7 @@ jobs:
                 # An endpoint list without /v1/messages keeps a Claude route on Chat Completions.
                 supported_endpoints: ["/v1/chat/completions"]
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_CHAT}
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-responses
               model_info:
@@ -81,7 +86,7 @@ jobs:
                 # which Anthropic rejects with 400. The endpoint list selects Responses too.
                 supported_endpoints: ["/v1/responses"]
               litellm_params:
-                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL_RESPONSES}
                 api_key: os.environ/ANTHROPIC_API_KEY
           general_settings:
             master_key: ${LITELLM_MASTER_KEY}
