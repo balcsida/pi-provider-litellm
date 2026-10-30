@@ -1,0 +1,144 @@
+# Live counterpart of litellm-smoke.yml: the same LiteLLM proxy and smoke runner, with
+# the upstream being the real Anthropic API instead of VidaiMock. Manual only, because
+# every run spends real credits (a few hundred Haiku tokens). Needs the repository
+# secret ANTHROPIC_API_KEY: an Anthropic Console API key (sk-ant-api...). The monthly
+# Console credits of a Max, Ultra or Team plan cover it once the plan is linked to the
+# key's Console organization; a Claude.ai login token is not an API key.
+name: LiteLLM Live Smoke
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LITELLM_BASE_URL: http://127.0.0.1:4000
+      LITELLM_API_KEY: sk-ci-litellm-smoke
+      LITELLM_MASTER_KEY: sk-ci-litellm-smoke
+      LITELLM_IMAGE: docker.litellm.ai/berriai/litellm@sha256:f2dc9ba8a62cf2c51e3ed00e6975f4c70bb577b8ef0c2d7040e3228dc7d42b09
+      # One cheap Claude backend published three ways, so every wire protocol the
+      # extension selects is exercised against a real model.
+      ANTHROPIC_SMOKE_MODEL: claude-haiku-4-5
+      LITELLM_SMOKE_MODELS: claude-messages claude-chat claude-responses
+      LITELLM_SMOKE_EXPECT_SOURCE: model_info
+      LITELLM_SMOKE_EXPECT_APIS: claude-messages=anthropic-messages claude-chat=openai-completions claude-responses=openai-responses
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: claude-messages=present claude-chat=present claude-responses=present
+      LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS: '1'
+      LITELLM_SMOKE_TIMEOUT_MS: '60000'
+
+    steps:
+      - name: Check the Anthropic secret
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [[ -z "$ANTHROPIC_API_KEY" ]]; then
+            echo "Repository secret ANTHROPIC_API_KEY is not set: gh secret set ANTHROPIC_API_KEY" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.5.0'
+          cache: 'npm'
+
+      - run: npm ci --ignore-scripts
+
+      - name: Write LiteLLM smoke config
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          cat > .tmp/litellm_config.yaml <<YAML
+          model_list:
+            - model_name: claude-messages
+              model_info:
+                mode: chat
+                # Discovery takes the smaller of this and the catalog figure as the model's
+                # output limit, which caps the Pi CLI request below like the runner's own.
+                max_output_tokens: 16
+              litellm_params:
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                api_key: os.environ/ANTHROPIC_API_KEY
+            - model_name: claude-chat
+              model_info:
+                mode: chat
+                # An endpoint list without /v1/messages keeps a Claude route on Chat Completions.
+                supported_endpoints: ["/v1/chat/completions"]
+              litellm_params:
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                api_key: os.environ/ANTHROPIC_API_KEY
+            - model_name: claude-responses
+              model_info:
+                mode: responses
+              litellm_params:
+                model: anthropic/${ANTHROPIC_SMOKE_MODEL}
+                api_key: os.environ/ANTHROPIC_API_KEY
+          general_settings:
+            master_key: ${LITELLM_MASTER_KEY}
+          YAML
+
+      - name: Start LiteLLM proxy
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          docker run -d \
+            --name litellm-smoke \
+            -p 4000:4000 \
+            -v "$PWD/.tmp/litellm_config.yaml:/app/config.yaml:ro" \
+            -e LITELLM_MASTER_KEY \
+            -e ANTHROPIC_API_KEY \
+            "$LITELLM_IMAGE" \
+            --config /app/config.yaml
+
+      - name: Wait for LiteLLM proxy
+        run: |
+          set -euo pipefail
+          for _ in {1..60}; do
+            if curl -fsS --connect-timeout 1 --max-time 3 \
+              -H "Authorization: Bearer $LITELLM_API_KEY" \
+              "$LITELLM_BASE_URL/v1/models" >/tmp/litellm-models.json; then
+              cat /tmp/litellm-models.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs litellm-smoke >&2 || true
+          exit 1
+
+      - name: Run provider smoke
+        run: npx tsx scripts/smoke-runner.ts
+
+      # The smoke runner posts to /v1/messages itself; this leg proves the extension's own
+      # native Messages serializer against a real Claude through LiteLLM.
+      - name: Run Pi CLI smoke
+        env:
+          LITELLM_DISCOVERY_TIMEOUT_MS: '60000'
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-cli-smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$PI_CODING_AGENT_DIR"
+          messages_log_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ./node_modules/.bin/pi \
+            -e . \
+            --provider litellm \
+            --model claude-messages \
+            --no-tools \
+            --no-session \
+            -p "Reply with one short word." | tee /tmp/pi-litellm-response.txt
+          test -s /tmp/pi-litellm-response.txt
+          docker logs --since "$messages_log_since" litellm-smoke 2>&1 \
+            | grep -E 'POST /v1/messages(\?beta=true)? HTTP/1.1" 200'
+
+      - name: Dump LiteLLM logs
+        if: failure()
+        run: docker logs litellm-smoke || true
+
+      - name: Stop LiteLLM proxy
+        if: always()
+        run: docker rm -f litellm-smoke || true
