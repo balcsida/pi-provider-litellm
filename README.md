@@ -2,7 +2,7 @@
 
 LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.99.2+ is required; on older Pi, install `npm:pi-provider-litellm@3.4.0`.
 
-Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, budget status, image generation and classifier routes, and Google ADC token auth. A [Go port](#pig) brings the same provider to PiG. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
+Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, budget status, image generation and classifier routes, and Google ADC token auth. A [Go port](#pig) brings it to PiG, without image generation and classifier routes. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
 ## Install
 
@@ -486,7 +486,9 @@ If your LiteLLM proxy exposes `/claude-code/marketplace.json`, enabled skills ar
 ## PiG
 
 A Go port for [PiG](https://github.com/MichaelKinsy/PiG) lives in [`pig/`](pig/README.md). It reads the same
-settings, environment variables and `auth.json` entries; see [pig/README.md](pig/README.md) to install it.
+settings, environment variables and `auth.json` entries; see [pig/README.md](pig/README.md) to install it. A PiG native
+provider cannot yet surface image or classifier models, so the port does not publish image generation or decision
+routes.
 
 ## Mocked LiteLLM smoke workflow
 
