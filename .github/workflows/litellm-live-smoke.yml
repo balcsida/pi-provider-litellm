@@ -23,9 +23,8 @@ jobs:
       LITELLM_IMAGE: docker.litellm.ai/berriai/litellm@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06 # v1.106.6
       # Cheap Claude backends published three ways, so every wire protocol the extension
       # selects is exercised against a real model. Each route needs its own backend id:
-      # LiteLLM 1.98 kept model metadata per backend model, so serving one route rewrites
-      # the supported_endpoints of every sibling on the same id, and a discovery that runs
-      # after the Responses route was served would see Responses on all of them.
+      # LiteLLM keeps model metadata per backend model, so routes sharing an id report one
+      # route's supported_endpoints for all of them and discovery picks the wrong protocol.
       ANTHROPIC_SMOKE_MODEL_MESSAGES: claude-haiku-4-5
       ANTHROPIC_SMOKE_MODEL_CHAT: claude-haiku-4-5-20251001
       ANTHROPIC_SMOKE_MODEL_RESPONSES: claude-sonnet-4-6
@@ -80,11 +79,9 @@ jobs:
                 api_key: os.environ/ANTHROPIC_API_KEY
             - model_name: claude-responses
               model_info:
-                mode: chat
-                # Not mode: responses. On LiteLLM 1.98, a Responses-mode sibling of the
-                # same backend leaks model_alias_map into the Chat route's request body,
-                # which Anthropic rejects with 400. The endpoint list selects Responses too.
-                supported_endpoints: ["/v1/responses"]
+                # Not supported_endpoints: LiteLLM 1.106 sends a Claude route that lists
+                # /v1/responses through its OpenAI-compatible path, which needs an api_base.
+                mode: responses
               litellm_params:
                 model: anthropic/${ANTHROPIC_SMOKE_MODEL_RESPONSES}
                 api_key: os.environ/ANTHROPIC_API_KEY
