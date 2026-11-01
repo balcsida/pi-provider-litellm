@@ -29,6 +29,20 @@ func IsLiteLLMAPI(api string) bool {
 	return false
 }
 
+// proxyAPIAliases: Pi's Azure Responses API is the OpenAI Responses wire format behind Azure URLs and api-key
+// auth. A model can carry it from Pi's Azure catalog, but the proxy serves Responses at <root>/v1 with its own
+// credential.
+var proxyAPIAliases = map[string]types.LiteLLMApi{"azure-openai-responses": types.APIOpenAIResponses}
+
+// ProxyAPI is toLiteLLMApi: the protocol the proxy speaks for a model's API, false when the proxy does not serve it.
+func ProxyAPI(api string) (types.LiteLLMApi, bool) {
+	if IsLiteLLMAPI(api) {
+		return types.LiteLLMApi(api), true
+	}
+	alias, ok := proxyAPIAliases[api]
+	return alias, ok
+}
+
 // NormalizeBaseURL is normalizeBaseUrl: it requires HTTPS (HTTP only for loopback hosts or when
 // allowInsecureHTTP is set), then strips trailing slashes and a trailing /v1.
 func NormalizeBaseURL(input string, allowInsecureHTTP bool) (string, error) {

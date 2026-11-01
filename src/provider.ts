@@ -34,7 +34,7 @@ import {
   LITELLM_IMAGES_API,
   type LiteLLMImageModel,
 } from "./images.js";
-import { createLiteLLMProtocolApis, isLiteLLMApi, LITELLM_API_NAMES, resolveModelBaseUrl } from "./protocols.js";
+import { createLiteLLMProtocolApis, LITELLM_API_NAMES, resolveModelBaseUrl, toLiteLLMApi } from "./protocols.js";
 import type { DiscoveredModel, DiscoveryResult, LiteLLMApi, LiteLLMModel } from "./types.js";
 
 export type LiteLLMProviderOptions = {
@@ -149,7 +149,7 @@ function modelRootError(
   active: { root: string; canonical: string; hostname: string },
   allowInsecureHttp = false,
 ): Error | undefined {
-  if (!isLiteLLMApi(model.api)) {
+  if (!toLiteLLMApi(model.api)) {
     return new Error(
       `LiteLLM model ${model.id} declares unsupported protocol "${String(model.api)}"; ` +
         `set "api" to one of ${LITELLM_API_NAMES.join(", ")} in models.json`,
@@ -204,8 +204,9 @@ function requestModel(
   const active = activeCredentialRoot(credentialRoot, allowInsecureHttp);
   const error = modelRootError(model, active, allowInsecureHttp);
   if (error) throw error;
+  const api = toLiteLLMApi(model.api)!;
   const toolCount =
-    model.api === "openai-completions" && (model as LiteLLMModel).litellmBackendFamily === "openai"
+    api === "openai-completions" && (model as LiteLLMModel).litellmBackendFamily === "openai"
       ? getCurrentTools(context.messages).length
       : 0;
   if (toolCount > CHAT_TOOL_CAP) {
@@ -214,7 +215,7 @@ function requestModel(
         `${CHAT_TOOL_CAP}-tool cap; route this model via Responses or reduce enabled extensions`,
     );
   }
-  return { ...model, provider, baseUrl: resolveModelBaseUrl(active.root, model.api, allowInsecureHttp) };
+  return { ...model, api, provider, baseUrl: resolveModelBaseUrl(active.root, api, allowInsecureHttp) };
 }
 
 export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider<LiteLLMApi> {
@@ -253,10 +254,8 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
         reportUnavailable(error.message);
         continue;
       }
-      available.push({
-        ...model,
-        baseUrl: resolveModelBaseUrl(active.root, model.api, options.allowInsecureHttp),
-      });
+      const api = toLiteLLMApi(model.api)!;
+      available.push({ ...model, api, baseUrl: resolveModelBaseUrl(active.root, api, options.allowInsecureHttp) });
     }
     return available;
   };
@@ -413,7 +412,11 @@ export function createLiteLLMProvider(options: LiteLLMProviderOptions): Provider
     refreshModels: async (context) => {
       // Pi 0.99 persists models of every type; the policy helpers below read chat-only fields, so
       // chat, image and classifier entries are restored separately. Other types are not this provider's.
-      const storedModels = (context.stored?.models ?? []).filter(isChatModel);
+      // A stored entry can carry Pi's Azure Responses API; its policy is restored for the protocol the proxy serves.
+      const storedModels = (context.stored?.models ?? []).filter(isChatModel).map((model) => {
+        const api = toLiteLLMApi(model.api);
+        return api && api !== model.api ? { ...model, api } : model;
+      });
       // Image and classifier entries carry no request policy to restore; a stale one is only kept
       // when startup discovery proved the same route, otherwise the network refresh replaces it.
       const restoreOperationModels = <T extends AnyModel>(is: (model: AnyModel) => model is T): T[] =>

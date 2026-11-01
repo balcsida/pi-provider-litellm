@@ -447,7 +447,12 @@ export function closeSerializerPolicy(input: {
   } = input;
   if (api === "anthropic-messages") {
     const messagesCompat = vendorCompat as Model<"anthropic-messages">["compat"];
-    const fields = ["forceAdaptiveThinking", "supportsTemperature", "supportsStrictTools"] as const;
+    const fields = [
+      "forceAdaptiveThinking",
+      "supportsTemperature",
+      "supportsStrictTools",
+      "supportsMidConvoEffort",
+    ] as const;
     const entries = fields
       .filter((field) => messagesCompat?.[field] !== undefined)
       .map((field) => [field, messagesCompat?.[field]]);

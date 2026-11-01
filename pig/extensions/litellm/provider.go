@@ -127,7 +127,7 @@ func activeCredentialRoot(root string, allowInsecureHTTP bool) (proxyRootInfo, e
 
 func modelRootError(model *ai.Model, active proxyRootInfo, allowInsecureHTTP bool) error {
 	api := string(model.ProviderMeta.API)
-	if !protocols.IsLiteLLMAPI(api) {
+	if _, ok := protocols.ProxyAPI(api); !ok {
 		names := make([]string, len(protocols.LiteLLMAPINames))
 		for i, name := range protocols.LiteLLMAPINames {
 			names[i] = string(name)
@@ -160,19 +160,19 @@ func requestModel(provider string, model *ai.Model, transcript ai.TranscriptCont
 	if err := modelRootError(model, active, allowInsecureHTTP); err != nil {
 		return nil, err
 	}
-	api := model.ProviderMeta.API
-	if api == ai.APIOpenAICompletions && family == types.FamilyOpenAI {
+	api, _ := protocols.ProxyAPI(string(model.ProviderMeta.API))
+	if api == types.APIOpenAICompletions && family == types.FamilyOpenAI {
 		if count := len(ai.GetCurrentTools(transcript.Messages())); count > chatToolCap {
 			return nil, fmt.Errorf("LiteLLM model %s uses Chat Completions with %d tools, exceeding the %d-tool cap; "+
 				"route this model via Responses or reduce enabled extensions", model.ID, count, chatToolCap)
 		}
 	}
-	baseURL, err := protocols.ResolveModelBaseURL(active.root, types.LiteLLMApi(api), allowInsecureHTTP)
+	baseURL, err := protocols.ResolveModelBaseURL(active.root, api, allowInsecureHTTP)
 	if err != nil {
 		return nil, err
 	}
 	out := *model
-	out.ProviderMeta.ProviderID, out.ProviderMeta.BaseURL = provider, baseURL
+	out.ProviderMeta.ProviderID, out.ProviderMeta.API, out.ProviderMeta.BaseURL = provider, ai.API(api), baseURL
 	return &out, nil
 }
 
@@ -263,14 +263,15 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 					reportUnavailable(err.Error())
 					continue
 				}
-				baseURL, err := protocols.ResolveModelBaseURL(active.root, types.LiteLLMApi(model.ProviderMeta.API), options.AllowInsecureHTTP)
+				api, _ := protocols.ProxyAPI(string(model.ProviderMeta.API))
+				baseURL, err := protocols.ResolveModelBaseURL(active.root, api, options.AllowInsecureHTTP)
 				if err != nil {
 					reportUnavailable(err.Error())
 					continue
 				}
-				if baseURL != model.ProviderMeta.BaseURL {
+				if baseURL != model.ProviderMeta.BaseURL || ai.API(api) != model.ProviderMeta.API {
 					projected := *model
-					projected.ProviderMeta.BaseURL = baseURL
+					projected.ProviderMeta.API, projected.ProviderMeta.BaseURL = ai.API(api), baseURL
 					model = &projected
 				}
 				available = append(available, model)
@@ -325,6 +326,10 @@ func createLiteLLMProvider(options providerOptions) (*ai.ModelsProvider, error) 
 					legacyCount++
 					reportUnavailable("skipping an undecodable stored model: " + err.Error())
 					continue
+				}
+				// A stored entry can carry Pi's Azure Responses API; its policy is restored for the protocol the proxy serves.
+				if api, ok := protocols.ProxyAPI(string(model.API)); ok {
+					model.API = ai.API(api)
 				}
 				entry, hasEntry := policies.entry(options.ID, model.ID)
 				version, known := policies.storedVersion(options.ID, model.ID)

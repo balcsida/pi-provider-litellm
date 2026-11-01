@@ -152,6 +152,11 @@ func mapFromModelInfoGroup(
 		if reduced.MessagesStrictTools {
 			messagesCompat.SupportsStrictTools = boolPtr(true)
 		}
+		// Managed effort adds thinking.block_binding, which hosted Claude endpoints (Azure among them) reject.
+		// LiteLLM reports no per-route support, so only a group routed solely through Anthropic may keep it.
+		if slices.ContainsFunc(entries, func(entry types.ModelInfoEntry) bool { return !backend.RoutesOnlyThrough(entry, anthropicRoutes) }) {
+			messagesCompat.SupportsMidConvoEffort = boolPtr(false)
+		}
 	}
 	input := modelgroups.CloseSerializerPolicyInput{
 		API:                              api,

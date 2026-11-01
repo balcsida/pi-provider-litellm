@@ -78,6 +78,21 @@ const mixedGenerationRoutes = [
 
 const unknownBackendRoute = claudeRoute("bedrock", "bedrock/us.anthropic.claude-invented-9-9-v1:0");
 
+// Synthetic routes to one Claude generation: directly through Anthropic, and hosted elsewhere. LiteLLM reports
+// the cost-map provider of base_model, so the hosted deployment still reads as `anthropic` in model_info.
+const directOpusRoute = {
+  model_name: "team-claude",
+  litellm_params: { model: "anthropic/claude-opus-5-5", custom_llm_provider: "anthropic" },
+  model_info: { mode: "chat", litellm_provider: "anthropic", supports_reasoning: true },
+};
+const hostedOpusRoute = {
+  model_name: "team-claude",
+  litellm_params: { model: "azure_ai/claude-opus-5-5", custom_llm_provider: "azure_ai" },
+  model_info: { mode: "chat", litellm_provider: "anthropic", base_model: "claude-opus-5-5", supports_reasoning: true },
+};
+// Managed effort sends thinking.block_binding and mid-conversation effort markers under these betas.
+const BINDING_BETAS = ["mid-conversation-output-config-2026-07-01", "thinking-binding-controls-2026-08-01"];
+
 const probedBackendModels = {
   "claude-opus-5": "bedrock/us.anthropic.claude-opus-5",
   "claude-fable-5-1": "bedrock/us.anthropic.claude-fable-5-1",
@@ -428,7 +443,7 @@ describe("Anthropic Messages wire compatibility", () => {
       expect(model.compat).toEqual({
         forceAdaptiveThinking: true,
         supportsTemperature: false,
-        ...(adapter === "anthropic" ? { supportsStrictTools: true } : {}),
+        ...(adapter === "anthropic" ? { supportsStrictTools: true } : { supportsMidConvoEffort: false }),
       });
       expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
       expect(requests[0]?.thinking).not.toHaveProperty("budget_tokens");
@@ -561,6 +576,7 @@ describe("Anthropic Messages wire compatibility", () => {
     expect(model.compat).toEqual({
       forceAdaptiveThinking: true,
       supportsTemperature: false,
+      supportsMidConvoEffort: false,
     });
   });
 
@@ -628,6 +644,58 @@ describe("Anthropic Messages wire compatibility", () => {
       ],
     });
     expect(offline.requests[0]?.tools).toEqual([expect.not.objectContaining({ strict: true })]);
+  });
+
+  it("sends adaptive thinking without binding controls to a Claude route hosted outside Anthropic", async () => {
+    const { models, model, requests, requestHeaders, respond } = await createCompatibilityHarness(hostedOpusRoute);
+    respond(...anthropicTextResponse("hosted"));
+
+    const message = await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(model).toMatchObject({ api: "anthropic-messages", compat: { supportsMidConvoEffort: false } });
+    expect(message).toMatchObject({ api: "anthropic-messages", stopReason: "stop" });
+    expect(requests[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
+    expect(requests[0]?.thinking).not.toHaveProperty("block_binding");
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("output_config");
+    for (const beta of BINDING_BETAS) expect(requestHeaders[0]?.get("anthropic-beta") ?? "").not.toContain(beta);
+  });
+
+  it("keeps the hosted route's effort policy through the offline model store", async () => {
+    const modelsStore = new InMemoryModelsStore();
+    const online = await createCompatibilityHarness(hostedOpusRoute, { modelsStore });
+    online.respond(...anthropicTextResponse("online"));
+    await online.models.streamSimple(online.model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    vi.restoreAllMocks();
+    vi.resetModules();
+    const offline = await createCompatibilityHarness(hostedOpusRoute, { modelsStore, allowNetwork: false });
+    offline.respond(...anthropicTextResponse("offline"));
+    await offline.models.streamSimple(offline.model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(offline.model.compat).toMatchObject({ supportsMidConvoEffort: false });
+    expect(offline.model).toEqual(online.model);
+    expect(offline.requests[0]).toEqual(online.requests[0]);
+  });
+
+  it("leaves a route only through Anthropic unchanged and its binding betas consistent with the body", async () => {
+    const { models, model, requests, requestHeaders, respond } = await createCompatibilityHarness(directOpusRoute);
+    respond(...anthropicTextResponse("default"));
+    respond(...anthropicTextResponse("managed"));
+
+    await models.streamSimple(model, { messages: [user("Think")] }, { reasoning: "high" }).result();
+    // A models.json override can still opt the route into managed effort.
+    const managed = { ...model, compat: { ...model.compat, supportsMidConvoEffort: true } } as typeof model;
+    await models.streamSimple(managed, { messages: [user("Think")] }, { reasoning: "high" }).result();
+
+    expect(model.compat).not.toHaveProperty("supportsMidConvoEffort");
+    expect(requests[0]?.thinking).toMatchObject({ type: "adaptive" });
+    expect(requests[0]?.thinking).not.toHaveProperty("block_binding");
+    expect(requestHeaders[0]?.get("anthropic-beta")).toBeNull();
+    expect(requests[1]?.thinking).toMatchObject({
+      type: "adaptive",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    });
+    for (const beta of BINDING_BETAS) expect(requestHeaders[1]?.get("anthropic-beta")).toContain(beta);
   });
 
   it("reports a non-overflow Anthropic error envelope", async () => {

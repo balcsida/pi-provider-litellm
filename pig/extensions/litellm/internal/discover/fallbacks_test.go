@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":10,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":11,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}
@@ -2122,6 +2122,61 @@ func TestFallbacks_NativeMessagesSelectsNativeMessagesForBedrockClaudeReportedWi
 
 	if api := result.Models[0].API; api != ai.APIAnthropicMessages {
 		t.Errorf("api = %s, want anthropic-messages", api)
+	}
+}
+
+// Ports the managed-effort cases of the `native Messages discovery` describe block. LiteLLM reports the cost-map
+// provider of base_model, so the hosted deployment still reads as `anthropic` in model_info.
+const (
+	fbDirectClaude = `{"model_name":"team-claude","litellm_params":{"model":"anthropic/claude-opus-5-5","custom_llm_provider":"anthropic"},` +
+		`"model_info":{"id":"direct","mode":"chat","litellm_provider":"anthropic","supports_reasoning":true}}`
+	fbHostedClaude = `{"model_name":"team-claude","litellm_params":{"model":"azure_ai/claude-opus-5-5","custom_llm_provider":"azure_ai"},` +
+		`"model_info":{"id":"hosted","mode":"chat","litellm_provider":"anthropic","base_model":"claude-opus-5-5","supports_reasoning":true}}`
+)
+
+func TestFallbacks_NativeMessagesKeepsAdaptiveMessagesButDeclaresNoMidConversationEffortForHostedClaude(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []string
+	}{
+		{"a hosted deployment", []string{fbHostedClaude}},
+		{"a group that mixes direct and hosted deployments", []string{fbDirectClaude, fbHostedClaude}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, _ := fbDiscover(t, map[string]http.HandlerFunc{"/model/info": fbData(tc.rows...)})
+
+			model := result.Models[0]
+			if model.API != ai.APIAnthropicMessages || !model.Reasoning || model.Compat == nil ||
+				!modelInfoBBool(model.Compat.ForceAdaptiveThinking, true) || !modelInfoBBool(model.Compat.SupportsMidConvoEffort, false) {
+				t.Fatalf("api = %s reasoning = %v compat = %s", model.API, model.Reasoning, modelInfoBJSON(model.Compat))
+			}
+			if levels := fbSupportedLevels(model); !slices.Contains(levels, ai.ThinkingHigh) {
+				t.Errorf("levels = %v, want high", levels)
+			}
+		})
+	}
+}
+
+func TestFallbacks_NativeMessagesLeavesMidConversationEffortUndeclaredForARouteOnlyThroughAnthropic(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{"/model/info": fbData(fbDirectClaude)})
+
+	model := result.Models[0]
+	if model.API != ai.APIAnthropicMessages || model.Compat == nil || model.Compat.SupportsMidConvoEffort != nil {
+		t.Fatalf("api = %s compat = %s", model.API, modelInfoBJSON(model.Compat))
+	}
+}
+
+func TestFallbacks_NativeMessagesKeepsAMidConversationEffortDenialThroughTheOfflineCache(t *testing.T) {
+	forced, denied := true, false
+	cached := types.DiscoveredModel{
+		ID: "team-claude", Name: "team-claude", API: ai.APIAnthropicMessages, Reasoning: true, Input: []string{"text"},
+		ContextWindow: 1_000_000, MaxTokens: 128_000,
+		Compat: &ai.ModelCompat{ForceAdaptiveThinking: &forced, SupportsMidConvoEffort: &denied},
+	}
+
+	compat := EnrichCachedModel(cached).Compat
+	if compat == nil || !modelInfoBBool(compat.ForceAdaptiveThinking, true) || !modelInfoBBool(compat.SupportsMidConvoEffort, false) {
+		t.Fatalf("compat = %s", modelInfoBJSON(compat))
 	}
 }
 
