@@ -54,6 +54,7 @@
   unknown version. Those releases bridge them to Chat Completions regardless of that cost-map list, so they take
   Responses only from an explicit `mode: "responses"`. Keep `scripts/probe-proxy.ts` `protocolPrediction` in step
   with `supportsResponses` in `src/discover.ts`.
+- `toLiteLLMApi` (`protocols.ProxyAPI` in Go) maps a model's API to the protocol the proxy serves: the three LiteLLM APIs, plus Pi's `azure-openai-responses` as `openai-responses`. The stored-model restore, `filterModels` and the stream guard all go through it, so an Azure catalog API never selects Azure URLs or auth against the proxy; any other API stays rejected. The startup seed reader (`src/models-store.ts`, `models_store.go`) stays strict: a store holding such an entry is discovered again instead of seeded.
 - Version-gated workarounds read the proxy version through `src/proxy-version.ts`. An unknown version satisfies no
   floor, so every gate fails toward the workaround, and a pre-release orders before the release it names. Probe only
   when a published deployment's outcome depends on the version (`publishesVersionGatedTransport`), at most once per

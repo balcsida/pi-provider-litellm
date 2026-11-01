@@ -568,6 +568,14 @@ describe("createLiteLLMProvider", () => {
     ]);
   });
 
+  it("projects an Azure Responses API identifier onto the proxy's Responses protocol", () => {
+    const value = controller();
+
+    expect(value.filterModels?.([foreignApiModel("azure-responses", "azure-openai-responses")], credential)).toEqual([
+      { ...native("azure-responses"), api: "openai-responses" },
+    ]);
+  });
+
   it("reports hidden cached models when no LiteLLM base URL is configured", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const value = controller({ resolveCredentialRoot: () => undefined });
