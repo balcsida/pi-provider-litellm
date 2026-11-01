@@ -791,9 +791,10 @@ func CloseSerializerPolicy(input CloseSerializerPolicyInput) SerializerPolicy {
 		var compat *ai.ModelCompat
 		if vendor != nil {
 			picked := ai.ModelCompat{
-				ForceAdaptiveThinking: vendor.ForceAdaptiveThinking,
-				SupportsTemperature:   vendor.SupportsTemperature,
-				SupportsStrictTools:   vendor.SupportsStrictTools,
+				ForceAdaptiveThinking:  vendor.ForceAdaptiveThinking,
+				SupportsTemperature:    vendor.SupportsTemperature,
+				SupportsStrictTools:    vendor.SupportsStrictTools,
+				SupportsMidConvoEffort: vendor.SupportsMidConvoEffort,
 			}
 			if !reflect.DeepEqual(picked, ai.ModelCompat{}) {
 				compat = &picked

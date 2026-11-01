@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 10,
+      litellmDiscoveryVersion: 11,
     });
   });
 
@@ -5221,7 +5221,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 10,
+          litellmDiscoveryVersion: 11,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
@@ -6839,6 +6839,71 @@ describe("native Messages discovery", () => {
     expect(model.api).toBe("anthropic-messages");
     expect(getSupportedThinkingLevels(model)).not.toContain("off");
     expect(getSupportedThinkingLevels(model)).toContain("high");
+  });
+
+  const directClaude = {
+    model_name: "team-claude",
+    litellm_params: { model: "anthropic/claude-opus-5-5", custom_llm_provider: "anthropic" },
+    model_info: { id: "direct", mode: "chat", litellm_provider: "anthropic", supports_reasoning: true },
+  };
+  // LiteLLM reports the cost-map provider of base_model, so a hosted deployment still reads as `anthropic` there.
+  const hostedClaude = {
+    model_name: "team-claude",
+    litellm_params: { model: "azure_ai/claude-opus-5-5", custom_llm_provider: "azure_ai" },
+    model_info: {
+      id: "hosted",
+      mode: "chat",
+      litellm_provider: "anthropic",
+      base_model: "claude-opus-5-5",
+      supports_reasoning: true,
+    },
+  };
+
+  it.each([
+    ["a hosted deployment", [hostedClaude]],
+    ["a group that mixes direct and hosted deployments", [directClaude, hostedClaude]],
+  ])("keeps adaptive Messages but declares no mid-conversation effort for %s", async (_name, rows) => {
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    const model = { ...result.models[0]!, provider: "litellm", baseUrl: "https://proxy.example.com" };
+
+    expect(model).toMatchObject({
+      api: "anthropic-messages",
+      reasoning: true,
+      compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: false },
+    });
+    expect(getSupportedThinkingLevels(model)).toContain("high");
+  });
+
+  it("leaves mid-conversation effort undeclared for a route only through Anthropic", async () => {
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [directClaude] }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models[0]?.api).toBe("anthropic-messages");
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsMidConvoEffort");
+  });
+
+  it("keeps a mid-conversation effort denial through the offline cache", () => {
+    const cached = {
+      id: "team-claude",
+      name: "team-claude",
+      provider: "litellm",
+      api: "anthropic-messages",
+      baseUrl: "https://proxy.example.com",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+      compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: false },
+    };
+
+    expect(enrichCachedModel(cached as never).compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsMidConvoEffort: false,
+    });
   });
 
   it("uses Anthropic catalog metadata and Messages for the standard Vertex Claude adapter", async () => {

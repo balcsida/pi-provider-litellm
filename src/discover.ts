@@ -769,6 +769,11 @@ function mapFromModelInfoGroup(
       ? {
           ...reduced.messagesCompat,
           ...(reduced.messagesStrictTools !== undefined ? { supportsStrictTools: reduced.messagesStrictTools } : {}),
+          // Managed effort adds thinking.block_binding, which hosted Claude endpoints (Azure among them) reject.
+          // LiteLLM reports no per-route support, so only a group routed solely through Anthropic may keep it.
+          ...(entries.every((entry) => routesOnlyThrough(entry, ANTHROPIC_ROUTES))
+            ? {}
+            : { supportsMidConvoEffort: false }),
         }
       : undefined;
   const policy = closeSerializerPolicy({
