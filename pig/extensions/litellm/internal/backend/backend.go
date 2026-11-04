@@ -116,7 +116,8 @@ func firstNonEmpty(values ...string) string {
 // ResolveIdentity is resolveBackendIdentity; nil means the identity is withheld.
 func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 	row := fieldsOf(entry)
-	raw := firstNonEmpty(wireString(row.baseModel), wireString(row.model), wireString(row.modelName))
+	baseModel, configuredModel := wireString(row.baseModel), wireString(row.model)
+	raw := firstNonEmpty(baseModel, configuredModel, wireString(row.modelName))
 	if raw == "" {
 		return nil
 	}
@@ -135,7 +136,13 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 	if genericAdapters[customProvider] {
 		customProvider = ""
 	}
-	if prefixProvider != "" && customProvider != "" && prefixProvider != customProvider {
+	// OpenRouter uses vendor/model as its configured model id. Resolve it exactly like
+	// openrouter/vendor/model without mutating the row or reinterpreting an explicit base_model.
+	// A generic adapter prefix ("azure_ai/") is not a vendor namespace and stays stripped.
+	if baseModel == "" && configuredModel != "" && customProvider == "openrouter" && prefixProvider != "" && prefixProvider != "openrouter" {
+		prefixProvider = ""
+		slash = -1
+	} else if prefixProvider != "" && customProvider != "" && prefixProvider != customProvider {
 		if !modelPathSegments[prefixProvider] {
 			return nil
 		}

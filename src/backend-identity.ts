@@ -1,4 +1,4 @@
-export const LITELLM_DISCOVERY_VERSION = 11 as const;
+export const LITELLM_DISCOVERY_VERSION = 12 as const;
 
 export type BackendFamily = "claude" | "deepseek" | "gemini" | "kimi" | "openai";
 
@@ -31,8 +31,8 @@ const PROVIDER_FAMILIES: Readonly<Record<string, BackendFamily>> = {
 // `openai` is absent for the same reason as in PROVIDER_FAMILIES: it is an adapter, not a model.
 const KNOWN_VENDOR_PREFIXES = new Set(Object.keys(PROVIDER_FAMILIES));
 // First segments that are known to be model path, never a provider: Fireworks' account-scoped
-// ids ("accounts/fireworks/models/x"). An allowlist fails closed: any other differing prefix,
-// recognized provider or not, stays a conflict.
+// ids ("accounts/fireworks/models/x"). Outside provider-specific model namespaces, the
+// allowlist fails closed: any other differing prefix, recognized provider or not, stays a conflict.
 const MODEL_PATH_SEGMENTS = new Set(["accounts"]);
 // `o\d` (OpenAI's o1/o3/o4-mini reasoning models) is only trustworthy at the start of the id or
 // right after a provider path segment — an interior "-o1-" is as likely to be an unrelated
@@ -64,8 +64,9 @@ export function isOpenAIBackend(id: string): boolean {
 }
 
 export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity | undefined {
-  const raw =
-    wireString(row.model_info?.base_model) ?? wireString(row.litellm_params?.model) ?? wireString(row.model_name);
+  const baseModel = wireString(row.model_info?.base_model);
+  const configuredModel = wireString(row.litellm_params?.model);
+  const raw = baseModel ?? configuredModel ?? wireString(row.model_name);
   if (!raw) return undefined;
 
   let slash = raw.indexOf("/");
@@ -77,7 +78,19 @@ export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity
   // "accounts/fireworks/models/x" is not a provider named "accounts".
   const custom = wireString(row.litellm_params?.custom_llm_provider)?.toLowerCase();
   const customProvider = custom && !GENERIC_ADAPTERS.has(custom) ? custom : undefined;
-  if (prefixProvider && customProvider && prefixProvider !== customProvider) {
+  // OpenRouter uses vendor/model as its configured model id. Resolve it exactly like
+  // openrouter/vendor/model without mutating the row or reinterpreting an explicit base_model.
+  // A generic adapter prefix ("azure_ai/") is not a vendor namespace and stays stripped.
+  if (
+    !baseModel &&
+    configuredModel &&
+    customProvider === "openrouter" &&
+    prefixProvider &&
+    prefixProvider !== "openrouter"
+  ) {
+    prefixProvider = undefined;
+    slash = -1;
+  } else if (prefixProvider && customProvider && prefixProvider !== customProvider) {
     if (!MODEL_PATH_SEGMENTS.has(prefixProvider)) return undefined;
     prefixProvider = undefined;
     slash = -1;

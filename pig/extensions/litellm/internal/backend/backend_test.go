@@ -99,6 +99,82 @@ func TestResolveBackendIdentity(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+	t.Run("resolves the OpenRouter model namespace without a routing prefix", func(t *testing.T) {
+		cases := []struct {
+			model  string
+			family Family
+		}{
+			{"openai/gpt-4o", FamilyOpenAI},
+			{"deepseek/deepseek-v4.1-flash", FamilyDeepSeek},
+			{"moonshotai/kimi-k2.5", FamilyKimi},
+			{"anthropic/claude-sonnet-4-6", FamilyClaude},
+			{"google/gemini-3-pro", FamilyGemini},
+			{"z-ai/glm-5.3", ""},
+			{"example-lab/opaque", ""},
+		}
+		for _, c := range cases {
+			t.Run(c.model, func(t *testing.T) {
+				entry := row(c.model, &types.ModelInfoParams{CustomLLMProvider: "openrouter"})
+				entry.ModelInfo = &types.ModelInfoDetails{LiteLLMProvider: "openai"}
+				got := ResolveIdentity(entry)
+				want := Identity{"openrouter", c.model, "openrouter/" + c.model, c.family}
+				if got == nil || *got != want {
+					t.Fatalf("got %+v want %+v", got, want)
+				}
+				prefixed := ResolveIdentity(row("openrouter/"+c.model, &types.ModelInfoParams{CustomLLMProvider: "openrouter"}))
+				if prefixed == nil || *got != *prefixed {
+					t.Errorf("prefixed identity = %+v, want %+v", prefixed, got)
+				}
+				if provider := ResolveCatalogProvider(entry); provider != "openrouter" {
+					t.Errorf("catalog provider = %q", provider)
+				}
+				if RoutesOnlyThrough(entry, set("anthropic", "openai", "azure", "azure_ai")) {
+					t.Error("OpenRouter model acquired direct-provider routing authority")
+				}
+				if entry.LiteLLMParams.Model != c.model {
+					t.Error("configured model id was mutated")
+				}
+			})
+		}
+	})
+	t.Run("normalizes the explicit OpenRouter provider without changing its model id", func(t *testing.T) {
+		got := ResolveIdentity(row("DeepSeek/deepseek-v4.1-flash", &types.ModelInfoParams{CustomLLMProvider: " OpEnRoUtEr "}))
+		want := Identity{"openrouter", "DeepSeek/deepseek-v4.1-flash", "openrouter/DeepSeek/deepseek-v4.1-flash", FamilyDeepSeek}
+		if got == nil || *got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+	})
+	t.Run("keeps base_model authoritative over the configured OpenRouter model namespace", func(t *testing.T) {
+		entry := row("moonshotai/kimi-k2.5", &types.ModelInfoParams{CustomLLMProvider: "openrouter"})
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "openrouter/openai/gpt-4o"}
+		got := ResolveIdentity(entry)
+		want := Identity{"openrouter", "openai/gpt-4o", "openrouter/openai/gpt-4o", FamilyOpenAI}
+		if got == nil || *got != want {
+			t.Errorf("got %+v want %+v", got, want)
+		}
+		entry.ModelInfo.BaseModel = "anthropic/claude-sonnet-4-6"
+		if got := ResolveIdentity(entry); got != nil {
+			t.Errorf("conflicting base_model resolved as %+v", got)
+		}
+	})
+	t.Run("does not authorize an OpenRouter model namespace from the public route alone", func(t *testing.T) {
+		entry := types.ModelInfoEntry{
+			ModelName:     "anthropic/claude-sonnet-4-6",
+			LiteLLMParams: &types.ModelInfoParams{CustomLLMProvider: "openrouter"},
+		}
+		if got := ResolveIdentity(entry); got != nil {
+			t.Errorf("route-only model namespace resolved as %+v", got)
+		}
+	})
+	t.Run("keeps stripping a generic adapter prefix under OpenRouter", func(t *testing.T) {
+		want := ResolveIdentity(row("gpt-5", &types.ModelInfoParams{CustomLLMProvider: "openrouter"}))
+		for _, adapter := range []string{"azure", "azure_ai", "custom_openai", "openai_like"} {
+			got := ResolveIdentity(row(adapter+"/gpt-5", &types.ModelInfoParams{CustomLLMProvider: "openrouter"}))
+			if got == nil || want == nil || *got != *want || got.ModelID != "gpt-5" {
+				t.Errorf("%s: got %+v want %+v", adapter, got, want)
+			}
+		}
+	})
 	t.Run("recognizes the settled OpenAI-family spelling", func(t *testing.T) {
 		for _, id := range []string{"openai/gpt-5", "gpt-4.1", "gpt-5.3-codex", "codex-mini-latest", "o1", "o3-mini", "o4-mini", "o5-mini"} {
 			if !IsOpenAIBackend(id) {
@@ -110,7 +186,7 @@ func TestResolveBackendIdentity(t *testing.T) {
 				t.Errorf("%s should not be OpenAI", id)
 			}
 		}
-		if DiscoveryVersion != 11 {
+		if DiscoveryVersion != 12 {
 			t.Errorf("DiscoveryVersion = %d", DiscoveryVersion)
 		}
 	})

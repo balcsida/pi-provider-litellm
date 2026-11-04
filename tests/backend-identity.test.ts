@@ -117,6 +117,89 @@ describe("resolveBackendIdentity", () => {
     });
   });
 
+  it.each([
+    ["openai/gpt-4o", "openai"],
+    ["deepseek/deepseek-v4.1-flash", "deepseek"],
+    ["moonshotai/kimi-k2.5", "kimi"],
+    ["anthropic/claude-sonnet-4-6", "claude"],
+    ["google/gemini-3-pro", "gemini"],
+    ["z-ai/glm-5.3", undefined],
+    ["example-lab/opaque", undefined],
+  ] as const)("resolves the OpenRouter model namespace %s without a routing prefix", (model, family) => {
+    const row = {
+      model_name: "public-alias",
+      litellm_params: { model, custom_llm_provider: "openrouter" },
+      model_info: { litellm_provider: "openai" },
+    };
+    const identity = resolveBackendIdentity(row);
+    expect(identity).toEqual({
+      provider: "openrouter",
+      modelId: model,
+      qualifiedId: `openrouter/${model}`,
+      ...(family ? { family } : {}),
+    });
+    expect(identity).toEqual(
+      resolveBackendIdentity({
+        ...row,
+        litellm_params: { ...row.litellm_params, model: `openrouter/${model}` },
+      }),
+    );
+    expect(resolveCatalogProvider(row)).toBe("openrouter");
+    expect(routesOnlyThrough(row, new Set(["anthropic", "openai", "azure", "azure_ai"]))).toBe(false);
+    expect(row.litellm_params.model).toBe(model);
+  });
+
+  it("normalizes the explicit OpenRouter provider without changing its model id", () => {
+    expect(
+      resolveBackendIdentity({
+        litellm_params: { model: "DeepSeek/deepseek-v4.1-flash", custom_llm_provider: " OpEnRoUtEr " },
+      }),
+    ).toEqual({
+      provider: "openrouter",
+      modelId: "DeepSeek/deepseek-v4.1-flash",
+      qualifiedId: "openrouter/DeepSeek/deepseek-v4.1-flash",
+      family: "deepseek",
+    });
+  });
+
+  it("keeps base_model authoritative over the configured OpenRouter model namespace", () => {
+    const row = {
+      litellm_params: { model: "moonshotai/kimi-k2.5", custom_llm_provider: "openrouter" },
+      model_info: { base_model: "openrouter/openai/gpt-4o" },
+    };
+    expect(resolveBackendIdentity(row)).toEqual({
+      provider: "openrouter",
+      modelId: "openai/gpt-4o",
+      qualifiedId: "openrouter/openai/gpt-4o",
+      family: "openai",
+    });
+    expect(
+      resolveBackendIdentity({ ...row, model_info: { base_model: "anthropic/claude-sonnet-4-6" } }),
+    ).toBeUndefined();
+  });
+
+  it("does not authorize an OpenRouter model namespace from the public route alone", () => {
+    expect(
+      resolveBackendIdentity({
+        model_name: "anthropic/claude-sonnet-4-6",
+        litellm_params: { custom_llm_provider: "openrouter" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each(["azure", "azure_ai", "custom_openai", "openai_like"])(
+    "keeps stripping the generic %s adapter prefix under OpenRouter",
+    (adapter) => {
+      const identity = resolveBackendIdentity({
+        litellm_params: { model: `${adapter}/gpt-5`, custom_llm_provider: "openrouter" },
+      });
+      expect(identity).toEqual(
+        resolveBackendIdentity({ litellm_params: { model: "gpt-5", custom_llm_provider: "openrouter" } }),
+      );
+      expect(identity?.modelId).toBe("gpt-5");
+    },
+  );
+
   it("recognizes the settled OpenAI-family spelling", () => {
     for (const id of [
       "openai/gpt-5",
@@ -133,7 +216,7 @@ describe("resolveBackendIdentity", () => {
     for (const id of ["azure/kimi-k3", "deepseek-v4", "glm-5"]) {
       expect(isOpenAIBackend(id)).toBe(false);
     }
-    expect(LITELLM_DISCOVERY_VERSION).toBe(11);
+    expect(LITELLM_DISCOVERY_VERSION).toBe(12);
   });
 
   it("takes the family from the model id, never from an adapter prefix", () => {

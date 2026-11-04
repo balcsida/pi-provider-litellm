@@ -1045,6 +1045,118 @@ func TestModelInfoB_AppliesKimiCompatToAFireworksAccountScopedPathRoutedByCustom
 	}
 }
 
+func TestModelInfoB_DiscoversOpenRouterModelNamespaceLikeItsRoutingPrefixedForm(t *testing.T) {
+	cases := []struct {
+		model  string
+		family types.BackendFamily
+	}{
+		{"openai/gpt-4o", types.FamilyOpenAI},
+		{"deepseek/deepseek-v4.1-flash", types.FamilyDeepSeek},
+		{"moonshotai/kimi-k2.5", types.FamilyKimi},
+		{"anthropic/claude-sonnet-4-6", types.FamilyClaude},
+		{"google/gemini-3-pro", types.FamilyGemini},
+		{"z-ai/glm-5.3", ""},
+		{"example-lab/opaque", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			makeRow := func(model string) string {
+				return fmt.Sprintf(`{"model_name":"public-alias","litellm_params":{"model":%q,"custom_llm_provider":"openrouter"},`+
+					`"model_info":{"mode":"chat","litellm_provider":"openai","supported_endpoints":["/v1/chat/completions"]}}`, model)
+			}
+			result, collected := modelInfoBDiscover(t, makeRow(c.model))
+			if len(result.Models) != 1 {
+				t.Fatalf("models = %d, want 1", len(result.Models))
+			}
+			model := modelInfoBFirst(t, result)
+			modelInfoBMatch(t, model, `{"id":"public-alias","api":"openai-completions"}`)
+			if model.LiteLLMBackendFamily != c.family {
+				t.Errorf("family = %q, want %q", model.LiteLLMBackendFamily, c.family)
+			}
+			if strings.Contains(modelInfoBStderrJoined(collected), "conflicting deployment family evidence") {
+				t.Errorf("diagnostics = %q", collected.Lines())
+			}
+			prefixed, _ := modelInfoBDiscover(t, makeRow("openrouter/"+c.model))
+			prefixedModel := modelInfoBFirst(t, prefixed)
+			prefixedModel.BaseURL = model.BaseURL
+			if !reflect.DeepEqual(model, prefixedModel) {
+				t.Errorf("model = %s, prefixed model = %s", modelInfoBJSON(model), modelInfoBJSON(prefixedModel))
+			}
+		})
+	}
+}
+
+func TestModelInfoB_SelectsTheProtocolForAnOpenRouterModelNamespaceWithoutSupportedEndpointsLikeItsRoutingPrefixedForm(t *testing.T) {
+	cases := []struct {
+		model string
+		api   ai.API
+	}{
+		{"openai/gpt-4o", ai.APIOpenAIResponses},
+		{"openai/gpt-oss-120b", ai.APIOpenAIResponses},
+		{"deepseek/deepseek-v4.1-flash", ai.APIOpenAICompletions},
+		{"anthropic/claude-sonnet-4-6", ai.APIOpenAICompletions},
+		{"example-lab/opaque", ai.APIOpenAICompletions},
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			makeRow := func(model string) string {
+				return fmt.Sprintf(`{"model_name":"public-alias","litellm_params":{"model":%q,"custom_llm_provider":"openrouter"},`+
+					`"model_info":{"mode":"chat","litellm_provider":"openai"}}`, model)
+			}
+			result, _ := modelInfoBDiscover(t, makeRow(c.model))
+			model := modelInfoBFirst(t, result)
+			if model.API != c.api {
+				t.Errorf("api = %q, want %q", model.API, c.api)
+			}
+			prefixed, _ := modelInfoBDiscover(t, makeRow("openrouter/"+c.model))
+			prefixedModel := modelInfoBFirst(t, prefixed)
+			prefixedModel.BaseURL = model.BaseURL
+			if !reflect.DeepEqual(model, prefixedModel) {
+				t.Errorf("model = %s, prefixed model = %s", modelInfoBJSON(model), modelInfoBJSON(prefixedModel))
+			}
+		})
+	}
+}
+
+func TestModelInfoB_RestoresKimiPolicyThroughOpenRouterWithoutDirectMoonshotVisibilityControls(t *testing.T) {
+	result, _ := modelInfoBDiscover(t, `{"model_name":"router-kimi",`+
+		`"litellm_params":{"model":"moonshotai/kimi-k2.5","custom_llm_provider":"openrouter"},`+
+		`"model_info":{"mode":"chat","litellm_provider":"openai"}}`)
+	model := modelInfoBFirst(t, result)
+	if model.LiteLLMBackendFamily != types.FamilyKimi {
+		t.Errorf("family = %q, want kimi", model.LiteLLMBackendFamily)
+	}
+	modelInfoBMatch(t, model.Compat, `{"maxTokensField":"max_tokens","supportsStrictMode":false}`)
+	modelInfoBMatch(t, model.LiteLLMPolicy, `{"normalizeStrictToolMessages":true,"normalizeThinkTags":true,"suppressReasoningVisibility":false}`)
+}
+
+func TestModelInfoB_DoesNotGrantDirectAnthropicFeaturesToAnOpenRouterClaudeDeployment(t *testing.T) {
+	result, _ := modelInfoBDiscover(t, `{"model_name":"router-claude",`+
+		`"litellm_params":{"model":"anthropic/claude-fable-5-1","custom_llm_provider":"openrouter"},`+
+		`"model_info":{"mode":"chat","litellm_provider":"anthropic","supported_endpoints":["/v1/messages"]}}`)
+	model := modelInfoBFirst(t, result)
+	if model.LiteLLMBackendFamily != types.FamilyClaude || model.API != ai.APIAnthropicMessages {
+		t.Errorf("family = %q, api = %q", model.LiteLLMBackendFamily, model.API)
+	}
+	if model.Compat != nil && modelInfoBBool(model.Compat.SupportsStrictTools, true) {
+		t.Error("OpenRouter Claude acquired direct-Anthropic strict tools")
+	}
+	modelInfoBMatch(t, model.Compat, `{"supportsMidConvoEffort":false}`)
+}
+
+func TestModelInfoB_DoesNotGrantDirectOpenAICacheLifetimeToAnOpenRouterResponsesDeployment(t *testing.T) {
+	result, _ := modelInfoBDiscover(t, `{"model_name":"router-gpt",`+
+		`"litellm_params":{"model":"openai/gpt-6.1-sol","custom_llm_provider":"openrouter"},`+
+		`"model_info":{"mode":"chat","litellm_provider":"openai","supported_endpoints":["/v1/responses"]}}`)
+	model := modelInfoBFirst(t, result)
+	if model.LiteLLMBackendFamily != types.FamilyOpenAI || model.API != ai.APIOpenAIResponses {
+		t.Errorf("family = %q, api = %q", model.LiteLLMBackendFamily, model.API)
+	}
+	if len(model.PromptCache) != 0 {
+		t.Errorf("OpenRouter model acquired a direct-OpenAI cache lifetime: %v", model.PromptCache)
+	}
+}
+
 func TestModelInfoB_AppliesKimiCompatToAnOpenAIAdapterPrefixedVendorIDRoutedByCustomLLMProviderOpenAI(t *testing.T) {
 	result, collected := modelInfoBDiscover(t, `{"model_name":"kimi-k3-greenpt",`+
 		`"litellm_params":{"model":"openai/kimi-k3","custom_llm_provider":"openai"},"model_info":{"id":"one","mode":"chat"}}`)
