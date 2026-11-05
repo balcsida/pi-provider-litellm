@@ -3870,7 +3870,8 @@ describe("discoverModels via /model/info", () => {
   ] as const)("discovers OpenRouter model namespace %s like its routing-prefixed form", async (model, family) => {
     const diagnostics: string[] = [];
     const entry = {
-      model_name: "public-alias",
+      // One route per case: the conflict diagnostic is reported once per route name per process.
+      model_name: `public-alias-${model}`,
       litellm_params: { model: String(model), custom_llm_provider: "openrouter" },
       model_info: { mode: "chat", litellm_provider: "openai", supported_endpoints: ["/v1/chat/completions"] },
     };
@@ -3880,7 +3881,7 @@ describe("discoverModels via /model/info", () => {
     const result = await discoverModels("https://litellm.example.com", "sk-test", options);
 
     expect(result.models).toHaveLength(1);
-    expect(result.models[0]).toMatchObject({ id: "public-alias", api: "openai-completions" });
+    expect(result.models[0]).toMatchObject({ id: entry.model_name, api: "openai-completions" });
     expect(result.models[0]?.litellmBackendFamily).toBe(family);
     expect(diagnostics.join("\n")).not.toContain("conflicting deployment family evidence");
     expect(entry.litellm_params.model).toBe(model);
