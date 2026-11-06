@@ -302,6 +302,7 @@ describe("pi package compatibility", () => {
       "@earendil-works/pi-ai/compat",
       "@earendil-works/pi-ai/providers/all",
       "@earendil-works/pi-coding-agent",
+      "typebox",
     ]);
     for (const [file, , specifiers] of imports) {
       for (const specifier of specifiers) {

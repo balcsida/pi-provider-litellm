@@ -1,6 +1,5 @@
-import type { Static } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import { normalizeBaseUrl } from "./discover.js";
 import type { LiteLLMRuntimeAuth, LiteLLMSkill } from "./types.js";
 
