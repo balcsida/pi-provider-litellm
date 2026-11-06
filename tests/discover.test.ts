@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 11,
+      litellmDiscoveryVersion: 12,
     });
   });
 
@@ -3859,6 +3859,131 @@ describe("discoverModels via /model/info", () => {
     expect(stderr.mock.calls.flat().join(" ")).not.toContain("conflicting deployment family evidence");
   });
 
+  it.each([
+    ["openai/gpt-4o", "openai"],
+    ["deepseek/deepseek-v4.1-flash", "deepseek"],
+    ["moonshotai/kimi-k2.5", "kimi"],
+    ["anthropic/claude-sonnet-4-6", "claude"],
+    ["google/gemini-3-pro", "gemini"],
+    ["z-ai/glm-5.3", undefined],
+    ["example-lab/opaque", undefined],
+  ] as const)("discovers OpenRouter model namespace %s like its routing-prefixed form", async (model, family) => {
+    const diagnostics: string[] = [];
+    const entry = {
+      // One route per case: the conflict diagnostic is reported once per route name per process.
+      model_name: `public-alias-${model}`,
+      litellm_params: { model: String(model), custom_llm_provider: "openrouter" },
+      model_info: { mode: "chat", litellm_provider: "openai", supported_endpoints: ["/v1/chat/completions"] },
+    };
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
+    const options = { report: (message: string) => diagnostics.push(message) };
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({ id: entry.model_name, api: "openai-completions" });
+    expect(result.models[0]?.litellmBackendFamily).toBe(family);
+    expect(diagnostics.join("\n")).not.toContain("conflicting deployment family evidence");
+    expect(entry.litellm_params.model).toBe(model);
+
+    entry.litellm_params.model = `openrouter/${model}`;
+    const prefixed = await discoverModels("https://litellm.example.com", "sk-test", options);
+    expect(result.models).toEqual(prefixed.models);
+  });
+
+  it.each([
+    ["openai/gpt-4o", "openai-responses"],
+    ["openai/gpt-oss-120b", "openai-responses"],
+    ["deepseek/deepseek-v4.1-flash", "openai-completions"],
+    ["anthropic/claude-sonnet-4-6", "openai-completions"],
+    ["example-lab/opaque", "openai-completions"],
+  ] as const)(
+    "selects the protocol for OpenRouter namespace %s without supported_endpoints like its routing-prefixed form",
+    async (model, api) => {
+      const entry = {
+        model_name: "public-alias",
+        litellm_params: { model: String(model), custom_llm_provider: "openrouter" },
+        model_info: { mode: "chat", litellm_provider: "openai" },
+      };
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+      expect(result.models[0]?.api).toBe(api);
+      entry.litellm_params.model = `openrouter/${model}`;
+      const prefixed = await discoverModels("https://litellm.example.com", "sk-test", {});
+      expect(result.models).toEqual(prefixed.models);
+    },
+  );
+
+  it("restores Kimi policy through OpenRouter without direct-Moonshot visibility controls", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "router-kimi",
+              litellm_params: { model: "moonshotai/kimi-k2.5", custom_llm_provider: "openrouter" },
+              model_info: { mode: "chat", litellm_provider: "openai" },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmBackendFamily).toBe("kimi");
+    expect(result.models[0]?.compat).toMatchObject({ maxTokensField: "max_tokens", supportsStrictMode: false });
+    expect(result.models[0]?.litellmPolicy).toMatchObject({
+      normalizeStrictToolMessages: true,
+      normalizeThinkTags: true,
+      suppressReasoningVisibility: false,
+    });
+  });
+
+  it("does not grant direct-Anthropic features to an OpenRouter Claude deployment", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "router-claude",
+              litellm_params: { model: "anthropic/claude-fable-5-1", custom_llm_provider: "openrouter" },
+              model_info: { mode: "chat", litellm_provider: "anthropic", supported_endpoints: ["/v1/messages"] },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmBackendFamily).toBe("claude");
+    expect(result.models[0]?.api).toBe("anthropic-messages");
+    expect(result.models[0]?.compat).not.toHaveProperty("supportsStrictTools", true);
+    expect(result.models[0]?.compat).toMatchObject({ supportsMidConvoEffort: false });
+  });
+
+  it("does not grant a direct-OpenAI cache lifetime to an OpenRouter Responses deployment", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "router-gpt",
+              litellm_params: { model: "openai/gpt-6.1-sol", custom_llm_provider: "openrouter" },
+              model_info: { mode: "chat", litellm_provider: "openai", supported_endpoints: ["/v1/responses"] },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {});
+
+    expect(result.models[0]?.litellmBackendFamily).toBe("openai");
+    expect(result.models[0]?.api).toBe("openai-responses");
+    expect(result.models[0]?.promptCache).toBeUndefined();
+  });
+
   it("applies Kimi compat to an OpenAI-adapter-prefixed vendor id routed by custom_llm_provider: openai", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     mockEndpoints({
@@ -5221,7 +5346,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 11,
+          litellmDiscoveryVersion: 12,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,

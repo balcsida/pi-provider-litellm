@@ -47,7 +47,9 @@
   query `/v1/models` only to expand wildcard routes.
 - Treat `model_name` as a public route group, not backend evidence. Resolve backend identity from
   `model_info.base_model` before `litellm_params.model`; treat `custom_llm_provider` as provider evidence, withholding
-  identity when a non-generic provider conflicts with the model prefix. Reduce every deployment before choosing
+  identity when a non-generic provider conflicts with the model prefix. An explicit `custom_llm_provider: openrouter`
+  treats a configured `vendor/model` as an OpenRouter model namespace, equivalent to `openrouter/vendor/model`; never
+  reinterpret `model_info.base_model` or the public route under this exception. Reduce every deployment before choosing
   transport, capabilities, limits, prices, or catalog authority; never shallow-merge duplicate route rows.
 - Keep catalog lookup provider-aware. Unqualified or conflicting identities must not scan every Pi provider catalog.
 - `supported_endpoints` pins transport except for `azure_ai` deployments on a proxy older than LiteLLM v1.103.0 or of
