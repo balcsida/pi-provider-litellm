@@ -858,7 +858,12 @@ export function reduceModelGroup(
   // `cache_creation_input_token_cost` on every route shape, so the absence is a property
   // of the backend, not missing evidence. Require a cache field only when it is priced
   // somewhere, or when the backend family always bills it.
-  const cacheWritePriced = costValues[3].some((value) => value !== undefined);
+  const cacheWritePriced =
+    costValues[3].some((value) => value !== undefined) ||
+    // A catalog that prices a cache write keeps the field required even when
+    // `catalogAuthority` withdrew its prices for an ambiguous route identity, so a
+    // dropped authority cannot turn a genuinely unknown write price into a complete one.
+    catalogs.some((catalog) => catalog?.cost?.cacheWrite !== undefined);
   const billsCacheWrite =
     cacheWritePriced ||
     semanticFamily === "claude" ||

@@ -1436,6 +1436,12 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 	// of the backend, not missing evidence. Require the cache-write price only when it is
 	// priced somewhere, or when the backend family always bills it.
 	billsCacheWrite := semanticFamily == SemanticFamilyClaude
+	for _, catalog := range catalogs {
+		if catalog != nil && catalog.Cost != nil && catalog.Cost.CacheWrite != nil {
+			billsCacheWrite = true
+			break
+		}
+	}
 	for _, value := range costValues[costCacheWrite] {
 		if value != nil {
 			billsCacheWrite = true

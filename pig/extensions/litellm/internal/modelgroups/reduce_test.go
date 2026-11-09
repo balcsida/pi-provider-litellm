@@ -479,6 +479,37 @@ func TestReduceModelGroup(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps the cache-write price required when an ambiguous route drops catalog authority", func(t *testing.T) {
+		// Two deployments resolve to different catalog identities, so the reducer withdraws
+		// catalog authority and every catalog price with it. A catalog that still declares a
+		// cache-write price keeps that field required, so the missing router price stays an
+		// incomplete marker instead of a silent zero.
+		declaredCatalog := func(entry types.ModelInfoEntry) *CatalogResolution {
+			modelID := "deepseek/model-a"
+			if entry.ModelInfo != nil && entry.ModelInfo.ID == "b" {
+				modelID = "deepseek/model-b"
+			}
+			return &CatalogResolution{
+				Provider: "deepseek", CatalogModelID: modelID, SemanticFamily: SemanticFamilyDeepSeek,
+				Reasoning: b(true), Vision: b(false), ContextWindow: f(1_000_000), MaxTokens: f(384_000),
+				Cost: &CatalogCost{Input: f(0.3), Output: f(1.2), CacheRead: f(0.006), CacheWrite: f(0.0009)},
+			}
+		}
+		router := func(id string) types.ModelInfoEntry {
+			return row(func(e *types.ModelInfoEntry) { e.ModelName = "ambiguous" }, idMode(id, "chat"), info(func(i *types.ModelInfoDetails) {
+				i.SupportsVision, i.SupportsReasoning = b(false), b(true)
+				i.MaxInputTokens, i.MaxOutputTokens = f(1_000_000), f(384_000)
+				i.InputCostPerToken, i.OutputCostPerToken = f(0.0000003), f(0.0000012)
+				i.CacheReadInputTokenCost, i.CacheCreationInputTokenCost = f(0.000000006), nil
+			}))
+		}
+
+		ambiguous := mustReduce(t, []types.ModelInfoEntry{router("a"), router("b")}, declaredCatalog)
+		if !ambiguous.CatalogAuthorityAmbiguous || ambiguous.HasCompleteCost || ambiguous.HasCompleteMetadata {
+			t.Fatalf("%s", dump(ambiguous))
+		}
+	})
+
 	t.Run("applies public effort levels and LiteLLM overrides", func(t *testing.T) {
 		result := mustReduce(t, []types.ModelInfoEntry{
 			row(idMode("reasoner", "chat"), info(func(i *types.ModelInfoDetails) {

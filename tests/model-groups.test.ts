@@ -876,6 +876,44 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("keeps the cache-write price required when an ambiguous route drops catalog authority", () => {
+    // Two deployments resolve to different catalog identities, so the reducer withdraws
+    // catalog authority and every catalog price with it. A catalog that still declares a
+    // cache-write price must keep that field required, otherwise the missing router price
+    // becomes a silent zero instead of an incomplete marker.
+    const declaredCatalog: CatalogResolver = (entry) => ({
+      provider: "deepseek",
+      catalogModelId: entry.model_info?.id === "a" ? "deepseek/model-a" : "deepseek/model-b",
+      semanticFamily: "deepseek",
+      reasoning: true,
+      vision: false,
+      contextWindow: 1_000_000,
+      maxTokens: 384_000,
+      cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0.0009 },
+    });
+    const router = (id: string) =>
+      row({
+        model_name: "ambiguous",
+        model_info: {
+          id,
+          mode: "chat",
+          supports_vision: false,
+          supports_reasoning: true,
+          max_input_tokens: 1_000_000,
+          max_output_tokens: 384_000,
+          input_cost_per_token: 0.0000003,
+          output_cost_per_token: 0.0000012,
+          cache_read_input_token_cost: 0.000000006,
+          cache_creation_input_token_cost: undefined,
+        },
+      });
+
+    const ambiguous = reduceModelGroup([router("a"), router("b")], declaredCatalog);
+    expect(ambiguous?.catalogAuthorityAmbiguous).toBe(true);
+    expect(ambiguous?.hasCompleteCost).toBe(false);
+    expect(ambiguous?.hasCompleteMetadata).toBe(false);
+  });
+
   it("applies public effort levels and LiteLLM overrides", () => {
     const result = reduceModelGroup(
       [
