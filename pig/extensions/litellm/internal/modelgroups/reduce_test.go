@@ -426,6 +426,59 @@ func TestReduceModelGroup(t *testing.T) {
 		}
 	})
 
+	t.Run("treats an unpriced cache-write charge as inapplicable when the backend never bills it", func(t *testing.T) {
+		// LiteLLM reports cache pricing only for backends that bill it. A DeepSeek- or
+		// OpenAI-style prompt cache has no write charge, so every shape of such a route omits
+		// `cache_creation_input_token_cost`. That gap is a property of the backend, not missing
+		// evidence, and it must not mark the model incomplete and hide its real limits.
+		noCacheWrite := func(entry types.ModelInfoEntry) *CatalogResolution {
+			backend := ""
+			if entry.ModelInfo != nil && entry.ModelInfo.BaseModel != "" {
+				backend = entry.ModelInfo.BaseModel
+			}
+			if entry.LiteLLMParams != nil && entry.LiteLLMParams.Model != "" {
+				backend = entry.LiteLLMParams.Model
+			}
+			switch backend {
+			case "deepseek/deepseek-v4.1-flash":
+				return &CatalogResolution{
+					Provider: "deepseek", SemanticFamily: SemanticFamilyDeepSeek,
+					Reasoning: b(true), Vision: b(false), ContextWindow: f(1_000_000), MaxTokens: f(384_000),
+					Cost: &CatalogCost{Input: f(0.3), Output: f(1.2), CacheRead: f(0.006)},
+				}
+			case "anthropic/claude-sonnet-4-6":
+				return &CatalogResolution{
+					Provider:  "anthropic",
+					Reasoning: b(true), Vision: b(true), ContextWindow: f(200_000), MaxTokens: f(64_000),
+					Cost: &CatalogCost{Input: f(3), Output: f(15), CacheRead: f(0.3)},
+				}
+			}
+			return nil
+		}
+		noCacheWriteDeployment := func(model, id, route string) types.ModelInfoEntry {
+			return row(func(e *types.ModelInfoEntry) { e.ModelName = route }, idMode(id, "chat"), info(func(i *types.ModelInfoDetails) {
+				i.InputCostPerToken, i.OutputCostPerToken = f(0.0000003), f(0.0000012)
+				i.CacheReadInputTokenCost, i.CacheCreationInputTokenCost = f(0.000000006), nil
+			}), backendModel(model))
+		}
+
+		deepseek := mustReduce(t, []types.ModelInfoEntry{
+			noCacheWriteDeployment("deepseek/deepseek-v4.1-flash", "ds", "commandcode/deepseek/deepseek-v4.1-flash"),
+		}, noCacheWrite)
+		eq(t, deepseek.Cost, modelCost(0.3, 1.2, 0.006, 0))
+		if !deepseek.HasCompleteCost || !deepseek.HasCompleteMetadata {
+			t.Fatalf("%s", dump(deepseek))
+		}
+
+		// A Claude backend always bills cache writes, so the same missing price stays a genuine gap.
+		claude := mustReduce(t, []types.ModelInfoEntry{
+			noCacheWriteDeployment("anthropic/claude-sonnet-4-6", "claude", "claude-route"),
+		}, noCacheWrite)
+		if claude.HasCompleteCost || claude.HasCompleteMetadata {
+			t.Fatalf("%s", dump(claude))
+		}
+	})
+
 	t.Run("applies public effort levels and LiteLLM overrides", func(t *testing.T) {
 		result := mustReduce(t, []types.ModelInfoEntry{
 			row(idMode("reasoner", "chat"), info(func(i *types.ModelInfoDetails) {

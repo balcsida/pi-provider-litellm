@@ -1426,10 +1426,36 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 			}
 		}
 		completeCostFields[field] = complete
-		hasCompleteCost = hasCompleteCost && complete
 		if complete {
 			costTotals[field] = maxOf(resolved...)
 		}
+	}
+	// LiteLLM reports cache pricing only for backends that bill it. A backend with no
+	// cache-write charge (DeepSeek- and OpenAI-style prompt caches) omits
+	// `cache_creation_input_token_cost` on every route shape, so the absence is a property
+	// of the backend, not missing evidence. Require the cache-write price only when it is
+	// priced somewhere, or when the backend family always bills it.
+	billsCacheWrite := semanticFamily == SemanticFamilyClaude
+	for _, value := range costValues[costCacheWrite] {
+		if value != nil {
+			billsCacheWrite = true
+			break
+		}
+	}
+	if !billsCacheWrite {
+		for _, catalog := range catalogs {
+			if catalog != nil && (catalog.SemanticFamily == SemanticFamilyClaude || catalog.Provider == "anthropic") {
+				billsCacheWrite = true
+				break
+			}
+		}
+	}
+	hasCompleteCost = true
+	for field := costInput; field < costFieldCount; field++ {
+		if field == costCacheWrite && !billsCacheWrite {
+			continue
+		}
+		hasCompleteCost = hasCompleteCost && completeCostFields[field]
 	}
 	// A defaulted capability or limit is as much a gap as a missing price: the incomplete marker
 	// covers everything the reducer had to assume.
@@ -1444,11 +1470,16 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 	if hasCompleteCost && hasCatalogAuthority {
 		deploymentCosts := make([]ai.ModelCost, n)
 		for i, entry := range deployments {
+			// An unbilled cache-write charge is zero, not missing evidence.
+			cacheWrite := 0.0
+			if value := costValues[costCacheWrite][i]; value != nil {
+				cacheWrite = *value
+			}
 			base := ai.ModelCost{
 				Input:      *costValues[costInput][i],
 				Output:     *costValues[costOutput][i],
 				CacheRead:  *costValues[costCacheRead][i],
-				CacheWrite: *costValues[costCacheWrite][i],
+				CacheWrite: cacheWrite,
 			}
 			var explicit [costFieldCount]bool
 			explicitCount := 0

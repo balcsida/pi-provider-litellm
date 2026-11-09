@@ -853,7 +853,18 @@ export function reduceModelGroup(
     deployments.map((entry, index) => resolvedCost(entry, catalogAuthority[index], field)),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
-  const hasCompleteCost = completeCostFields.every(Boolean);
+  // LiteLLM reports cache pricing only for backends that bill it. A backend with no
+  // cache-write charge (DeepSeek- and OpenAI-style prompt caches) omits
+  // `cache_creation_input_token_cost` on every route shape, so the absence is a property
+  // of the backend, not missing evidence. Require a cache field only when it is priced
+  // somewhere, or when the backend family always bills it.
+  const cacheWritePriced = costValues[3].some((value) => value !== undefined);
+  const billsCacheWrite =
+    cacheWritePriced ||
+    semanticFamily === "claude" ||
+    catalogs.some((catalog) => catalog?.semanticFamily === "claude" || catalog?.provider === "anthropic");
+  const requiredCostFields = COST_FIELDS.filter((field) => field !== "cacheWrite" || billsCacheWrite);
+  const hasCompleteCost = requiredCostFields.every((field) => completeCostFields[COST_FIELDS.indexOf(field)]);
   // A defaulted capability or limit is as much a gap as a missing price: the
   // incomplete marker covers everything the reducer had to assume.
   const hasCompleteMetadata =
@@ -874,7 +885,8 @@ export function reduceModelGroup(
         input: costValues[0][index] as number,
         output: costValues[1][index] as number,
         cacheRead: costValues[2][index] as number,
-        cacheWrite: costValues[3][index] as number,
+        // An unbilled cache-write charge is zero, not missing evidence.
+        cacheWrite: (costValues[3][index] ?? 0) as number,
       };
       const explicitFields = new Set(COST_FIELDS.filter((field) => explicitCost(entry, field) !== undefined));
       const catalogTiers = catalogAuthority[index]?.cost?.tiers;

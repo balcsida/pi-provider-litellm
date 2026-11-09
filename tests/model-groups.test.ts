@@ -815,6 +815,67 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("treats an unpriced cache-write charge as inapplicable when the backend never bills it", () => {
+    // LiteLLM reports cache pricing only for backends that bill it. A DeepSeek- or
+    // OpenAI-style prompt cache has no write charge, so every shape of such a route
+    // omits `cache_creation_input_token_cost`. That gap is a property of the backend,
+    // not missing evidence, and it must not mark the model incomplete and hide the
+    // route's real limits from /model.
+    const noCacheWriteCatalog: CatalogResolver = (entry) => {
+      const backend = entry.model_info?.base_model ?? entry.litellm_params?.model;
+      if (backend === "deepseek/deepseek-v4.1-flash") {
+        return {
+          provider: "deepseek",
+          semanticFamily: "deepseek",
+          reasoning: true,
+          vision: false,
+          contextWindow: 1_000_000,
+          maxTokens: 384_000,
+          cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: undefined },
+        };
+      }
+      if (backend === "anthropic/claude-sonnet-4-6") {
+        return {
+          provider: "anthropic",
+          reasoning: true,
+          vision: true,
+          contextWindow: 200_000,
+          maxTokens: 64_000,
+          cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: undefined },
+        };
+      }
+      return undefined;
+    };
+
+    const deployment = (model: string, id: string) =>
+      row({
+        model_name:
+          model === "anthropic/claude-sonnet-4-6" ? "claude-route" : "commandcode/deepseek/deepseek-v4.1-flash",
+        model_info: {
+          id,
+          mode: "chat",
+          input_cost_per_token: 0.0000003,
+          output_cost_per_token: 0.0000012,
+          cache_read_input_token_cost: 0.000000006,
+          cache_creation_input_token_cost: undefined,
+        },
+        litellm_params: { model },
+      });
+
+    expect(reduceModelGroup([deployment("deepseek/deepseek-v4.1-flash", "ds")], noCacheWriteCatalog)).toMatchObject({
+      hasCompleteMetadata: true,
+      hasCompleteCost: true,
+      cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+    });
+
+    // A Claude backend always bills cache writes, so the same missing price stays a
+    // genuine gap instead of being assumed free.
+    expect(reduceModelGroup([deployment("anthropic/claude-sonnet-4-6", "claude")], noCacheWriteCatalog)).toMatchObject({
+      hasCompleteMetadata: false,
+      hasCompleteCost: false,
+    });
+  });
+
   it("applies public effort levels and LiteLLM overrides", () => {
     const result = reduceModelGroup(
       [
