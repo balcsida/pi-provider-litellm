@@ -157,6 +157,9 @@ describe("resolveBackendIdentity", () => {
     ["together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", undefined],
     ["sagemaker", "vertex_ai/claude-sonnet-4", "claude"],
     ["sagemaker", "groq/llama-3.3-70b", undefined],
+    // A vendor provider name counts in the family scan, as in the prefixed form.
+    ["moonshot", "openai/gpt-4o", "kimi"],
+    ["anthropic", "openai/gpt-4o", "claude"],
   ] as const)("resolves %s model %s like its routing-prefixed form", (provider, model, family) => {
     // LiteLLM prepends a differing custom_llm_provider, so both spellings are one deployment.
     const row = { litellm_params: { model, custom_llm_provider: provider } };
@@ -171,7 +174,8 @@ describe("resolveBackendIdentity", () => {
       resolveBackendIdentity({ litellm_params: { model: `${provider}/${model}`, custom_llm_provider: provider } }),
     );
     expect(resolveCatalogProvider(row)).toBe(provider);
-    expect(routesOnlyThrough(row, new Set(["anthropic", "openai", "azure", "azure_ai"]))).toBe(false);
+    expect(routesOnlyThrough(row, new Set(["anthropic"]))).toBe(false);
+    expect(routesOnlyThrough(row, new Set(["openai", "azure", "azure_ai"]))).toBe(false);
   });
 
   it("normalizes the explicit OpenRouter provider without changing its model id", () => {

@@ -133,7 +133,7 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 	}
 	// custom_llm_provider is how LiteLLM routes a model, and it prepends itself to a configured
 	// model whose first segment differs (_get_llm_provider). That segment is model namespace,
-	// exactly as in the prefixed form: OpenRouter's "openai/gpt-4o", vLLM's "Qwen/Qwen3-32B".
+	// so resolve that prefixed form: OpenRouter's "openai/gpt-4o", vLLM's "Qwen/Qwen3-32B".
 	// base_model and the route name are not routed, so there a differing prefix is a conflict.
 	// A generic adapter prefix ("azure_ai/") is not a namespace and stays stripped.
 	customProvider := strings.ToLower(wireString(row.customProvider))
@@ -144,8 +144,9 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 		if (baseModel != "" || configuredModel == "") && !modelPathSegments[prefixProvider] {
 			return nil
 		}
-		prefixProvider = ""
-		slash = -1
+		raw = customProvider + "/" + raw
+		slash = len(customProvider)
+		prefixProvider = customProvider
 	}
 	provider := firstNonEmpty(prefixProvider, customProvider)
 	modelID := raw

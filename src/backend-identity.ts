@@ -66,7 +66,7 @@ export function isOpenAIBackend(id: string): boolean {
 export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity | undefined {
   const baseModel = wireString(row.model_info?.base_model);
   const configuredModel = wireString(row.litellm_params?.model);
-  const raw = baseModel ?? configuredModel ?? wireString(row.model_name);
+  let raw = baseModel ?? configuredModel ?? wireString(row.model_name);
   if (!raw) return undefined;
 
   let slash = raw.indexOf("/");
@@ -74,15 +74,16 @@ export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity
   let prefixProvider = prefix && !GENERIC_ADAPTERS.has(prefix) ? prefix : undefined;
   // `custom_llm_provider` is how LiteLLM routes a model, and it prepends itself to a configured
   // model whose first segment differs (`_get_llm_provider`). That segment is model namespace,
-  // exactly as in the prefixed form: OpenRouter's "openai/gpt-4o", vLLM's "Qwen/Qwen3-32B".
+  // so resolve that prefixed form: OpenRouter's "openai/gpt-4o", vLLM's "Qwen/Qwen3-32B".
   // base_model and the route name are not routed, so there a differing prefix is a conflict.
   // A generic adapter prefix ("azure_ai/") is not a namespace and stays stripped.
   const custom = wireString(row.litellm_params?.custom_llm_provider)?.toLowerCase();
   const customProvider = custom && !GENERIC_ADAPTERS.has(custom) ? custom : undefined;
   if (prefixProvider && customProvider && prefixProvider !== customProvider) {
     if ((baseModel || !configuredModel) && !MODEL_PATH_SEGMENTS.has(prefixProvider)) return undefined;
-    prefixProvider = undefined;
-    slash = -1;
+    raw = `${customProvider}/${raw}`;
+    slash = customProvider.length;
+    prefixProvider = customProvider;
   }
   const provider = prefixProvider ?? customProvider;
   const modelId = slash > 0 ? raw.slice(slash + 1) : raw;

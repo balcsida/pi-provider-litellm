@@ -154,6 +154,9 @@ func TestResolveBackendIdentity(t *testing.T) {
 			{"together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", ""},
 			{"sagemaker", "vertex_ai/claude-sonnet-4", FamilyClaude},
 			{"sagemaker", "groq/llama-3.3-70b", ""},
+			// A vendor provider name counts in the family scan, as in the prefixed form.
+			{"moonshot", "openai/gpt-4o", FamilyKimi},
+			{"anthropic", "openai/gpt-4o", FamilyClaude},
 		}
 		for _, c := range cases {
 			t.Run(c.provider+" "+c.model, func(t *testing.T) {
@@ -172,7 +175,7 @@ func TestResolveBackendIdentity(t *testing.T) {
 				if provider := ResolveCatalogProvider(entry); provider != c.provider {
 					t.Errorf("catalog provider = %q", provider)
 				}
-				if RoutesOnlyThrough(entry, set("anthropic", "openai", "azure", "azure_ai")) {
+				if RoutesOnlyThrough(entry, set("anthropic")) || RoutesOnlyThrough(entry, set("openai", "azure", "azure_ai")) {
 					t.Error("model namespace acquired direct-provider routing authority")
 				}
 			})
