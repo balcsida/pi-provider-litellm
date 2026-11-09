@@ -318,12 +318,12 @@ describe("modelProtocol", () => {
     ).toMatchObject({ api });
   });
 
-  it("uses Chat Completions when the model prefix conflicts with custom_llm_provider", () => {
+  it("uses Chat Completions when the base_model prefix conflicts with custom_llm_provider", () => {
     expect(
       modelProtocol("gpt-prod", {
         model_name: "gpt-prod",
-        litellm_params: { model: "openai/gpt-5", custom_llm_provider: "fireworks_ai" },
-        model_info: { mode: "chat" },
+        litellm_params: { model: "gpt-5", custom_llm_provider: "fireworks_ai" },
+        model_info: { mode: "chat", base_model: "openai/gpt-5" },
       }),
     ).toMatchObject({ api: "openai-completions" });
   });
@@ -1122,14 +1122,14 @@ describe("discoverModels via /model/info", () => {
     expect(result.models.map((model) => model.id)).toEqual(["local/model"]);
   });
 
-  it("withholds backend family when the model prefix conflicts with custom_llm_provider", async () => {
+  it("withholds backend family when the base_model prefix conflicts with custom_llm_provider", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(200, {
         data: [
           {
             model_name: "gpt-prod",
-            litellm_params: { model: "openai/gpt-5", custom_llm_provider: "fireworks_ai" },
-            model_info: { mode: "chat" },
+            litellm_params: { model: "gpt-5", custom_llm_provider: "fireworks_ai" },
+            model_info: { mode: "chat", base_model: "openai/gpt-5" },
           },
         ],
       }),
@@ -1922,11 +1922,11 @@ describe("discoverModels via /model/info", () => {
     ).toMatchObject({ provider: "moonshot", catalogModelId: "kimi-k3" });
   });
 
-  it("withholds catalog authority when custom_llm_provider conflicts with the model prefix", async () => {
+  it("withholds catalog authority when custom_llm_provider conflicts with the base_model prefix", async () => {
     const entry = {
       model_name: "openai/gpt-4o",
-      litellm_params: { model: "openai/gpt-4o", custom_llm_provider: "anthropic" },
-      model_info: { mode: "chat" },
+      litellm_params: { model: "gpt-4o", custom_llm_provider: "anthropic" },
+      model_info: { mode: "chat", base_model: "openai/gpt-4o" },
     };
     expect(resolveModelInfoCatalog(entry)).toBeUndefined();
     mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
@@ -3890,6 +3890,38 @@ describe("discoverModels via /model/info", () => {
     const prefixed = await discoverModels("https://litellm.example.com", "sk-test", options);
     expect(result.models).toEqual(prefixed.models);
   });
+
+  it.each([
+    ["hosted_vllm", "Qwen/Qwen3-32B", undefined, "openai-completions"],
+    ["hosted_vllm", "openai/gpt-oss-120b", "openai", "openai-responses"],
+    ["hosted_vllm", "moonshotai/Kimi-K2-Instruct", "kimi", "openai-completions"],
+    ["hosted_vllm", "deepseek-ai/DeepSeek-V3", "deepseek", "openai-completions"],
+    ["together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", undefined, "openai-completions"],
+  ] as const)(
+    "discovers %s model namespace %s like its routing-prefixed form",
+    async (provider, model, family, api) => {
+      const diagnostics: string[] = [];
+      const entry = {
+        // One route per case: the conflict diagnostic is reported once per route name per process.
+        model_name: `public-alias-${provider}-${model}`,
+        litellm_params: { model: String(model), custom_llm_provider: provider },
+        model_info: { mode: "chat", litellm_provider: provider },
+      };
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
+      const options = { report: (message: string) => diagnostics.push(message) };
+
+      const result = await discoverModels("https://litellm.example.com", "sk-test", options);
+
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0]).toMatchObject({ id: entry.model_name, api });
+      expect(result.models[0]?.litellmBackendFamily).toBe(family);
+      expect(diagnostics.join("\n")).not.toContain("conflicting deployment family evidence");
+
+      entry.litellm_params.model = `${provider}/${model}`;
+      const prefixed = await discoverModels("https://litellm.example.com", "sk-test", options);
+      expect(result.models).toEqual(prefixed.models);
+    },
+  );
 
   it.each([
     ["openai/gpt-4o", "openai-responses"],

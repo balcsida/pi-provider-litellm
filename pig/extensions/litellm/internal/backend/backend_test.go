@@ -70,13 +70,17 @@ func TestResolveBackendIdentity(t *testing.T) {
 			}
 		}
 	})
-	t.Run("withholds identity when custom_llm_provider contradicts the model prefix", func(t *testing.T) {
-		if got := ResolveIdentity(row("openai/gpt-4o", &types.ModelInfoParams{CustomLLMProvider: "anthropic"})); got != nil {
-			t.Errorf("got %+v", got)
-		}
-		for _, m := range []string{"vertex_ai/claude-sonnet-4", "bedrock/anthropic.claude-3", "groq/llama-3.3-70b"} {
-			if got := ResolveIdentity(row(m, &types.ModelInfoParams{CustomLLMProvider: "sagemaker"})); got != nil {
-				t.Errorf("%s: got %+v", m, got)
+	t.Run("withholds identity when a base_model or route-name prefix contradicts custom_llm_provider", func(t *testing.T) {
+		// LiteLLM routes only the configured model, so these prefixes name a backend, not a namespace.
+		for _, m := range []string{"openai/gpt-4o", "vertex_ai/claude-sonnet-4", "groq/llama-3.3-70b"} {
+			entry := row("opaque", &types.ModelInfoParams{CustomLLMProvider: "sagemaker"})
+			entry.ModelInfo = &types.ModelInfoDetails{BaseModel: m}
+			if got := ResolveIdentity(entry); got != nil {
+				t.Errorf("base_model %s: got %+v", m, got)
+			}
+			entry = types.ModelInfoEntry{ModelName: m, LiteLLMParams: &types.ModelInfoParams{CustomLLMProvider: "sagemaker"}}
+			if got := ResolveIdentity(entry); got != nil {
+				t.Errorf("route %s: got %+v", m, got)
 			}
 		}
 		// A generic adapter is transport, so it cannot contradict the prefix.
@@ -133,6 +137,46 @@ func TestResolveBackendIdentity(t *testing.T) {
 				}
 				if entry.LiteLLMParams.Model != c.model {
 					t.Error("configured model id was mutated")
+				}
+			})
+		}
+	})
+	t.Run("resolves a custom_llm_provider model namespace like its routing-prefixed form", func(t *testing.T) {
+		// LiteLLM prepends a differing custom_llm_provider, so both spellings are one deployment.
+		cases := []struct {
+			provider, model string
+			family          Family
+		}{
+			{"hosted_vllm", "Qwen/Qwen3-32B", ""},
+			{"hosted_vllm", "openai/gpt-oss-120b", FamilyOpenAI},
+			{"hosted_vllm", "moonshotai/Kimi-K2-Instruct", FamilyKimi},
+			{"hosted_vllm", "deepseek-ai/DeepSeek-V3", FamilyDeepSeek},
+			{"together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", ""},
+			{"sagemaker", "vertex_ai/claude-sonnet-4", FamilyClaude},
+			{"sagemaker", "groq/llama-3.3-70b", ""},
+			// A vendor provider name counts in the family scan, as in the prefixed form.
+			{"moonshot", "openai/gpt-4o", FamilyKimi},
+			{"anthropic", "openai/gpt-4o", FamilyClaude},
+		}
+		for _, c := range cases {
+			t.Run(c.provider+" "+c.model, func(t *testing.T) {
+				entry := types.ModelInfoEntry{LiteLLMParams: &types.ModelInfoParams{Model: c.model, CustomLLMProvider: c.provider}}
+				got := ResolveIdentity(entry)
+				want := Identity{c.provider, c.model, c.provider + "/" + c.model, c.family}
+				if got == nil || *got != want {
+					t.Fatalf("got %+v want %+v", got, want)
+				}
+				prefixed := ResolveIdentity(types.ModelInfoEntry{
+					LiteLLMParams: &types.ModelInfoParams{Model: c.provider + "/" + c.model, CustomLLMProvider: c.provider},
+				})
+				if prefixed == nil || *got != *prefixed {
+					t.Errorf("prefixed identity = %+v, want %+v", prefixed, got)
+				}
+				if provider := ResolveCatalogProvider(entry); provider != c.provider {
+					t.Errorf("catalog provider = %q", provider)
+				}
+				if RoutesOnlyThrough(entry, set("anthropic")) || RoutesOnlyThrough(entry, set("openai", "azure", "azure_ai")) {
+					t.Error("model namespace acquired direct-provider routing authority")
 				}
 			})
 		}

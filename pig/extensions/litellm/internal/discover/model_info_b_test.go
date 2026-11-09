@@ -1086,6 +1086,45 @@ func TestModelInfoB_DiscoversOpenRouterModelNamespaceLikeItsRoutingPrefixedForm(
 	}
 }
 
+func TestModelInfoB_DiscoversACustomProviderModelNamespaceLikeItsRoutingPrefixedForm(t *testing.T) {
+	cases := []struct {
+		provider, model string
+		family          types.BackendFamily
+		api             ai.API
+	}{
+		{"hosted_vllm", "Qwen/Qwen3-32B", "", ai.APIOpenAICompletions},
+		{"hosted_vllm", "openai/gpt-oss-120b", types.FamilyOpenAI, ai.APIOpenAIResponses},
+		{"hosted_vllm", "moonshotai/Kimi-K2-Instruct", types.FamilyKimi, ai.APIOpenAICompletions},
+		{"hosted_vllm", "deepseek-ai/DeepSeek-V3", types.FamilyDeepSeek, ai.APIOpenAICompletions},
+		{"together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "", ai.APIOpenAICompletions},
+	}
+	for _, c := range cases {
+		t.Run(c.provider+" "+c.model, func(t *testing.T) {
+			makeRow := func(model string) string {
+				return fmt.Sprintf(`{"model_name":"public-alias","litellm_params":{"model":%q,"custom_llm_provider":%q},`+
+					`"model_info":{"mode":"chat","litellm_provider":%q}}`, model, c.provider, c.provider)
+			}
+			result, collected := modelInfoBDiscover(t, makeRow(c.model))
+			if len(result.Models) != 1 {
+				t.Fatalf("models = %d, want 1", len(result.Models))
+			}
+			model := modelInfoBFirst(t, result)
+			if model.ID != "public-alias" || model.API != c.api || model.LiteLLMBackendFamily != c.family {
+				t.Errorf("model = %s, want api %q family %q", modelInfoBJSON(model), c.api, c.family)
+			}
+			if strings.Contains(modelInfoBStderrJoined(collected), "conflicting deployment family evidence") {
+				t.Errorf("diagnostics = %q", collected.Lines())
+			}
+			prefixed, _ := modelInfoBDiscover(t, makeRow(c.provider+"/"+c.model))
+			prefixedModel := modelInfoBFirst(t, prefixed)
+			prefixedModel.BaseURL = model.BaseURL
+			if !reflect.DeepEqual(model, prefixedModel) {
+				t.Errorf("model = %s, prefixed model = %s", modelInfoBJSON(model), modelInfoBJSON(prefixedModel))
+			}
+		})
+	}
+}
+
 func TestModelInfoB_SelectsTheProtocolForAnOpenRouterModelNamespaceWithoutSupportedEndpointsLikeItsRoutingPrefixedForm(t *testing.T) {
 	cases := []struct {
 		model string

@@ -185,9 +185,9 @@ func TestModelProtocol(t *testing.T) {
 		})
 	}
 
-	t.Run("uses Chat Completions when the model prefix conflicts with custom_llm_provider", func(t *testing.T) {
-		entry := entryFrom(t, `{"model_name":"gpt-prod","litellm_params":{"model":"openai/gpt-5","custom_llm_provider":"fireworks_ai"},`+
-			`"model_info":{"mode":"chat"}}`)
+	t.Run("uses Chat Completions when the base_model prefix conflicts with custom_llm_provider", func(t *testing.T) {
+		entry := entryFrom(t, `{"model_name":"gpt-prod","litellm_params":{"model":"gpt-5","custom_llm_provider":"fireworks_ai"},`+
+			`"model_info":{"mode":"chat","base_model":"openai/gpt-5"}}`)
 		expectAPI(t, apiOf(t, "gpt-prod", entry, nil), ai.APIOpenAICompletions)
 	})
 }

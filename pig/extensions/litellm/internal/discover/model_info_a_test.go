@@ -104,11 +104,11 @@ func (c aCatalog) Lookup(_, id string) *catalog.PublicCatalogRecord {
 
 func aFloat(v float64) *float64 { return &v }
 
-func TestModelInfoA_WithholdsBackendFamilyWhenTheModelPrefixConflictsWithCustomLlmProvider(t *testing.T) {
+func TestModelInfoA_WithholdsBackendFamilyWhenTheBaseModelPrefixConflictsWithCustomLlmProvider(t *testing.T) {
 	base := aServe(t, aMap{
 		"model_name":     "gpt-prod",
-		"litellm_params": aMap{"model": "openai/gpt-5", "custom_llm_provider": "fireworks_ai"},
-		"model_info":     aMap{"mode": "chat"},
+		"litellm_params": aMap{"model": "gpt-5", "custom_llm_provider": "fireworks_ai"},
+		"model_info":     aMap{"mode": "chat", "base_model": "openai/gpt-5"},
 	})
 	options, _ := testOptions(t)
 	options.ModelsDev = nil
@@ -670,11 +670,11 @@ func TestModelInfoA_UsesCustomLlmProviderAsCatalogAuthorityForAnUnprefixedBacken
 	}
 }
 
-func TestModelInfoA_WithholdsCatalogAuthorityWhenCustomLlmProviderConflictsWithTheModelPrefix(t *testing.T) {
+func TestModelInfoA_WithholdsCatalogAuthorityWhenCustomLlmProviderConflictsWithTheBaseModelPrefix(t *testing.T) {
 	row := aMap{
 		"model_name":     "openai/gpt-4o",
-		"litellm_params": aMap{"model": "openai/gpt-4o", "custom_llm_provider": "anthropic"},
-		"model_info":     aMap{"mode": "chat"},
+		"litellm_params": aMap{"model": "gpt-4o", "custom_llm_provider": "anthropic"},
+		"model_info":     aMap{"mode": "chat", "base_model": "openai/gpt-4o"},
 	}
 	encoded, _ := json.Marshal(row)
 	if resolved := ResolveModelInfoCatalog(entryFrom(t, string(encoded)), nil); resolved != nil {
