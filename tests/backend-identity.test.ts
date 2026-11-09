@@ -73,17 +73,17 @@ describe("resolveBackendIdentity", () => {
     ).toEqual({ provider, modelId: "opaque", qualifiedId: `${provider}/opaque`, family });
   });
 
-  it("withholds identity when custom_llm_provider contradicts the model prefix", () => {
-    expect(
-      resolveBackendIdentity({
-        model_name: "route",
-        litellm_params: { model: "openai/gpt-4o", custom_llm_provider: "anthropic" },
-      }),
-    ).toBeUndefined();
-    // Routing providers conflict too, not just family vendors; so do prefixes we don't recognize.
-    for (const model of ["vertex_ai/claude-sonnet-4", "bedrock/anthropic.claude-3", "groq/llama-3.3-70b"]) {
+  it("withholds identity when a base_model or route-name prefix contradicts custom_llm_provider", () => {
+    // LiteLLM routes only the configured model, so these prefixes name a backend, not a namespace.
+    for (const model of ["openai/gpt-4o", "vertex_ai/claude-sonnet-4", "groq/llama-3.3-70b"]) {
       expect(
-        resolveBackendIdentity({ model_name: "route", litellm_params: { model, custom_llm_provider: "sagemaker" } }),
+        resolveBackendIdentity({
+          litellm_params: { model: "opaque", custom_llm_provider: "sagemaker" },
+          model_info: { base_model: model },
+        }),
+      ).toBeUndefined();
+      expect(
+        resolveBackendIdentity({ model_name: model, litellm_params: { custom_llm_provider: "sagemaker" } }),
       ).toBeUndefined();
     }
     // A generic adapter is transport, so it cannot contradict the prefix.
@@ -147,6 +147,31 @@ describe("resolveBackendIdentity", () => {
     expect(resolveCatalogProvider(row)).toBe("openrouter");
     expect(routesOnlyThrough(row, new Set(["anthropic", "openai", "azure", "azure_ai"]))).toBe(false);
     expect(row.litellm_params.model).toBe(model);
+  });
+
+  it.each([
+    ["hosted_vllm", "Qwen/Qwen3-32B", undefined],
+    ["hosted_vllm", "openai/gpt-oss-120b", "openai"],
+    ["hosted_vllm", "moonshotai/Kimi-K2-Instruct", "kimi"],
+    ["hosted_vllm", "deepseek-ai/DeepSeek-V3", "deepseek"],
+    ["together_ai", "meta-llama/Llama-3.3-70B-Instruct-Turbo", undefined],
+    ["sagemaker", "vertex_ai/claude-sonnet-4", "claude"],
+    ["sagemaker", "groq/llama-3.3-70b", undefined],
+  ] as const)("resolves %s model %s like its routing-prefixed form", (provider, model, family) => {
+    // LiteLLM prepends a differing custom_llm_provider, so both spellings are one deployment.
+    const row = { litellm_params: { model, custom_llm_provider: provider } };
+    const identity = resolveBackendIdentity(row);
+    expect(identity).toEqual({
+      provider,
+      modelId: model,
+      qualifiedId: `${provider}/${model}`,
+      ...(family ? { family } : {}),
+    });
+    expect(identity).toEqual(
+      resolveBackendIdentity({ litellm_params: { model: `${provider}/${model}`, custom_llm_provider: provider } }),
+    );
+    expect(resolveCatalogProvider(row)).toBe(provider);
+    expect(routesOnlyThrough(row, new Set(["anthropic", "openai", "azure", "azure_ai"]))).toBe(false);
   });
 
   it("normalizes the explicit OpenRouter provider without changing its model id", () => {

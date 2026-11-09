@@ -56,6 +56,7 @@ var (
 		"moonshotai": FamilyKimi,
 	}
 	// Fireworks' account-scoped ids ("accounts/fireworks/models/x") are model path, not a provider.
+	// Only base_model and the route name need it, as LiteLLM never routes them.
 	modelPathSegments = set("accounts")
 
 	claudePattern   = regexp.MustCompile(`(?:^|[./_-])(?:anthropic|claude|opus|sonnet|haiku|fable)(?:$|[./_:-])`)
@@ -130,20 +131,17 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 			prefixProvider = prefix
 		}
 	}
-	// custom_llm_provider is provider evidence in its own right: a differing prefix is a
-	// conflict unless it is a known model-path segment.
+	// custom_llm_provider is how LiteLLM routes a model, and it prepends itself to a configured
+	// model whose first segment differs (_get_llm_provider). That segment is model namespace,
+	// exactly as in the prefixed form: OpenRouter's "openai/gpt-4o", vLLM's "Qwen/Qwen3-32B".
+	// base_model and the route name are not routed, so there a differing prefix is a conflict.
+	// A generic adapter prefix ("azure_ai/") is not a namespace and stays stripped.
 	customProvider := strings.ToLower(wireString(row.customProvider))
 	if genericAdapters[customProvider] {
 		customProvider = ""
 	}
-	// OpenRouter uses vendor/model as its configured model id. Resolve it exactly like
-	// openrouter/vendor/model without mutating the row or reinterpreting an explicit base_model.
-	// A generic adapter prefix ("azure_ai/") is not a vendor namespace and stays stripped.
-	if baseModel == "" && configuredModel != "" && customProvider == "openrouter" && prefixProvider != "" && prefixProvider != "openrouter" {
-		prefixProvider = ""
-		slash = -1
-	} else if prefixProvider != "" && customProvider != "" && prefixProvider != customProvider {
-		if !modelPathSegments[prefixProvider] {
+	if prefixProvider != "" && customProvider != "" && prefixProvider != customProvider {
+		if (baseModel != "" || configuredModel == "") && !modelPathSegments[prefixProvider] {
 			return nil
 		}
 		prefixProvider = ""
