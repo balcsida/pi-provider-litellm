@@ -147,6 +147,7 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain('grouped[0].name === "grouped-vidaimock (incomplete metadata)"');
     expect(workflow).toContain("catalog?.provider === catalogProvider && catalog?.catalogModelId === catalogModelId");
     expect(workflow).toContain("const catalogCost = hasCatalogAuthority ? catalogs[index]?.cost : undefined");
+    expect(workflow).toContain('field === "cacheWrite" && catalogs[index]?.cost?.cacheWrite === 0 ? 0 : undefined');
     expect(workflow).toContain("complete ? Math.max(...values) : 0");
     expect(workflow).toContain("grouped[0].cost[field] === expectedCost[field]");
     expect(workflow).toContain("Object.values(grouped[0].thinkingLevelMap).every((value) => value === null)");
