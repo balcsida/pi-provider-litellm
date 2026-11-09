@@ -1060,6 +1060,21 @@ func resolvedCost(entry types.ModelInfoEntry, catalog *CatalogResolution, field 
 	return catalogCostField(catalog, field)
 }
 
+// unbilledCacheWrite is unbilledCacheWrite in src/model-groups.ts: LiteLLM omits
+// `cache_creation_input_token_cost` both for a backend that bills no cache write and for an
+// unpriced deployment, so a missing write price is zero only when the deployment's own catalog
+// entry prices it at zero (read even without catalog authority), or, without a catalog write
+// price, for a DeepSeek backend, which no host in Pi's catalog charges for cache writes.
+func unbilledCacheWrite(catalog *CatalogResolution) bool {
+	if catalog == nil {
+		return false
+	}
+	if catalog.Cost != nil && catalog.Cost.CacheWrite != nil {
+		return *catalog.Cost.CacheWrite == 0
+	}
+	return catalog.SemanticFamily == SemanticFamilyDeepSeek
+}
+
 func minOf(values []float64) float64 {
 	out := math.Inf(1)
 	for _, value := range values {
@@ -1419,6 +1434,10 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 		resolved := make([]float64, 0, n)
 		for i, entry := range deployments {
 			costValues[field][i] = resolvedCost(entry, catalogAuthority[i], field)
+			if costValues[field][i] == nil && field == costCacheWrite && unbilledCacheWrite(catalogs[i]) {
+				zero := 0.0
+				costValues[field][i] = &zero
+			}
 			if costValues[field][i] == nil {
 				complete = false
 			} else {
@@ -1426,42 +1445,10 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 			}
 		}
 		completeCostFields[field] = complete
+		hasCompleteCost = hasCompleteCost && complete
 		if complete {
 			costTotals[field] = maxOf(resolved...)
 		}
-	}
-	// LiteLLM reports cache pricing only for backends that bill it. A backend with no
-	// cache-write charge (DeepSeek- and OpenAI-style prompt caches) omits
-	// `cache_creation_input_token_cost` on every route shape, so the absence is a property
-	// of the backend, not missing evidence. Require the cache-write price only when it is
-	// priced somewhere, or when the backend family always bills it.
-	billsCacheWrite := semanticFamily == SemanticFamilyClaude
-	for _, catalog := range catalogs {
-		if catalog != nil && catalog.Cost != nil && catalog.Cost.CacheWrite != nil {
-			billsCacheWrite = true
-			break
-		}
-	}
-	for _, value := range costValues[costCacheWrite] {
-		if value != nil {
-			billsCacheWrite = true
-			break
-		}
-	}
-	if !billsCacheWrite {
-		for _, catalog := range catalogs {
-			if catalog != nil && (catalog.SemanticFamily == SemanticFamilyClaude || catalog.Provider == "anthropic") {
-				billsCacheWrite = true
-				break
-			}
-		}
-	}
-	hasCompleteCost = true
-	for field := costInput; field < costFieldCount; field++ {
-		if field == costCacheWrite && !billsCacheWrite {
-			continue
-		}
-		hasCompleteCost = hasCompleteCost && completeCostFields[field]
 	}
 	// A defaulted capability or limit is as much a gap as a missing price: the incomplete marker
 	// covers everything the reducer had to assume.
@@ -1476,16 +1463,11 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 	if hasCompleteCost && hasCatalogAuthority {
 		deploymentCosts := make([]ai.ModelCost, n)
 		for i, entry := range deployments {
-			// An unbilled cache-write charge is zero, not missing evidence.
-			cacheWrite := 0.0
-			if value := costValues[costCacheWrite][i]; value != nil {
-				cacheWrite = *value
-			}
 			base := ai.ModelCost{
 				Input:      *costValues[costInput][i],
 				Output:     *costValues[costOutput][i],
 				CacheRead:  *costValues[costCacheRead][i],
-				CacheWrite: cacheWrite,
+				CacheWrite: *costValues[costCacheWrite][i],
 			}
 			var explicit [costFieldCount]bool
 			explicitCount := 0

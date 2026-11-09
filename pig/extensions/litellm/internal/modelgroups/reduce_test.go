@@ -426,75 +426,56 @@ func TestReduceModelGroup(t *testing.T) {
 		}
 	})
 
-	t.Run("treats an unpriced cache-write charge as inapplicable when the backend never bills it", func(t *testing.T) {
-		// LiteLLM reports cache pricing only for backends that bill it. A DeepSeek- or
-		// OpenAI-style prompt cache has no write charge, so every shape of such a route omits
-		// `cache_creation_input_token_cost`. That gap is a property of the backend, not missing
-		// evidence, and it must not mark the model incomplete and hide its real limits.
-		noCacheWrite := func(entry types.ModelInfoEntry) *CatalogResolution {
-			backend := ""
-			if entry.ModelInfo != nil && entry.ModelInfo.BaseModel != "" {
-				backend = entry.ModelInfo.BaseModel
-			}
-			if entry.LiteLLMParams != nil && entry.LiteLLMParams.Model != "" {
-				backend = entry.LiteLLMParams.Model
-			}
-			switch backend {
-			case "deepseek/deepseek-v4.1-flash":
-				return &CatalogResolution{
-					Provider: "deepseek", SemanticFamily: SemanticFamilyDeepSeek,
-					Reasoning: b(true), Vision: b(false), ContextWindow: f(1_000_000), MaxTokens: f(384_000),
-					Cost: &CatalogCost{Input: f(0.3), Output: f(1.2), CacheRead: f(0.006)},
-				}
-			case "anthropic/claude-sonnet-4-6":
-				return &CatalogResolution{
-					Provider:  "anthropic",
-					Reasoning: b(true), Vision: b(true), ContextWindow: f(200_000), MaxTokens: f(64_000),
-					Cost: &CatalogCost{Input: f(3), Output: f(15), CacheRead: f(0.3)},
-				}
-			}
-			return nil
+	t.Run("treats a missing cache-write price as zero only with evidence the backend bills none", func(t *testing.T) {
+		// LiteLLM omits `cache_creation_input_token_cost` both for a backend that bills no
+		// cache write and for a deployment nobody priced. Only a DeepSeek backend, or a
+		// catalog entry pricing the write at zero, tells the two apart; GPT-5.6+ and other
+		// non-Claude backends bill writes too, so their missing price stays a gap.
+		catalogs := map[string]*CatalogResolution{
+			"deepseek/deepseek-v4.1-flash": {Provider: "deepseek", SemanticFamily: SemanticFamilyDeepSeek},
+			"anthropic/claude-sonnet-4-6":  {Provider: "anthropic", SemanticFamily: SemanticFamilyClaude},
+			"openai/gpt-6.1":               {Provider: "openai", SemanticFamily: SemanticFamilyOpenAI},
 		}
-		noCacheWriteDeployment := func(model, id, route string) types.ModelInfoEntry {
-			return row(func(e *types.ModelInfoEntry) { e.ModelName = route }, idMode(id, "chat"), info(func(i *types.ModelInfoDetails) {
+		resolve := func(entry types.ModelInfoEntry) *CatalogResolution {
+			if entry.LiteLLMParams == nil {
+				return nil
+			}
+			return catalogs[entry.LiteLLMParams.Model]
+		}
+		deployment := func(model string, cacheWrite *float64) types.ModelInfoEntry {
+			return row(idMode(model, "chat"), info(func(i *types.ModelInfoDetails) {
+				i.SupportsVision, i.SupportsReasoning = b(false), b(true)
+				i.MaxInputTokens, i.MaxOutputTokens = f(1_000_000), f(384_000)
 				i.InputCostPerToken, i.OutputCostPerToken = f(0.0000003), f(0.0000012)
-				i.CacheReadInputTokenCost, i.CacheCreationInputTokenCost = f(0.000000006), nil
+				i.CacheReadInputTokenCost, i.CacheCreationInputTokenCost = f(0.000000006), cacheWrite
 			}), backendModel(model))
 		}
 
-		deepseek := mustReduce(t, []types.ModelInfoEntry{
-			noCacheWriteDeployment("deepseek/deepseek-v4.1-flash", "ds", "commandcode/deepseek/deepseek-v4.1-flash"),
-		}, noCacheWrite)
+		deepseek := mustReduce(t, []types.ModelInfoEntry{deployment("deepseek/deepseek-v4.1-flash", nil)}, resolve)
 		eq(t, deepseek.Cost, modelCost(0.3, 1.2, 0.006, 0))
 		if !deepseek.HasCompleteCost || !deepseek.HasCompleteMetadata {
 			t.Fatalf("%s", dump(deepseek))
 		}
-
-		// A Claude backend always bills cache writes, so the same missing price stays a genuine gap.
-		claude := mustReduce(t, []types.ModelInfoEntry{
-			noCacheWriteDeployment("anthropic/claude-sonnet-4-6", "claude", "claude-route"),
-		}, noCacheWrite)
-		if claude.HasCompleteCost || claude.HasCompleteMetadata {
-			t.Fatalf("%s", dump(claude))
+		for _, model := range []string{"anthropic/claude-sonnet-4-6", "openai/gpt-6.1", "hosted_vllm/acme/foo-1"} {
+			gap := mustReduce(t, []types.ModelInfoEntry{deployment(model, nil)}, resolve)
+			if gap.HasCompleteCost || gap.HasCompleteMetadata || gap.Cost.CacheWrite != 0 {
+				t.Fatalf("%s: %s", model, dump(gap))
+			}
+		}
+		// The evidenced zero joins the group's maximum like any resolved price.
+		mixed := mustReduce(t, []types.ModelInfoEntry{
+			deployment("deepseek/deepseek-v4.1-flash", nil), deployment("anthropic/claude-sonnet-4-6", f(0.00000375)),
+		}, resolve)
+		if !mixed.HasCompleteCost || mixed.Cost.CacheWrite != 3.75 {
+			t.Fatalf("%s", dump(mixed))
 		}
 	})
 
-	t.Run("keeps the cache-write price required when an ambiguous route drops catalog authority", func(t *testing.T) {
+	t.Run("reads each deployment's catalog write price when an ambiguous route drops catalog authority", func(t *testing.T) {
 		// Two deployments resolve to different catalog identities, so the reducer withdraws
-		// catalog authority and every catalog price with it. A catalog that still declares a
-		// cache-write price keeps that field required, so the missing router price stays an
-		// incomplete marker instead of a silent zero.
-		declaredCatalog := func(entry types.ModelInfoEntry) *CatalogResolution {
-			modelID := "deepseek/model-a"
-			if entry.ModelInfo != nil && entry.ModelInfo.ID == "b" {
-				modelID = "deepseek/model-b"
-			}
-			return &CatalogResolution{
-				Provider: "deepseek", CatalogModelID: modelID, SemanticFamily: SemanticFamilyDeepSeek,
-				Reasoning: b(true), Vision: b(false), ContextWindow: f(1_000_000), MaxTokens: f(384_000),
-				Cost: &CatalogCost{Input: f(0.3), Output: f(1.2), CacheRead: f(0.006), CacheWrite: f(0.0009)},
-			}
-		}
+		// catalog authority and every catalog price with it. Each deployment's own catalog
+		// entry still says whether its backend bills cache writes: a nonzero price keeps the
+		// missing router price a gap, even for DeepSeek, and a zero price completes it.
 		router := func(id string) types.ModelInfoEntry {
 			return row(func(e *types.ModelInfoEntry) { e.ModelName = "ambiguous" }, idMode(id, "chat"), info(func(i *types.ModelInfoDetails) {
 				i.SupportsVision, i.SupportsReasoning = b(false), b(true)
@@ -503,10 +484,24 @@ func TestReduceModelGroup(t *testing.T) {
 				i.CacheReadInputTokenCost, i.CacheCreationInputTokenCost = f(0.000000006), nil
 			}))
 		}
+		reduce := func(cacheWrite float64) *ReducedModelGroup {
+			return mustReduce(t, []types.ModelInfoEntry{router("a"), router("b")}, func(entry types.ModelInfoEntry) *CatalogResolution {
+				modelID := "deepseek/model-a"
+				if entry.ModelInfo != nil && entry.ModelInfo.ID == "b" {
+					modelID = "deepseek/model-b"
+				}
+				return &CatalogResolution{
+					Provider: "deepseek", CatalogModelID: modelID, SemanticFamily: SemanticFamilyDeepSeek,
+					Cost: &CatalogCost{Input: f(0.3), Output: f(1.2), CacheRead: f(0.006), CacheWrite: f(cacheWrite)},
+				}
+			})
+		}
 
-		ambiguous := mustReduce(t, []types.ModelInfoEntry{router("a"), router("b")}, declaredCatalog)
-		if !ambiguous.CatalogAuthorityAmbiguous || ambiguous.HasCompleteCost || ambiguous.HasCompleteMetadata {
-			t.Fatalf("%s", dump(ambiguous))
+		if priced := reduce(0.0009); !priced.CatalogAuthorityAmbiguous || priced.HasCompleteCost || priced.HasCompleteMetadata {
+			t.Fatalf("%s", dump(priced))
+		}
+		if free := reduce(0); !free.CatalogAuthorityAmbiguous || !free.HasCompleteCost || !free.HasCompleteMetadata || free.Cost.CacheWrite != 0 {
+			t.Fatalf("%s", dump(free))
 		}
 	})
 

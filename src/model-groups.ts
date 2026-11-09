@@ -661,6 +661,16 @@ function resolvedCost(
   return explicitCost(entry, field) ?? catalog?.cost?.[field];
 }
 
+// LiteLLM omits `cache_creation_input_token_cost` for backends that bill no cache write, but
+// so does an unpriced deployment, so a missing write price is zero only with evidence: the
+// deployment's own catalog entry prices it at zero (read even when the route withholds
+// catalog authority), or, without a catalog write price, a DeepSeek backend, which no host
+// in Pi's catalog charges for cache writes.
+function unbilledCacheWrite(catalog: CatalogResolution | undefined): boolean {
+  const declared = catalog?.cost?.cacheWrite;
+  return declared === undefined ? catalog?.semanticFamily === "deepseek" : declared === 0;
+}
+
 function min(values: readonly number[]): number {
   return Math.min(...values);
 }
@@ -850,26 +860,14 @@ export function reduceModelGroup(
   const maxTokens = min(maxTokensEvidence.map((value) => value ?? DEFAULT_MAX_TOKENS));
 
   const costValues = COST_FIELDS.map((field) =>
-    deployments.map((entry, index) => resolvedCost(entry, catalogAuthority[index], field)),
+    deployments.map(
+      (entry, index) =>
+        resolvedCost(entry, catalogAuthority[index], field) ??
+        (field === "cacheWrite" && unbilledCacheWrite(catalogs[index]) ? 0 : undefined),
+    ),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
-  // LiteLLM reports cache pricing only for backends that bill it. A backend with no
-  // cache-write charge (DeepSeek- and OpenAI-style prompt caches) omits
-  // `cache_creation_input_token_cost` on every route shape, so the absence is a property
-  // of the backend, not missing evidence. Require a cache field only when it is priced
-  // somewhere, or when the backend family always bills it.
-  const cacheWritePriced =
-    costValues[3].some((value) => value !== undefined) ||
-    // A catalog that prices a cache write keeps the field required even when
-    // `catalogAuthority` withdrew its prices for an ambiguous route identity, so a
-    // dropped authority cannot turn a genuinely unknown write price into a complete one.
-    catalogs.some((catalog) => catalog?.cost?.cacheWrite !== undefined);
-  const billsCacheWrite =
-    cacheWritePriced ||
-    semanticFamily === "claude" ||
-    catalogs.some((catalog) => catalog?.semanticFamily === "claude" || catalog?.provider === "anthropic");
-  const requiredCostFields = COST_FIELDS.filter((field) => field !== "cacheWrite" || billsCacheWrite);
-  const hasCompleteCost = requiredCostFields.every((field) => completeCostFields[COST_FIELDS.indexOf(field)]);
+  const hasCompleteCost = completeCostFields.every(Boolean);
   // A defaulted capability or limit is as much a gap as a missing price: the
   // incomplete marker covers everything the reducer had to assume.
   const hasCompleteMetadata =
@@ -890,8 +888,7 @@ export function reduceModelGroup(
         input: costValues[0][index] as number,
         output: costValues[1][index] as number,
         cacheRead: costValues[2][index] as number,
-        // An unbilled cache-write charge is zero, not missing evidence.
-        cacheWrite: (costValues[3][index] ?? 0) as number,
+        cacheWrite: costValues[3][index] as number,
       };
       const explicitFields = new Set(COST_FIELDS.filter((field) => explicitCost(entry, field) !== undefined));
       const catalogTiers = catalogAuthority[index]?.cost?.tiers;

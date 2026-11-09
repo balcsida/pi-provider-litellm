@@ -815,82 +815,61 @@ describe("reduceModelGroup", () => {
     });
   });
 
-  it("treats an unpriced cache-write charge as inapplicable when the backend never bills it", () => {
-    // LiteLLM reports cache pricing only for backends that bill it. A DeepSeek- or
-    // OpenAI-style prompt cache has no write charge, so every shape of such a route
-    // omits `cache_creation_input_token_cost`. That gap is a property of the backend,
-    // not missing evidence, and it must not mark the model incomplete and hide the
-    // route's real limits from /model.
-    const noCacheWriteCatalog: CatalogResolver = (entry) => {
-      const backend = entry.model_info?.base_model ?? entry.litellm_params?.model;
-      if (backend === "deepseek/deepseek-v4.1-flash") {
-        return {
-          provider: "deepseek",
-          semanticFamily: "deepseek",
-          reasoning: true,
-          vision: false,
-          contextWindow: 1_000_000,
-          maxTokens: 384_000,
-          cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: undefined },
-        };
-      }
-      if (backend === "anthropic/claude-sonnet-4-6") {
-        return {
-          provider: "anthropic",
-          reasoning: true,
-          vision: true,
-          contextWindow: 200_000,
-          maxTokens: 64_000,
-          cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: undefined },
-        };
-      }
-      return undefined;
+  it("treats a missing cache-write price as zero only with evidence the backend bills none", () => {
+    // LiteLLM omits `cache_creation_input_token_cost` both for a backend that bills no
+    // cache write and for a deployment nobody priced. Only a DeepSeek backend, or a
+    // catalog entry pricing the write at zero, tells the two apart; GPT-5.6+ and other
+    // non-Claude backends bill writes too, so their missing price stays a gap.
+    const catalogs: Record<string, CatalogResolution> = {
+      "deepseek/deepseek-v4.1-flash": { provider: "deepseek", semanticFamily: "deepseek" },
+      "anthropic/claude-sonnet-4-6": { provider: "anthropic", semanticFamily: "claude" },
+      "openai/gpt-6.1": { provider: "openai", semanticFamily: "openai" },
     };
-
-    const deployment = (model: string, id: string) =>
+    const resolve: CatalogResolver = (entry) => catalogs[entry.litellm_params?.model ?? ""];
+    const deployment = (model: string, cacheWrite?: number) =>
       row({
-        model_name:
-          model === "anthropic/claude-sonnet-4-6" ? "claude-route" : "commandcode/deepseek/deepseek-v4.1-flash",
+        model_name: "route",
         model_info: {
-          id,
+          id: model,
           mode: "chat",
+          supports_vision: false,
+          supports_reasoning: true,
+          max_input_tokens: 1_000_000,
+          max_output_tokens: 384_000,
           input_cost_per_token: 0.0000003,
           output_cost_per_token: 0.0000012,
           cache_read_input_token_cost: 0.000000006,
-          cache_creation_input_token_cost: undefined,
+          cache_creation_input_token_cost: cacheWrite,
         },
         litellm_params: { model },
       });
 
-    expect(reduceModelGroup([deployment("deepseek/deepseek-v4.1-flash", "ds")], noCacheWriteCatalog)).toMatchObject({
+    expect(reduceModelGroup([deployment("deepseek/deepseek-v4.1-flash")], resolve)).toMatchObject({
       hasCompleteMetadata: true,
       hasCompleteCost: true,
       cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
     });
-
-    // A Claude backend always bills cache writes, so the same missing price stays a
-    // genuine gap instead of being assumed free.
-    expect(reduceModelGroup([deployment("anthropic/claude-sonnet-4-6", "claude")], noCacheWriteCatalog)).toMatchObject({
-      hasCompleteMetadata: false,
-      hasCompleteCost: false,
-    });
+    for (const model of ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1", "hosted_vllm/acme/foo-1"]) {
+      expect(reduceModelGroup([deployment(model)], resolve), model).toMatchObject({
+        hasCompleteMetadata: false,
+        hasCompleteCost: false,
+        cost: { cacheWrite: 0 },
+      });
+    }
+    // The evidenced zero joins the group's maximum like any resolved price.
+    expect(
+      reduceModelGroup(
+        [deployment("deepseek/deepseek-v4.1-flash"), deployment("anthropic/claude-sonnet-4-6", 0.00000375)],
+        resolve,
+      ),
+    ).toMatchObject({ hasCompleteCost: true, cost: { cacheWrite: 3.75 } });
   });
 
-  it("keeps the cache-write price required when an ambiguous route drops catalog authority", () => {
+  it("reads each deployment's catalog write price when an ambiguous route drops catalog authority", () => {
     // Two deployments resolve to different catalog identities, so the reducer withdraws
-    // catalog authority and every catalog price with it. A catalog that still declares a
-    // cache-write price must keep that field required, otherwise the missing router price
-    // becomes a silent zero instead of an incomplete marker.
-    const declaredCatalog: CatalogResolver = (entry) => ({
-      provider: "deepseek",
-      catalogModelId: entry.model_info?.id === "a" ? "deepseek/model-a" : "deepseek/model-b",
-      semanticFamily: "deepseek",
-      reasoning: true,
-      vision: false,
-      contextWindow: 1_000_000,
-      maxTokens: 384_000,
-      cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0.0009 },
-    });
+    // catalog authority and every catalog price with it. Each deployment's own catalog
+    // entry still says whether its backend bills cache writes: a nonzero price keeps the
+    // missing router price a gap, even for DeepSeek, and a zero price completes it.
     const router = (id: string) =>
       row({
         model_name: "ambiguous",
@@ -907,11 +886,25 @@ describe("reduceModelGroup", () => {
           cache_creation_input_token_cost: undefined,
         },
       });
+    const reduce = (cacheWrite: number) =>
+      reduceModelGroup([router("a"), router("b")], (entry) => ({
+        provider: "deepseek",
+        catalogModelId: entry.model_info?.id === "a" ? "deepseek/model-a" : "deepseek/model-b",
+        semanticFamily: "deepseek",
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite },
+      }));
 
-    const ambiguous = reduceModelGroup([router("a"), router("b")], declaredCatalog);
-    expect(ambiguous?.catalogAuthorityAmbiguous).toBe(true);
-    expect(ambiguous?.hasCompleteCost).toBe(false);
-    expect(ambiguous?.hasCompleteMetadata).toBe(false);
+    expect(reduce(0.0009)).toMatchObject({
+      catalogAuthorityAmbiguous: true,
+      hasCompleteCost: false,
+      hasCompleteMetadata: false,
+    });
+    expect(reduce(0)).toMatchObject({
+      catalogAuthorityAmbiguous: true,
+      hasCompleteCost: true,
+      hasCompleteMetadata: true,
+      cost: { cacheWrite: 0 },
+    });
   });
 
   it("applies public effort levels and LiteLLM overrides", () => {

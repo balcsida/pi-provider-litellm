@@ -89,6 +89,9 @@
   `catalogAuthority`, so only under unanimous authority) → the router's explicit figure versus the catalog figure
   (minimum by default, router-first under `LITELLM_TRUST_PROXY_LIMITS=1`) → default; the group minimum applies last.
   The Go port must mirror it.
+- A deployment's missing router cache-write price is zero only with evidence the backend bills none: its own catalog
+  entry's `cacheWrite` of `0` (read without catalog authority too; a nonzero one keeps the price unknown), otherwise
+  DeepSeek family evidence. No other family qualifies: Claude, GPT-5.6+, MiniMax, Nova and Qwen bill cache writes.
 - Keep `LITELLM_OFFLINE` and `LITELLM_DISCOVERY_TIMEOUT_MS` behavior compatible with README docs.
 - `/litellm-refresh` is the explicit refresh that Pi's `PI_OFFLINE` otherwise blocks. It passes `allowNetwork: true`
   but keeps the `LITELLM_OFFLINE=1` and zero-timeout gates, and models.dev stays off under `PI_OFFLINE`; do not widen it
