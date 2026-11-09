@@ -1125,6 +1125,48 @@ func TestModelInfoB_DiscoversACustomProviderModelNamespaceLikeItsRoutingPrefixed
 	}
 }
 
+func TestModelInfoB_DiscoversAVLLMHostedDeepSeekV4RowWhoseRouteNameRepeatsItsNamespacedModel(t *testing.T) {
+	// Sanitized production row from https://github.com/balcsida/pi-provider-litellm/issues/286#issuecomment-6747176770
+	makeRow := func(model string) string {
+		return `{"model_name":"deepseek-ai/DeepSeek-V4.1-Flash-1017","litellm_params":{` +
+			`"api_base":"https://vllm.example.com/v1","custom_llm_provider":"hosted_vllm",` +
+			`"allow_client_keepalive_override":false,"use_in_pass_through":false,"use_litellm_proxy":false,` +
+			`"use_xai_oauth":false,"merge_reasoning_content_in_choices":false,"tags":[],` +
+			`"model":"` + model + `","guardrails":[]},"model_info":{` +
+			`"input_cost_per_token":1.5e-07,"output_cost_per_token":6e-07,"cache_read_input_token_cost":3e-09,` +
+			`"db_model":true,"blocked":false,"access_groups":[],"direct_access":false,"supports_vision":true,` +
+			`"max_input_tokens":1000000,"max_output_tokens":256000,"supports_reasoning":true,` +
+			`"supported_modalities":["text","image"],"supports_tool_choice":true,"supports_prompt_caching":true,` +
+			`"supports_response_schema":true,"supports_system_messages":true,"supports_function_calling":true,` +
+			`"supports_native_streaming":true,"supports_assistant_prefill":true,"supports_low_reasoning_effort":true,` +
+			`"supports_max_reasoning_effort":true,"supports_high_reasoning_effort":true,` +
+			`"supports_none_reasoning_effort":true,"supports_xhigh_reasoning_effort":true}}`
+	}
+	result, collected := modelInfoBDiscover(t, makeRow("deepseek-ai/DeepSeek-V4.1-Flash-1017"))
+	if len(result.Models) != 1 {
+		t.Fatalf("models = %d, want 1", len(result.Models))
+	}
+	model := modelInfoBFirst(t, result)
+	if model.ID != "deepseek-ai/DeepSeek-V4.1-Flash-1017" || model.API != ai.APIOpenAICompletions ||
+		model.LiteLLMBackendFamily != types.FamilyDeepSeek {
+		t.Errorf("model = %s", modelInfoBJSON(model))
+	}
+	// No accepted `reasoning_effort` or `thinking`: DeepSeek names its own carrier, so the opt-in does not apply.
+	if model.Compat == nil || !modelInfoBBool(model.Compat.RequiresReasoningContentOnAssistantMessages, true) ||
+		!modelInfoBBool(model.Compat.SupportsReasoningEffort, false) {
+		t.Errorf("compat = %s", modelInfoBJSON(model.Compat))
+	}
+	if strings.Contains(modelInfoBStderrJoined(collected), "conflicting deployment family evidence") {
+		t.Errorf("diagnostics = %q", collected.Lines())
+	}
+	prefixed, _ := modelInfoBDiscover(t, makeRow("hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash-1017"))
+	prefixedModel := modelInfoBFirst(t, prefixed)
+	prefixedModel.BaseURL = model.BaseURL
+	if !reflect.DeepEqual(model, prefixedModel) {
+		t.Errorf("model = %s, prefixed model = %s", modelInfoBJSON(model), modelInfoBJSON(prefixedModel))
+	}
+}
+
 func TestModelInfoB_SelectsTheProtocolForAnOpenRouterModelNamespaceWithoutSupportedEndpointsLikeItsRoutingPrefixedForm(t *testing.T) {
 	cases := []struct {
 		model string
