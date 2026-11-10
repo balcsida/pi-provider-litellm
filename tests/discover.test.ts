@@ -3923,6 +3923,70 @@ describe("discoverModels via /model/info", () => {
     },
   );
 
+  it("discovers a vLLM-hosted DeepSeek V4 row whose route name repeats its namespaced model", async () => {
+    // Sanitized production row from https://github.com/balcsida/pi-provider-litellm/issues/286#issuecomment-6747176770
+    const entry = {
+      model_name: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      litellm_params: {
+        api_base: "https://vllm.example.com/v1",
+        custom_llm_provider: "hosted_vllm",
+        allow_client_keepalive_override: false,
+        use_in_pass_through: false,
+        use_litellm_proxy: false,
+        use_xai_oauth: false,
+        merge_reasoning_content_in_choices: false,
+        tags: [],
+        model: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        guardrails: [],
+      },
+      model_info: {
+        input_cost_per_token: 1.5e-7,
+        output_cost_per_token: 6e-7,
+        cache_read_input_token_cost: 3e-9,
+        db_model: true,
+        blocked: false,
+        access_groups: [],
+        direct_access: false,
+        supports_vision: true,
+        max_input_tokens: 1000000,
+        max_output_tokens: 256000,
+        supports_reasoning: true,
+        supported_modalities: ["text", "image"],
+        supports_tool_choice: true,
+        supports_prompt_caching: true,
+        supports_response_schema: true,
+        supports_system_messages: true,
+        supports_function_calling: true,
+        supports_native_streaming: true,
+        supports_assistant_prefill: true,
+        supports_low_reasoning_effort: true,
+        supports_max_reasoning_effort: true,
+        supports_high_reasoning_effort: true,
+        supports_none_reasoning_effort: true,
+        supports_xhigh_reasoning_effort: true,
+      },
+    };
+    const diagnostics: string[] = [];
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [entry] }) });
+    const options = { report: (message: string) => diagnostics.push(message) };
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]).toMatchObject({
+      id: entry.model_name,
+      api: "openai-completions",
+      litellmBackendFamily: "deepseek",
+      // No accepted `reasoning_effort` or `thinking`: DeepSeek names its own carrier, so the opt-in does not apply.
+      compat: { requiresReasoningContentOnAssistantMessages: true, supportsReasoningEffort: false },
+    });
+    expect(diagnostics.join("\n")).not.toContain("conflicting deployment family evidence");
+
+    entry.litellm_params.model = `hosted_vllm/${entry.litellm_params.model}`;
+    const prefixed = await discoverModels("https://litellm.example.com", "sk-test", options);
+    expect(result.models).toEqual(prefixed.models);
+  });
+
   it.each([
     ["openai/gpt-4o", "openai-responses"],
     ["openai/gpt-oss-120b", "openai-responses"],
