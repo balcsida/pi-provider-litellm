@@ -268,7 +268,10 @@ jobs:
                   typeof perToken === "number" && Number.isFinite(perToken) && perToken >= 0
                     ? perToken * 1_000_000
                     : undefined;
-                return [field, explicit ?? catalogCost?.[field]];
+                // A missing write price is zero when the deployment's own catalog prices writes at zero, even
+                // without catalog authority. The rule's DeepSeek half never applies: neither deployment is DeepSeek.
+                const unbilled = field === "cacheWrite" && catalogs[index]?.cost?.cacheWrite === 0 ? 0 : undefined;
+                return [field, explicit ?? catalogCost?.[field] ?? unbilled];
               }),
             );
           });

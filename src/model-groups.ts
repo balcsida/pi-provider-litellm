@@ -661,6 +661,16 @@ function resolvedCost(
   return explicitCost(entry, field) ?? catalog?.cost?.[field];
 }
 
+// LiteLLM omits `cache_creation_input_token_cost` for backends that bill no cache write, but
+// so does an unpriced deployment, so a missing write price is zero only with evidence: the
+// deployment's own catalog entry prices it at zero (read even when the route withholds
+// catalog authority), or, without a catalog write price, a DeepSeek backend, which no host
+// in Pi's catalog charges for cache writes.
+function unbilledCacheWrite(catalog: CatalogResolution | undefined): boolean {
+  const declared = catalog?.cost?.cacheWrite;
+  return declared === undefined ? catalog?.semanticFamily === "deepseek" : declared === 0;
+}
+
 function min(values: readonly number[]): number {
   return Math.min(...values);
 }
@@ -850,7 +860,11 @@ export function reduceModelGroup(
   const maxTokens = min(maxTokensEvidence.map((value) => value ?? DEFAULT_MAX_TOKENS));
 
   const costValues = COST_FIELDS.map((field) =>
-    deployments.map((entry, index) => resolvedCost(entry, catalogAuthority[index], field)),
+    deployments.map(
+      (entry, index) =>
+        resolvedCost(entry, catalogAuthority[index], field) ??
+        (field === "cacheWrite" && unbilledCacheWrite(catalogs[index]) ? 0 : undefined),
+    ),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
   const hasCompleteCost = completeCostFields.every(Boolean);

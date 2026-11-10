@@ -1060,6 +1060,21 @@ func resolvedCost(entry types.ModelInfoEntry, catalog *CatalogResolution, field 
 	return catalogCostField(catalog, field)
 }
 
+// unbilledCacheWrite is unbilledCacheWrite in src/model-groups.ts: LiteLLM omits
+// `cache_creation_input_token_cost` both for a backend that bills no cache write and for an
+// unpriced deployment, so a missing write price is zero only when the deployment's own catalog
+// entry prices it at zero (read even without catalog authority), or, without a catalog write
+// price, for a DeepSeek backend, which no host in Pi's catalog charges for cache writes.
+func unbilledCacheWrite(catalog *CatalogResolution) bool {
+	if catalog == nil {
+		return false
+	}
+	if catalog.Cost != nil && catalog.Cost.CacheWrite != nil {
+		return *catalog.Cost.CacheWrite == 0
+	}
+	return catalog.SemanticFamily == SemanticFamilyDeepSeek
+}
+
 func minOf(values []float64) float64 {
 	out := math.Inf(1)
 	for _, value := range values {
@@ -1419,6 +1434,10 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 		resolved := make([]float64, 0, n)
 		for i, entry := range deployments {
 			costValues[field][i] = resolvedCost(entry, catalogAuthority[i], field)
+			if costValues[field][i] == nil && field == costCacheWrite && unbilledCacheWrite(catalogs[i]) {
+				zero := 0.0
+				costValues[field][i] = &zero
+			}
 			if costValues[field][i] == nil {
 				complete = false
 			} else {

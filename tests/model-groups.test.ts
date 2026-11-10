@@ -815,6 +815,98 @@ describe("reduceModelGroup", () => {
     });
   });
 
+  it("treats a missing cache-write price as zero only with evidence the backend bills none", () => {
+    // LiteLLM omits `cache_creation_input_token_cost` both for a backend that bills no
+    // cache write and for a deployment nobody priced. Only a DeepSeek backend, or a
+    // catalog entry pricing the write at zero, tells the two apart; GPT-5.6+ and other
+    // non-Claude backends bill writes too, so their missing price stays a gap.
+    const catalogs: Record<string, CatalogResolution> = {
+      "deepseek/deepseek-v4.1-flash": { provider: "deepseek", semanticFamily: "deepseek" },
+      "anthropic/claude-sonnet-4-6": { provider: "anthropic", semanticFamily: "claude" },
+      "openai/gpt-6.1": { provider: "openai", semanticFamily: "openai" },
+    };
+    const resolve: CatalogResolver = (entry) => catalogs[entry.litellm_params?.model ?? ""];
+    const deployment = (model: string, cacheWrite?: number) =>
+      row({
+        model_name: "route",
+        model_info: {
+          id: model,
+          mode: "chat",
+          supports_vision: false,
+          supports_reasoning: true,
+          max_input_tokens: 1_000_000,
+          max_output_tokens: 384_000,
+          input_cost_per_token: 0.0000003,
+          output_cost_per_token: 0.0000012,
+          cache_read_input_token_cost: 0.000000006,
+          cache_creation_input_token_cost: cacheWrite,
+        },
+        litellm_params: { model },
+      });
+
+    expect(reduceModelGroup([deployment("deepseek/deepseek-v4.1-flash")], resolve)).toMatchObject({
+      hasCompleteMetadata: true,
+      hasCompleteCost: true,
+      cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+    });
+    for (const model of ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1", "hosted_vllm/acme/foo-1"]) {
+      expect(reduceModelGroup([deployment(model)], resolve), model).toMatchObject({
+        hasCompleteMetadata: false,
+        hasCompleteCost: false,
+        cost: { cacheWrite: 0 },
+      });
+    }
+    // The evidenced zero joins the group's maximum like any resolved price.
+    expect(
+      reduceModelGroup(
+        [deployment("deepseek/deepseek-v4.1-flash"), deployment("anthropic/claude-sonnet-4-6", 0.00000375)],
+        resolve,
+      ),
+    ).toMatchObject({ hasCompleteCost: true, cost: { cacheWrite: 3.75 } });
+  });
+
+  it("reads each deployment's catalog write price when an ambiguous route drops catalog authority", () => {
+    // Two deployments resolve to different catalog identities, so the reducer withdraws
+    // catalog authority and every catalog price with it. Each deployment's own catalog
+    // entry still says whether its backend bills cache writes: a nonzero price keeps the
+    // missing router price a gap, even for DeepSeek, and a zero price completes it.
+    const router = (id: string) =>
+      row({
+        model_name: "ambiguous",
+        model_info: {
+          id,
+          mode: "chat",
+          supports_vision: false,
+          supports_reasoning: true,
+          max_input_tokens: 1_000_000,
+          max_output_tokens: 384_000,
+          input_cost_per_token: 0.0000003,
+          output_cost_per_token: 0.0000012,
+          cache_read_input_token_cost: 0.000000006,
+          cache_creation_input_token_cost: undefined,
+        },
+      });
+    const reduce = (cacheWrite: number) =>
+      reduceModelGroup([router("a"), router("b")], (entry) => ({
+        provider: "deepseek",
+        catalogModelId: entry.model_info?.id === "a" ? "deepseek/model-a" : "deepseek/model-b",
+        semanticFamily: "deepseek",
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite },
+      }));
+
+    expect(reduce(0.0009)).toMatchObject({
+      catalogAuthorityAmbiguous: true,
+      hasCompleteCost: false,
+      hasCompleteMetadata: false,
+    });
+    expect(reduce(0)).toMatchObject({
+      catalogAuthorityAmbiguous: true,
+      hasCompleteCost: true,
+      hasCompleteMetadata: true,
+      cost: { cacheWrite: 0 },
+    });
+  });
+
   it("applies public effort levels and LiteLLM overrides", () => {
     const result = reduceModelGroup(
       [
