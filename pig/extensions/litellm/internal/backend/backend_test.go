@@ -113,6 +113,18 @@ func TestResolveBackendIdentity(t *testing.T) {
 		if got == nil || *got != want {
 			t.Fatalf("got %+v want %+v", got, want)
 		}
+		// Both transport spellings resolve the same way.
+		entry.LiteLLMParams = &types.ModelInfoParams{CustomLLMProvider: "text-completion-openai"}
+		if spelled := ResolveIdentity(entry); spelled == nil || spelled.Family != FamilyDeepSeek || spelled.ModelID != "deepseek/deepseek-v4.1-flash" {
+			t.Errorf("text-completion-openai transport: got %+v", spelled)
+		}
+		// A transport label in the differing segment names no vendor and must not reach the family scan.
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "openai/qwen3", LiteLLMProvider: "text-completion-openai"}
+		entry.LiteLLMParams = &types.ModelInfoParams{Model: "openai/qwen3", CustomLLMProvider: "text-completion-openai"}
+		if label := ResolveIdentity(entry); label == nil || label.Family != "" || label.ModelID != "qwen3" {
+			t.Errorf("transport label reached the family scan: %+v", label)
+		}
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "deepseek/deepseek-v4.1-flash", LiteLLMProvider: "openai"}
 		entry.LiteLLMParams = &types.ModelInfoParams{CustomLLMProvider: "sagemaker"}
 		if conflicting := ResolveIdentity(entry); conflicting != nil {
 			t.Errorf("routing provider conflict resolved as %+v", conflicting)

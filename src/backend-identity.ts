@@ -89,9 +89,17 @@ export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity
     const namespacesOverTransport = OPENAI_TRANSPORT_PROVIDERS.has(customProvider);
     if ((baseModel || !configuredModel) && !MODEL_PATH_SEGMENTS.has(prefixProvider) && !namespacesOverTransport)
       return undefined;
-    raw = `${customProvider}/${raw}`;
-    slash = customProvider.length;
-    prefixProvider = customProvider;
+    if (namespacesOverTransport && OPENAI_TRANSPORT_PROVIDERS.has(prefixProvider)) {
+      // Both segments name the same transport ("openai/qwen3" on a "text-completion-openai"
+      // route), so the prefix carries no vendor and must not reach the family scan: dropping it
+      // keeps "qwen3" familyless instead of reading it as OpenAI. A transport prefix on a real
+      // provider is vendor evidence and stays ("openai/gpt-4o" on OpenRouter).
+      prefixProvider = undefined;
+    } else {
+      raw = `${customProvider}/${raw}`;
+      slash = customProvider.length;
+      prefixProvider = customProvider;
+    }
   }
   const provider = prefixProvider ?? customProvider;
   const modelId = slash > 0 ? raw.slice(slash + 1) : raw;

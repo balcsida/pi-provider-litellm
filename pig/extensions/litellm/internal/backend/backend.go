@@ -150,9 +150,15 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 		if (baseModel != "" || configuredModel == "") && !modelPathSegments[prefixProvider] && !namespacesOverTransport {
 			return nil
 		}
-		raw = customProvider + "/" + raw
-		slash = len(customProvider)
-		prefixProvider = customProvider
+		if namespacesOverTransport && openAITransportProviders[prefixProvider] {
+			// Both segments name the same transport, so the prefix carries no vendor and must not
+			// reach the family scan. A transport prefix on a real provider stays.
+			prefixProvider = ""
+		} else {
+			raw = customProvider + "/" + raw
+			slash = len(customProvider)
+			prefixProvider = customProvider
+		}
 	}
 	provider := firstNonEmpty(prefixProvider, customProvider)
 	modelID := raw

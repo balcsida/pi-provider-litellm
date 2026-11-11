@@ -134,6 +134,26 @@ describe("resolveBackendIdentity", () => {
       family: "deepseek",
     });
     expect(resolveCatalogProvider(row)).toBe("openai");
+    // Both transport spellings resolve the same way.
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        litellm_params: { ...row.litellm_params, custom_llm_provider: "text-completion-openai" },
+      }),
+    ).toMatchObject({
+      provider: "text-completion-openai",
+      modelId: "deepseek/deepseek-v4.1-flash",
+      family: "deepseek",
+    });
+    // A transport label in the differing segment names no vendor, so it must not reach the family
+    // scan: "openai/qwen3" stays familyless instead of being read as OpenAI.
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        model_info: { base_model: "openai/qwen3", litellm_provider: "text-completion-openai" },
+        litellm_params: { model: "openai/qwen3", custom_llm_provider: "text-completion-openai" },
+      }),
+    ).toEqual({ provider: "text-completion-openai", modelId: "qwen3", qualifiedId: "text-completion-openai/qwen3" });
     expect(
       resolveBackendIdentity({
         ...row,
