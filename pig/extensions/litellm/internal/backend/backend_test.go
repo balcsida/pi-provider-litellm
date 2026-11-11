@@ -103,6 +103,21 @@ func TestResolveBackendIdentity(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+	t.Run("reads a vendor namespace on the openai transport for a base_model", func(t *testing.T) {
+		// A live LiteLLM deployment routes through the OpenAI-compatible transport while
+		// base_model carries the vendor namespace; the identity must resolve, not be withheld.
+		entry := row("commandcode/deepseek/deepseek-v4.1-flash", &types.ModelInfoParams{CustomLLMProvider: "openai"})
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "deepseek/deepseek-v4.1-flash", LiteLLMProvider: "openai"}
+		got := ResolveIdentity(entry)
+		want := Identity{"openai", "deepseek/deepseek-v4.1-flash", "openai/deepseek/deepseek-v4.1-flash", FamilyDeepSeek}
+		if got == nil || *got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		entry.LiteLLMParams = &types.ModelInfoParams{CustomLLMProvider: "sagemaker"}
+		if conflicting := ResolveIdentity(entry); conflicting != nil {
+			t.Errorf("routing provider conflict resolved as %+v", conflicting)
+		}
+	})
 	t.Run("resolves the OpenRouter model namespace without a routing prefix", func(t *testing.T) {
 		cases := []struct {
 			model  string

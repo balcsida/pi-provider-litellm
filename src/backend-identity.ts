@@ -17,6 +17,10 @@ export interface BackendIdentity {
 
 const GENERIC_ADAPTERS = new Set(["azure", "azure_ai", "custom_openai", "openai_like"]);
 const GENERIC_CATALOG_PROVIDERS = new Set([...GENERIC_ADAPTERS, "openai", "text-completion-openai"]);
+// LiteLLM's `openai` provider is an OpenAI-compatible transport, so the name carries no backend
+// vendor. A model or base_model id there may namespace itself by vendor
+// (`commandcode/deepseek/deepseek-v4.1-flash`) without contradicting the routing provider.
+const OPENAI_TRANSPORT_PROVIDERS = new Set(["openai", "text-completion-openai"]);
 // Providers whose name alone settles the family. `openai` is deliberately absent: LiteLLM
 // uses that provider for any OpenAI-compatible server, so it says nothing about the model.
 const PROVIDER_FAMILIES: Readonly<Record<string, BackendFamily>> = {
@@ -80,7 +84,11 @@ export function resolveBackendIdentity(row: BackendIdentityRow): BackendIdentity
   const custom = wireString(row.litellm_params?.custom_llm_provider)?.toLowerCase();
   const customProvider = custom && !GENERIC_ADAPTERS.has(custom) ? custom : undefined;
   if (prefixProvider && customProvider && prefixProvider !== customProvider) {
-    if ((baseModel || !configuredModel) && !MODEL_PATH_SEGMENTS.has(prefixProvider)) return undefined;
+    // An OpenAI-compatible transport says nothing about the backend, so a differing first segment
+    // on a base_model is a vendor namespace there too; only a real routing provider contradicts it.
+    const namespacesOverTransport = OPENAI_TRANSPORT_PROVIDERS.has(customProvider);
+    if ((baseModel || !configuredModel) && !MODEL_PATH_SEGMENTS.has(prefixProvider) && !namespacesOverTransport)
+      return undefined;
     raw = `${customProvider}/${raw}`;
     slash = customProvider.length;
     prefixProvider = customProvider;

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3852,6 +3853,28 @@ describe("discoverModels via /model/info", () => {
       reasoning: false,
     });
     expect(stderr.mock.calls.flat().join(" ")).toContain("conflicting-authority");
+  });
+
+  it("keeps a vendor-namespaced DeepSeek base_model on the openai transport out of the family conflict", async () => {
+    // Shape taken from a live proxy: the route is routed through the OpenAI-compatible transport
+    // while base_model carries the vendor namespace, and the deployment bills no cache write.
+    const row = JSON.parse(readFileSync(new URL("./fixtures/real-deepseek-row.json", import.meta.url), "utf8"));
+    const diagnostics: string[] = [];
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [row] }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", {
+      report: (message: string) => diagnostics.push(message),
+    });
+
+    expect(diagnostics.join("\n")).not.toContain("conflicting deployment family evidence");
+    expect(result.models[0]).toMatchObject({
+      name: "commandcode/deepseek/deepseek-v4.1-flash",
+      litellmBackendFamily: "deepseek",
+      contextWindow: 1000000,
+      maxTokens: 384000,
+      reasoning: true,
+    });
+    expect(result.models[0]?.input).toContain("image");
   });
 
   it("applies complete Moonshot compat to a vanity route from unanimous deployment evidence", async () => {

@@ -117,6 +117,31 @@ describe("resolveBackendIdentity", () => {
     });
   });
 
+  it("reads a vendor namespace on the openai transport instead of withholding the identity", () => {
+    // LiteLLM publishes this deployment with base_model `deepseek/deepseek-v4.1-flash` while
+    // routing it through the OpenAI-compatible transport. The prefix names the vendor, so the
+    // identity resolves; a routing provider that is not an OpenAI-compatible transport still
+    // contradicts an unrecognised first segment.
+    const row = {
+      model_name: "commandcode/deepseek/deepseek-v4.1-flash",
+      litellm_params: { model: "commandcode/deepseek/deepseek-v4.1-flash", custom_llm_provider: "openai" },
+      model_info: { base_model: "deepseek/deepseek-v4.1-flash", litellm_provider: "openai" },
+    };
+    expect(resolveBackendIdentity(row)).toEqual({
+      provider: "openai",
+      modelId: "deepseek/deepseek-v4.1-flash",
+      qualifiedId: "openai/deepseek/deepseek-v4.1-flash",
+      family: "deepseek",
+    });
+    expect(resolveCatalogProvider(row)).toBe("openai");
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        litellm_params: { ...row.litellm_params, custom_llm_provider: "sagemaker" },
+      }),
+    ).toBeUndefined();
+  });
+
   it.each([
     ["openai/gpt-4o", "openai"],
     ["deepseek/deepseek-v4.1-flash", "deepseek"],
