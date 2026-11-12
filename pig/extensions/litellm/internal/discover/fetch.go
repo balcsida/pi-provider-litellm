@@ -247,6 +247,7 @@ var (
 	reportedDefaultedContextRoutes  reportedSet
 	reportedAmbiguousRoutes         reportedSet
 	reportedIncompatibleModeRoutes  reportedSet
+	reportedUnreadVersionRoutes     reportedSet
 )
 
 func reportBoundedRoutes(set *reportedSet, routes []string, describe func(count int) string, options Options) {
@@ -294,6 +295,15 @@ func reportIncompatibleDeploymentModes(routes []string, options Options) {
 	reportBoundedRoutes(&reportedIncompatibleModeRoutes, unique(routes), func(count int) string {
 		return fmt.Sprintf("LiteLLM discovery: %d route group(s) mix chat-style and explicitly incompatible deployment modes; "+
 			"the routes are withheld because not every deployment can accept chat requests", count)
+	}, options)
+}
+
+// reportUnreadProxyVersion: the version decides these routes' transport, and nothing else tells an
+// operator why they stay on the workaround when the proxy does not say which release it is.
+func reportUnreadProxyVersion(routes []string, options Options) {
+	reportBoundedRoutes(&reportedUnreadVersionRoutes, unique(routes), func(count int) string {
+		return fmt.Sprintf("LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); %d azure_ai "+
+			"route(s) whose transport depends on it stay on Chat Completions", count)
 	}, options)
 }
 

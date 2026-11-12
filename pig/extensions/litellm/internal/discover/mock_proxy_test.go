@@ -168,6 +168,7 @@ func resetReportedRoutes() {
 		&reportedDefaultedContextRoutes,
 		&reportedAmbiguousRoutes,
 		&reportedIncompatibleModeRoutes,
+		&reportedUnreadVersionRoutes,
 	} {
 		set.reset()
 	}

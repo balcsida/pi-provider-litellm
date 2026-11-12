@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 13,
+      litellmDiscoveryVersion: 14,
     });
   });
 
@@ -5442,7 +5442,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 13,
+          litellmDiscoveryVersion: 14,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,
@@ -5952,6 +5952,232 @@ describe("discoverModels proxy version gate", () => {
     expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toHaveLength(1);
   });
 
+  // LiteLLM reports Claude on Azure AI Foundry under the generic `azure_ai` adapter, with no base_model.
+  const azureAiClaude = {
+    model_name: "claude-opus-5-5",
+    litellm_params: { model: "azure_ai/claude-opus-5-5" },
+    model_info: {
+      mode: "chat",
+      litellm_provider: "azure_ai",
+      supported_endpoints: null,
+      base_model: null,
+      supports_reasoning: true,
+    },
+  };
+  const anthropicClaude = {
+    model_name: "claude-opus-5-5",
+    litellm_params: { model: "anthropic/claude-opus-5-5", custom_llm_provider: "anthropic" },
+    model_info: { mode: "chat", litellm_provider: "anthropic", supports_reasoning: true },
+  };
+
+  it.each([
+    ["1.106.4", "anthropic-messages"],
+    ["1.80.12", "anthropic-messages"],
+    ["1.80.11", "openai-completions"],
+    ["1.80.12-rc.1", "openai-completions"],
+    ["not-a-version", "openai-completions"],
+    [undefined, "openai-completions"],
+  ])("selects the azure_ai Claude transport for a proxy reporting %s", async (version, api) => {
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [azureAiClaude] }),
+      [VERSION_PROBE]: versionReply(version),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "claude-opus-5-5", api }]);
+  });
+
+  it("keeps azure_ai Claude on Chat when the proxy does not answer the version probe", async () => {
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [azureAiClaude] }) });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "claude-opus-5-5", api: "openai-completions" }]);
+  });
+
+  it("sends azure_ai Claude over conservative adaptive Messages at unchanged prices and limits", async () => {
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: [azureAiClaude] }) });
+    const chat = (await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false })).models[0]!;
+    vi.restoreAllMocks();
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: [azureAiClaude] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+    const model = { ...result.models[0]!, provider: "litellm", baseUrl: "https://proxy.example.com" };
+
+    expect(model).toMatchObject({
+      api: "anthropic-messages",
+      reasoning: true,
+      promptCache: { short: 300, long: 3600 },
+    });
+    // Azure-hosted Claude rejects thinking.block_binding, and nothing proves strict tools off Anthropic's own API.
+    expect(model.compat).toEqual({
+      forceAdaptiveThinking: true,
+      supportsMidConvoEffort: false,
+      supportsTemperature: false,
+    });
+    expect(getSupportedThinkingLevels(model)).toContain("high");
+    expect(getSupportedThinkingLevels(model)).not.toContain("off");
+    expect(chat.api).toBe("openai-completions");
+    expect(model).toMatchObject({
+      cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    });
+    expect({ cost: model.cost, contextWindow: model.contextWindow, maxTokens: model.maxTokens }).toEqual({
+      cost: chat.cost,
+      contextWindow: chat.contextWindow,
+      maxTokens: chat.maxTokens,
+    });
+  });
+
+  it.each([
+    ["1.106.4", "anthropic-messages"],
+    [undefined, "openai-completions"],
+  ])(
+    "lets an azure_ai deployment decide a group shared with Anthropic on a proxy reporting %s",
+    async (version, api) => {
+      mockEndpoints({
+        "/model/info": () => jsonResponse(200, { data: [anthropicClaude, azureAiClaude] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+
+      const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+      expect(models).toHaveLength(1);
+      expect(models[0]?.api).toBe(api);
+      if (api === "anthropic-messages") {
+        expect(models[0]?.compat).toEqual({
+          forceAdaptiveThinking: true,
+          supportsMidConvoEffort: false,
+          supportsTemperature: false,
+        });
+      }
+    },
+  );
+
+  it.each([
+    [
+      "an azure_ai Claude route whose endpoint list omits Messages",
+      { ...azureAiClaude, model_info: { ...azureAiClaude.model_info, supported_endpoints: ["/v1/chat/completions"] } },
+    ],
+    [
+      "an azure_ai Claude route of an unknown generation",
+      { ...azureAiClaude, litellm_params: { model: "azure_ai/claude-opus-9-9" } },
+    ],
+    [
+      // LiteLLM serves native Messages only when the configured model contains "claude".
+      "an azure_ai Claude route whose deployment name omits claude",
+      { ...azureAiClaude, litellm_params: { model: "azure_ai/opus-5-5" } },
+    ],
+    ["an azure_ai GPT route", { ...azureAiClaude, model_name: "gpt", litellm_params: { model: "azure_ai/gpt-5" } }],
+    [
+      "an azure_ai DeepSeek route",
+      { ...azureAiClaude, model_name: "deepseek", litellm_params: { model: "azure_ai/DeepSeek-V3.1" } },
+    ],
+    [
+      "an azure_ai Llama route",
+      { ...azureAiClaude, model_name: "llama", litellm_params: { model: "azure_ai/Llama-3.3-70B-Instruct" } },
+    ],
+  ])("keeps %s on Chat without asking for the version", async (_label, row) => {
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(200, { data: [row] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ api }) => api)).toEqual(["openai-completions"]);
+    expect(urls).toEqual(["https://litellm.example.com/model/info"]);
+  });
+
+  it("does not ask for the version when a sibling deployment keeps azure_ai Claude on Chat", async () => {
+    const urls = recordUrls({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [azureAiClaude, { ...azureAiClaude, litellm_params: { model: "azure_ai/gpt-5" } }],
+        }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ api }) => api)).toEqual(["openai-completions"]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it.each([
+    ["omits the version header", { [VERSION_PROBE]: versionReply() }],
+    ["reports an unreadable version", { [VERSION_PROBE]: versionReply("not-a-version") }],
+    ["does not answer the version probe", {}],
+  ])("warns once, naming the dependent routes, when the proxy %s", async (_label, routes) => {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const rows = [
+      { ...azureAiClaude, model_name: `claude-${suffix}` },
+      { ...azureAiRoute, model_name: `astra-${suffix}` },
+      { model_name: `plain-${suffix}`, litellm_params: { model: "openai/gpt-5" } },
+    ];
+    const diagnostics: string[] = [];
+    const options = { modelsDev: false, report: (message: string) => diagnostics.push(message) };
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }), ...routes });
+
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(diagnostics).toEqual([
+      "LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); 2 azure_ai route(s) " +
+        `whose transport depends on it stay on Chat Completions: claude-${suffix}, astra-${suffix}`,
+    ]);
+  });
+
+  it.each(["1.106.4", "1.80.11", "1.103.0-rc.1"])(
+    "does not warn about the version when the proxy reports %s",
+    async (version) => {
+      const diagnostics: string[] = [];
+      mockEndpoints({
+        "/model/info": () => jsonResponse(200, { data: [azureAiClaude, azureAiRoute] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+
+      await discoverModels("https://litellm.example.com", "sk-test", {
+        modelsDev: false,
+        report: (message: string) => diagnostics.push(message),
+      });
+
+      expect(diagnostics.filter((message) => message.includes("version"))).toEqual([]);
+    },
+  );
+
+  it("warns about ids expanded from an azure_ai wildcard route and routes found through /health", async () => {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const diagnostics: string[] = [];
+    const options = { modelsDev: false, report: (message: string) => diagnostics.push(message) };
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ ...azureAiClaude, model_name: `${suffix}/*`, litellm_params: { model: "azure_ai/*" } }],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: `${suffix}/claude-opus-5-5` }, { id: `${suffix}/gpt-5` }] }),
+    });
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+    vi.restoreAllMocks();
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: `health-${suffix}`, model_id: "astra" }] }),
+      "litellm_model_id=astra": () =>
+        jsonResponse(200, { data: [{ ...azureAiRoute, model_name: `health-${suffix}` }] }),
+    });
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(
+      diagnostics.filter((message) => message.includes("version")).map((message) => message.split(": ")[2]),
+    ).toEqual([`${suffix}/claude-opus-5-5`, `health-${suffix}`]);
+  });
+
   it("reports the version it read, and none when it did not ask", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [azureAiRoute] }),
@@ -6035,6 +6261,68 @@ describe("discoverModels proxy version gate", () => {
     expect(older.models.map(({ id, api }) => ({ id, api }))).toEqual([
       { id: "foundry/gpt-6-astra", api: "openai-completions" },
     ]);
+  });
+
+  it("applies the version once to Claude ids expanded from an azure_ai wildcard route", async () => {
+    const wildcard = { ...azureAiClaude, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const expand = async (version: string) => {
+      const urls = recordUrls({
+        "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+        "/v1/models": () => jsonResponse(200, { data: [{ id: "foundry/claude-opus-5-5" }, { id: "foundry/gpt-5" }] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+      const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+      return {
+        apis: models.map(({ id, api }) => ({ id, api })),
+        probes: urls.filter((url) => url.endsWith(VERSION_PROBE)),
+      };
+    };
+
+    const current = await expand("1.106.4");
+    vi.restoreAllMocks();
+    const older = await expand("1.80.11");
+
+    expect(current.apis).toEqual([
+      { id: "foundry/claude-opus-5-5", api: "anthropic-messages" },
+      { id: "foundry/gpt-5", api: "openai-completions" },
+    ]);
+    expect(older.apis).toEqual([
+      { id: "foundry/claude-opus-5-5", api: "openai-completions" },
+      { id: "foundry/gpt-5", api: "openai-completions" },
+    ]);
+    expect(current.probes).toHaveLength(1);
+  });
+
+  it("does not ask for the version when only non-Claude ids expand from an azure_ai wildcard route", async () => {
+    const wildcard = { ...azureAiClaude, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "foundry/gpt-5" }] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "foundry/gpt-5", api: "openai-completions" }]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it("keeps azure_ai Claude found through /health on Chat without asking for the version", async () => {
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "claude-opus-5-5", model_id: "opus" }] }),
+      "litellm_model_id=opus": () => jsonResponse(200, { data: [azureAiClaude] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "claude-opus-5-5", api: "openai-completions" },
+    ]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
   });
 });
 
@@ -7084,7 +7372,12 @@ describe("native Messages discovery", () => {
     ["a hosted deployment", [hostedClaude]],
     ["a group that mixes direct and hosted deployments", [directClaude, hostedClaude]],
   ])("keeps adaptive Messages but declares no mid-conversation effort for %s", async (_name, rows) => {
-    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: rows }),
+      // A deployment routed through azure_ai takes Messages only from LiteLLM v1.80.12.
+      "/v1/responses/resp_version_probe": () =>
+        new Response("{}", { status: 400, headers: { "x-litellm-version": "1.106.4" } }),
+    });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     const model = { ...result.models[0]!, provider: "litellm", baseUrl: "https://proxy.example.com" };
@@ -7095,6 +7388,20 @@ describe("native Messages discovery", () => {
       compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: false },
     });
     expect(getSupportedThinkingLevels(model)).toContain("high");
+  });
+
+  it.each([
+    ["a hosted deployment", [hostedClaude]],
+    ["a group that mixes direct and hosted deployments", [directClaude, hostedClaude]],
+  ])("keeps %s on Chat when the proxy does not report its version", async (_name, rows) => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "team-claude", api: "openai-completions" },
+    ]);
   });
 
   it("leaves mid-conversation effort undeclared for a route only through Anthropic", async () => {

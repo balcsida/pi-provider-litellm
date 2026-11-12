@@ -63,7 +63,8 @@ func mapFromModelInfoGroup(
 				generation = semantic
 			}
 		}
-		if options.withholdMessages {
+		if options.withholdMessages ||
+			(messagesAwaitProxyVersion(entry) && !proxyversion.AtLeast(options.proxyVersion, azureAIMessagesFloor)) {
 			resolution.MessagesCompat, resolution.MessagesStrictTools = nil, false
 		}
 		if family != "" {
@@ -281,8 +282,18 @@ func claudePromptCache() ai.ModelPromptCache {
 // publishesVersionGatedTransport: whether a group that will be published has its transport decided by
 // the proxy version. Mapping without collectors leaves no diagnostic behind, and whether a group is
 // published does not depend on the version.
-func publishesVersionGatedTransport(group []types.ModelInfoEntry, publicCatalog catalog.PublicCatalog) bool {
-	return slices.ContainsFunc(group, transportAwaitsProxyVersion) && mapFromModelInfoGroup(group, publicCatalog, nil) != nil
+func publishesVersionGatedTransport(group []types.ModelInfoEntry, publicCatalog catalog.PublicCatalog, allowMessages bool) bool {
+	if slices.ContainsFunc(group, transportAwaitsProxyVersion) {
+		return mapFromModelInfoGroup(group, publicCatalog, nil) != nil
+	}
+	// Messages awaits the version only where a proxy at the floor would get it: an endpoint list or a
+	// sibling deployment can keep the group on Chat regardless.
+	if !allowMessages || !slices.ContainsFunc(group, messagesAwaitProxyVersion) {
+		return false
+	}
+	floor := &proxyversion.Version{Major: azureAIMessagesFloor[0], Minor: azureAIMessagesFloor[1], Patch: azureAIMessagesFloor[2]}
+	model := mapFromModelInfoGroup(group, publicCatalog, &groupOptions{proxyVersion: floor})
+	return model != nil && model.API == ai.APIAnthropicMessages
 }
 
 // mapFromModelsList: an evidence-free fallback entry has no deployment or adapter evidence. Its route
