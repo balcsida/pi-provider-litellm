@@ -4,6 +4,40 @@ LiteLLM proxy native Provider extension for [Pi](https://pi.dev). Pi 0.99.2+ is 
 
 Discovers models from self-hosted LiteLLM proxies and registers them under Pi providers. The default provider is `litellm`; optional aliases can register additional LiteLLM providers with separate credentials. Supports `/login litellm`, LiteLLM MCP tools, LiteLLM Skills Gateway prompt injection, budget status, image generation and classifier routes, and Google ADC token auth. A [Go port](#pig) brings it to PiG, without image generation and classifier routes. Tries `/model/info` first (admin endpoint with rich metadata), falls back to `/v1/models` (OpenAI-compatible) on 401/403/404 or an empty list, then tries `/health` plus per-endpoint `/model/info` for older LiteLLM proxies.
 
+<p align="center"><strong>Trusted* by engineers** at***</strong></p>
+
+<p align="center">
+  <a href="https://github.com/Netflix"><img src="https://github.com/Netflix.png?size=96" width="48" height="48" alt="Netflix" title="Netflix"></a>
+  <a href="https://github.com/elastic"><img src="https://github.com/elastic.png?size=96" width="48" height="48" alt="Elastic" title="Elastic"></a>
+  <a href="https://github.com/dbt-labs"><img src="https://github.com/dbt-labs.png?size=96" width="48" height="48" alt="dbt Labs" title="dbt Labs"></a>
+  <a href="https://github.com/verily-src"><img src="https://github.com/verily-src.png?size=96" width="48" height="48" alt="Verily" title="Verily"></a>
+  <a href="https://github.com/GoodNotes"><img src="https://github.com/GoodNotes.png?size=96" width="48" height="48" alt="Goodnotes" title="Goodnotes"></a>
+  <a href="https://github.com/Rocket-Money"><img src="https://github.com/Rocket-Money.png?size=96" width="48" height="48" alt="Rocket Money" title="Rocket Money"></a>
+  <a href="https://github.com/tata1mg"><img src="https://github.com/tata1mg.png?size=96" width="48" height="48" alt="Tata 1mg" title="Tata 1mg"></a>
+  <a href="https://github.com/invitae"><img src="https://github.com/invitae.png?size=96" width="48" height="48" alt="Invitae" title="Invitae"></a>
+  <a href="https://github.com/AOEpeople"><img src="https://github.com/AOEpeople.png?size=96" width="48" height="48" alt="AOE" title="AOE"></a>
+  <a href="https://github.com/anjaraeu"><img src="https://github.com/anjaraeu.png?size=96" width="48" height="48" alt="Anjara" title="Anjara"></a>
+  <a href="https://github.com/automatearmy"><img src="https://github.com/automatearmy.png?size=96" width="48" height="48" alt="Automate Army" title="Automate Army"></a>
+  <a href="https://github.com/Baur-Software"><img src="https://github.com/Baur-Software.png?size=96" width="48" height="48" alt="Baur Software" title="Baur Software"></a>
+  <a href="https://github.com/braincompany"><img src="https://github.com/braincompany.png?size=96" width="48" height="48" alt="Brain Co." title="Brain Co."></a>
+  <a href="https://github.com/cin-ufpe"><img src="https://github.com/cin-ufpe.png?size=96" width="48" height="48" alt="CIn-UFPE" title="CIn-UFPE"></a>
+  <a href="https://github.com/envite-consulting"><img src="https://github.com/envite-consulting.png?size=96" width="48" height="48" alt="envite consulting" title="envite consulting"></a>
+  <a href="https://github.com/Franken-Tech"><img src="https://github.com/Franken-Tech.png?size=96" width="48" height="48" alt="Franken.Tech" title="Franken.Tech"></a>
+  <a href="https://github.com/hyperfiddle"><img src="https://github.com/hyperfiddle.png?size=96" width="48" height="48" alt="Hyperfiddle" title="Hyperfiddle"></a>
+  <a href="https://github.com/Possehl-Digital-Services"><img src="https://github.com/Possehl-Digital-Services.png?size=96" width="48" height="48" alt="Possehl Digital Services" title="Possehl Digital Services"></a>
+  <a href="https://github.com/Premian-Labs"><img src="https://github.com/Premian-Labs.png?size=96" width="48" height="48" alt="Premia" title="Premia"></a>
+  <a href="https://github.com/Pronovix"><img src="https://github.com/Pronovix.png?size=96" width="48" height="48" alt="Pronovix" title="Pronovix"></a>
+  <a href="https://github.com/WikiTeq"><img src="https://github.com/WikiTeq.png?size=96" width="48" height="48" alt="WikiTeq" title="WikiTeq"></a>
+</p>
+
+<p align="center"><sub>
+* "Trusted" means somebody starred the repo, opened an issue or sent a PR. Yes, bug reports count as trust.<br>
+** Could be managers, I didn't check.<br>
+*** Going by the company field of their GitHub profile, which everybody updates right after changing jobs.<br>
+None of these companies has endorsed this extension, paid for it, or most likely heard of it. There is no enterprise plan.<br>
+Want your logo here? Star the repo and wait for me to notice. Want it gone? <a href="https://github.com/balcsida/pi-provider-litellm/issues/new">Open an issue</a>, which, sadly, counts as trust.
+</sub></p>
+
 ## Install
 
 ```bash
