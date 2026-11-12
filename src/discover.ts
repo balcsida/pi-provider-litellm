@@ -452,8 +452,8 @@ const CLAUDE_CAPABLE_ADAPTERS = new Set([
 const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
 
 // LiteLLM picks its native azure_ai Messages config by `"claude" in model.lower()`
-// on the configured model alone. A deployment named otherwise is bridged to Chat
-// Completions whatever its `base_model` says, so it stays on Chat here too.
+// on the configured model alone and bridges a deployment named otherwise to Chat
+// Completions, so a row it reports as `azure_ai` stays on Chat here too.
 function isAzureAiClaudeDeployment(entry: ModelInfoEntry): boolean {
   return wireString(entry.litellm_params?.model)?.toLowerCase().includes("claude") === true;
 }

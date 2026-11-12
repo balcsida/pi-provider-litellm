@@ -287,8 +287,8 @@ var claudeCapableAdapters = map[string]bool{
 var claudeModelPattern = regexp.MustCompile(`(?i)(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])`)
 
 // isAzureAIClaudeDeployment: LiteLLM picks its native azure_ai Messages config by
-// `"claude" in model.lower()` on the configured model alone. A deployment named otherwise is bridged
-// to Chat Completions whatever its `base_model` says, so it stays on Chat here too.
+// `"claude" in model.lower()` on the configured model alone and bridges a deployment named otherwise
+// to Chat Completions, so a row it reports as `azure_ai` stays on Chat here too.
 func isAzureAIClaudeDeployment(entry types.ModelInfoEntry) bool {
 	return entry.LiteLLMParams != nil && strings.Contains(strings.ToLower(entry.LiteLLMParams.Model), "claude")
 }

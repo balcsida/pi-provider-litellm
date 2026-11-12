@@ -1376,6 +1376,59 @@ func TestFallbacks_VersionGateAppliesTheVersionToIDsExpandedFromAnAzureAIWildcar
 	fbExpectStrings(t, fbIDAPIs(older.Models), "foundry/gpt-6-astra=openai-completions")
 }
 
+const fbAzureAIClaudeWildcard = `{"model_name":"foundry/*","litellm_params":{"model":"azure_ai/*"},"model_info":` + fbAzureAIClaudeInfo + `}`
+
+func TestFallbacks_VersionGateAppliesTheVersionOnceToClaudeIDsExpandedFromAnAzureAIWildcardRoute(t *testing.T) {
+	expand := func(version string) (*types.DiscoveryResult, *mockProxy) {
+		result, proxy, _ := fbDiscoverProxy(t, map[string]http.HandlerFunc{
+			"/model/info":  fbData(fbAzureAIClaudeWildcard),
+			"/v1/models":   fbData(`{"id":"foundry/claude-opus-5-5"}`, `{"id":"foundry/gpt-5"}`),
+			fbVersionProbe: fbVersionReply(version),
+		})
+		return result, proxy
+	}
+
+	current, proxy := expand("1.106.4")
+	older, _ := expand("1.80.11")
+
+	fbExpectStrings(t, fbIDAPIs(current.Models), "foundry/claude-opus-5-5=anthropic-messages", "foundry/gpt-5=openai-completions")
+	fbExpectStrings(t, fbIDAPIs(older.Models), "foundry/claude-opus-5-5=openai-completions", "foundry/gpt-5=openai-completions")
+	if got := fbCount(proxy.Requests(), fbVersionProbe); got != 1 {
+		t.Errorf("version probes = %d, want 1", got)
+	}
+}
+
+func TestFallbacks_VersionGateDoesNotAskForTheVersionWhenOnlyNonClaudeIDsExpandFromAnAzureAIWildcardRoute(t *testing.T) {
+	result, proxy, _ := fbDiscoverProxy(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaudeWildcard),
+		"/v1/models":   fbData(`{"id":"foundry/gpt-5"}`),
+		fbVersionProbe: fbVersionReply("1.106.4"),
+	})
+
+	fbExpectStrings(t, fbIDAPIs(result.Models), "foundry/gpt-5=openai-completions")
+	if got := fbCount(proxy.Requests(), fbVersionProbe); got != 0 {
+		t.Errorf("version probes = %d, want 0", got)
+	}
+}
+
+func TestFallbacks_VersionGateKeepsAzureAIClaudeFoundThroughHealthOnChatWithoutAskingForTheVersion(t *testing.T) {
+	result, proxy, _ := fbDiscoverProxy(t, map[string]http.HandlerFunc{
+		"/model/info":           fbStatus(404),
+		"/v1/models":            fbStatus(404),
+		"/health":               fbHealth(`{"model":"claude-opus-5-5","model_id":"opus"}`),
+		"litellm_model_id=opus": fbData(fbAzureAIClaude),
+		fbVersionProbe:          fbVersionReply("1.106.4"),
+	})
+
+	if result.Source != types.SourceHealth {
+		t.Errorf("source = %s", result.Source)
+	}
+	fbExpectStrings(t, fbIDAPIs(result.Models), "claude-opus-5-5=openai-completions")
+	if got := fbCount(proxy.Requests(), fbVersionProbe); got != 0 {
+		t.Errorf("version probes = %d, want 0", got)
+	}
+}
+
 // ---- discoverModels response-mode models ----
 
 func TestFallbacks_ResponseModeRetainsUpstreamAutomaticAPIChoicesAndNeverSelectsMessages(t *testing.T) {

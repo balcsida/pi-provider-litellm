@@ -6193,6 +6193,68 @@ describe("discoverModels proxy version gate", () => {
       { id: "foundry/gpt-6-astra", api: "openai-completions" },
     ]);
   });
+
+  it("applies the version once to Claude ids expanded from an azure_ai wildcard route", async () => {
+    const wildcard = { ...azureAiClaude, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const expand = async (version: string) => {
+      const urls = recordUrls({
+        "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+        "/v1/models": () => jsonResponse(200, { data: [{ id: "foundry/claude-opus-5-5" }, { id: "foundry/gpt-5" }] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+      const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+      return {
+        apis: models.map(({ id, api }) => ({ id, api })),
+        probes: urls.filter((url) => url.endsWith(VERSION_PROBE)),
+      };
+    };
+
+    const current = await expand("1.106.4");
+    vi.restoreAllMocks();
+    const older = await expand("1.80.11");
+
+    expect(current.apis).toEqual([
+      { id: "foundry/claude-opus-5-5", api: "anthropic-messages" },
+      { id: "foundry/gpt-5", api: "openai-completions" },
+    ]);
+    expect(older.apis).toEqual([
+      { id: "foundry/claude-opus-5-5", api: "openai-completions" },
+      { id: "foundry/gpt-5", api: "openai-completions" },
+    ]);
+    expect(current.probes).toHaveLength(1);
+  });
+
+  it("does not ask for the version when only non-Claude ids expand from an azure_ai wildcard route", async () => {
+    const wildcard = { ...azureAiClaude, model_name: "foundry/*", litellm_params: { model: "azure_ai/*" } };
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(200, { data: [wildcard] }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "foundry/gpt-5" }] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const { models } = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(models.map(({ id, api }) => ({ id, api }))).toEqual([{ id: "foundry/gpt-5", api: "openai-completions" }]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
+
+  it("keeps azure_ai Claude found through /health on Chat without asking for the version", async () => {
+    const urls = recordUrls({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: "claude-opus-5-5", model_id: "opus" }] }),
+      "litellm_model_id=opus": () => jsonResponse(200, { data: [azureAiClaude] }),
+      [VERSION_PROBE]: versionReply("1.106.4"),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("health");
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "claude-opus-5-5", api: "openai-completions" },
+    ]);
+    expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
+  });
 });
 
 describe("discoverModels response-mode models", () => {
