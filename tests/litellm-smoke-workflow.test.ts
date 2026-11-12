@@ -94,6 +94,10 @@ describe("LiteLLM smoke workflow config", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       if (url.endsWith("/model/info")) return Response.json({ data: deployments });
+      // The azure_ai Claude route takes Messages only from LiteLLM v1.80.12; the pinned image is newer.
+      if (url.endsWith("/v1/responses/resp_version_probe")) {
+        return Response.json({ error: {} }, { status: 400, headers: { "x-litellm-version": "1.106.6" } });
+      }
       throw new Error(`unexpected URL: ${url}`);
     });
 
@@ -121,12 +125,14 @@ describe("LiteLLM smoke workflow", () => {
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm-database@sha256:");
     expect(workflow).toContain("docker.litellm.ai/berriai/litellm@sha256:");
     expect(workflow).toContain(
-      "LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock",
+      "LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude azure-ai/vidaimock-claude" +
+        " vidaimock-responses grouped-vidaimock",
     );
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_SOURCE: model_info");
     expect(workflow).toContain(
       "LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions" +
-        " anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses" +
+        " anthropic/vidaimock-claude=anthropic-messages azure-ai/vidaimock-claude=anthropic-messages" +
+        " vidaimock-responses=openai-responses" +
         " grouped-vidaimock=openai-completions",
     );
     expect(workflow).toContain("LITELLM_SMOKE_EXPECT_RESPONSE_COST:");
@@ -138,6 +144,13 @@ describe("LiteLLM smoke workflow", () => {
                 mode: chat
                 litellm_provider: anthropic
               litellm_params:`);
+    expect(workflow).toContain(`- model_name: azure-ai/vidaimock-claude
+              model_info:
+                mode: chat
+                litellm_provider: azure_ai
+              litellm_params:`);
+    expect(workflow).toContain("model: azure_ai/claude-sonnet-4-6");
+    expect(workflow).toContain("api_base: http://host.docker.internal:8100/v1/messages");
     expect(workflow).toContain("model: openai/gpt-4o-mini");
     expect(workflow).toContain("model: anthropic/claude-sonnet-4-6");
     expect(workflow.match(/^[ \t]*- model_name: grouped-vidaimock[ \t]*$/gm)).toHaveLength(2);

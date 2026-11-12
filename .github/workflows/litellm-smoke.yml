@@ -36,10 +36,10 @@ jobs:
       LITELLM_LICENSE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE || '' }}
       LITELLM_DATABASE_URL: postgresql://litellm:litellm@host.docker.internal:5432/litellm
       LITELLM_IMAGE: ${{ github.event_name != 'pull_request' && secrets.LITELLM_LICENSE != '' && 'docker.litellm.ai/berriai/litellm-database@sha256:7ef0e78fe00ad5ea7ea45666cc1d1f02cb7076aee69091543bf397de52db33ce' || 'docker.litellm.ai/berriai/litellm@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06' }}
-      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude vidaimock-responses grouped-vidaimock
+      LITELLM_SMOKE_MODELS: vidaimock-openai anthropic/vidaimock-claude azure-ai/vidaimock-claude vidaimock-responses grouped-vidaimock
       LITELLM_SMOKE_EXPECT_SOURCE: model_info
-      LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
-      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=present vidaimock-responses=present grouped-vidaimock=present
+      LITELLM_SMOKE_EXPECT_APIS: vidaimock-openai=openai-completions anthropic/vidaimock-claude=anthropic-messages azure-ai/vidaimock-claude=anthropic-messages vidaimock-responses=openai-responses grouped-vidaimock=openai-completions
+      LITELLM_SMOKE_EXPECT_RESPONSE_COST: vidaimock-openai=present anthropic/vidaimock-claude=present azure-ai/vidaimock-claude=present vidaimock-responses=present grouped-vidaimock=present
       LITELLM_SMOKE_REQUIRE_ALL_PROTOCOLS: '1'
       LITELLM_CLI_SMOKE_MODEL: vidaimock-openai
       LITELLM_CLI_SMOKE_MODEL_ANTHROPIC: anthropic/vidaimock-claude
@@ -152,6 +152,17 @@ jobs:
                 # /v1/messages at all.
                 model: anthropic/claude-sonnet-4-6
                 api_base: http://host.docker.internal:8100
+                api_key: sk-vidaimock
+            - model_name: azure-ai/vidaimock-claude
+              model_info:
+                mode: chat
+                litellm_provider: azure_ai
+              litellm_params:
+                # Claude on Azure AI Foundry. The api_base ends in /v1/messages
+                # because LiteLLM uses such a base as is and otherwise appends
+                # /anthropic/v1/messages, a path VidaiMock does not serve.
+                model: azure_ai/claude-sonnet-4-6
+                api_base: http://host.docker.internal:8100/v1/messages
                 api_key: sk-vidaimock
             - model_name: vidaimock-responses
               model_info:
