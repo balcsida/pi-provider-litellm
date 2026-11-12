@@ -1300,6 +1300,80 @@ func TestFallbacks_VersionGateDoesNotAskForTheVersionWhenASiblingDeploymentKeeps
 	}
 }
 
+// fbVersionLines keeps the diagnostics about the proxy version.
+func fbVersionLines(stderr *reports) []string {
+	lines := []string{}
+	for _, line := range stderr.Lines() {
+		if strings.Contains(line, "version") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func TestFallbacks_VersionGateWarnsOnceNamingTheDependentRoutesWhenTheProxyCannotReportAVersion(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		probe http.HandlerFunc
+	}{
+		{"omits the version header", fbVersionReply("")},
+		{"reports an unreadable version", fbVersionReply("not-a-version")},
+		{"does not answer the version probe", fbDropConnection},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			base := mockEndpoints(t, map[string]http.HandlerFunc{
+				"/model/info": fbData(fbAzureAIClaude, fbAzureAIRoute,
+					`{"model_name":"plain","litellm_params":{"model":"openai/gpt-5"}}`),
+				fbVersionProbe: tc.probe,
+			})
+			options, stderr := testOptions(t)
+
+			for range 2 {
+				if _, err := DiscoverModels(context.Background(), base, "sk-test", options); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			fbExpectStrings(t, fbVersionLines(stderr),
+				"LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); 2 azure_ai route(s) "+
+					"whose transport depends on it stay on Chat Completions: claude-opus-5-5, gpt-6-astra\n")
+		})
+	}
+}
+
+func TestFallbacks_VersionGateDoesNotWarnAboutTheVersionWhenTheProxyReportsOne(t *testing.T) {
+	for _, version := range []string{"1.106.4", "1.80.11", "1.103.0-rc.1"} {
+		t.Run(version, func(t *testing.T) {
+			_, stderr := fbDiscover(t, map[string]http.HandlerFunc{
+				"/model/info":  fbData(fbAzureAIClaude, fbAzureAIRoute),
+				fbVersionProbe: fbVersionReply(version),
+			})
+
+			fbExpectStrings(t, fbVersionLines(stderr))
+		})
+	}
+}
+
+func TestFallbacks_VersionGateWarnsAboutIDsExpandedFromAnAzureAIWildcardRouteAndRoutesFoundThroughHealth(t *testing.T) {
+	_, wildcard := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaudeWildcard),
+		"/v1/models":   fbData(`{"id":"foundry/claude-opus-5-5"}`, `{"id":"foundry/gpt-5"}`),
+		fbVersionProbe: fbDropConnection,
+	})
+	_, health := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info":            fbStatus(404),
+		"/v1/models":             fbStatus(404),
+		"/health":                fbHealth(`{"model":"gpt-6-astra","model_id":"astra"}`),
+		"litellm_model_id=astra": fbData(fbAzureAIRoute),
+		fbVersionProbe:           fbDropConnection,
+	})
+
+	const prefix = "LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); 1 azure_ai route(s) " +
+		"whose transport depends on it stay on Chat Completions: "
+	fbExpectStrings(t, fbVersionLines(wildcard), prefix+"foundry/claude-opus-5-5\n")
+	fbExpectStrings(t, fbVersionLines(health), prefix+"gpt-6-astra\n")
+}
+
 func TestFallbacks_VersionGateReportsTheVersionItReadAndNoneWhenItDidNotAsk(t *testing.T) {
 	asked, _ := fbDiscover(t, map[string]http.HandlerFunc{
 		"/model/info":  fbData(fbAzureAIRoute),
@@ -2332,7 +2406,11 @@ func TestFallbacks_NativeMessagesKeepsAdaptiveMessagesButDeclaresNoMidConversati
 		{"a group that mixes direct and hosted deployments", []string{fbDirectClaude, fbHostedClaude}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, _ := fbDiscover(t, map[string]http.HandlerFunc{"/model/info": fbData(tc.rows...)})
+			result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+				"/model/info": fbData(tc.rows...),
+				// A deployment routed through azure_ai takes Messages only from LiteLLM v1.80.12.
+				fbVersionProbe: fbVersionReply("1.106.4"),
+			})
 
 			model := result.Models[0]
 			if model.API != ai.APIAnthropicMessages || !model.Reasoning || model.Compat == nil ||
@@ -2342,6 +2420,25 @@ func TestFallbacks_NativeMessagesKeepsAdaptiveMessagesButDeclaresNoMidConversati
 			if levels := fbSupportedLevels(model); !slices.Contains(levels, ai.ThinkingHigh) {
 				t.Errorf("levels = %v, want high", levels)
 			}
+		})
+	}
+}
+
+func TestFallbacks_NativeMessagesKeepsHostedClaudeOnChatWhenTheProxyDoesNotReportItsVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []string
+	}{
+		{"a hosted deployment", []string{fbHostedClaude}},
+		{"a group that mixes direct and hosted deployments", []string{fbDirectClaude, fbHostedClaude}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+				"/model/info":  fbData(tc.rows...),
+				fbVersionProbe: fbDropConnection,
+			})
+
+			fbExpectStrings(t, fbIDAPIs(result.Models), "team-claude=openai-completions")
 		})
 	}
 }

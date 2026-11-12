@@ -274,7 +274,8 @@ func anthropicBackendLookupIds(id string) []string {
 // backend. Other adapters may expose Claude-like public aliases, but an alias alone is not evidence
 // that LiteLLM accepts the Anthropic Messages schema. `azure_ai` (Azure AI Foundry) is a generic
 // adapter that serves many vendors, so it qualifies only under isAzureAIClaudeDeployment and the
-// proxy-version floor.
+// proxy-version floor. Both also bind a deployment LiteLLM reports as `anthropic` (the cost-map
+// provider of its `base_model`) while routing it through azure_ai.
 var claudeCapableAdapters = map[string]bool{
 	"anthropic":                  true,
 	"azure_ai":                   true,
@@ -288,7 +289,7 @@ var claudeModelPattern = regexp.MustCompile(`(?i)(?:^|[./_-])(?:claude|opus|sonn
 
 // isAzureAIClaudeDeployment: LiteLLM picks its native azure_ai Messages config by
 // `"claude" in model.lower()` on the configured model alone and bridges a deployment named otherwise
-// to Chat Completions, so a row it reports as `azure_ai` stays on Chat here too.
+// to Chat Completions, so a deployment routed through azure_ai stays on Chat here too.
 func isAzureAIClaudeDeployment(entry types.ModelInfoEntry) bool {
 	return entry.LiteLLMParams != nil && strings.Contains(strings.ToLower(entry.LiteLLMParams.Model), "claude")
 }
@@ -298,9 +299,13 @@ func isAzureAIClaudeDeployment(entry types.ModelInfoEntry) bool {
 // releases bridge `/v1/messages` to Chat Completions.
 var azureAIMessagesFloor = proxyversion.Floor{1, 80, 12}
 
+func routesThroughAzureAI(entry types.ModelInfoEntry) bool {
+	return (entry.ModelInfo != nil && lowerTrim(entry.ModelInfo.LiteLLMProvider) == "azure_ai") || isAzureAIDeployment(entry)
+}
+
 // messagesAwaitProxyVersion: whether the proxy version decides this deployment's Messages transport.
 func messagesAwaitProxyVersion(entry types.ModelInfoEntry) bool {
-	if entry.ModelInfo == nil || lowerTrim(entry.ModelInfo.LiteLLMProvider) != "azure_ai" {
+	if !routesThroughAzureAI(entry) {
 		return false
 	}
 	_, ok := nativeMessagesCatalog(entry)
@@ -317,7 +322,7 @@ func nativeMessagesCatalog(entry types.ModelInfoEntry) (resolution modelgroups.C
 	if adapter == "" || !claudeCapableAdapters[adapter] || deploymentFamily(entry) != modelgroups.SemanticFamilyClaude {
 		return resolution, false
 	}
-	if adapter == "azure_ai" && !isAzureAIClaudeDeployment(entry) {
+	if routesThroughAzureAI(entry) && !isAzureAIClaudeDeployment(entry) {
 		return resolution, false
 	}
 	var candidates []string

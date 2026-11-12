@@ -6109,6 +6109,75 @@ describe("discoverModels proxy version gate", () => {
     expect(urls.filter((url) => url.endsWith(VERSION_PROBE))).toEqual([]);
   });
 
+  it.each([
+    ["omits the version header", { [VERSION_PROBE]: versionReply() }],
+    ["reports an unreadable version", { [VERSION_PROBE]: versionReply("not-a-version") }],
+    ["does not answer the version probe", {}],
+  ])("warns once, naming the dependent routes, when the proxy %s", async (_label, routes) => {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const rows = [
+      { ...azureAiClaude, model_name: `claude-${suffix}` },
+      { ...azureAiRoute, model_name: `astra-${suffix}` },
+      { model_name: `plain-${suffix}`, litellm_params: { model: "openai/gpt-5" } },
+    ];
+    const diagnostics: string[] = [];
+    const options = { modelsDev: false, report: (message: string) => diagnostics.push(message) };
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }), ...routes });
+
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(diagnostics).toEqual([
+      "LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); 2 azure_ai route(s) " +
+        `whose transport depends on it stay on Chat Completions: claude-${suffix}, astra-${suffix}`,
+    ]);
+  });
+
+  it.each(["1.106.4", "1.80.11", "1.103.0-rc.1"])(
+    "does not warn about the version when the proxy reports %s",
+    async (version) => {
+      const diagnostics: string[] = [];
+      mockEndpoints({
+        "/model/info": () => jsonResponse(200, { data: [azureAiClaude, azureAiRoute] }),
+        [VERSION_PROBE]: versionReply(version),
+      });
+
+      await discoverModels("https://litellm.example.com", "sk-test", {
+        modelsDev: false,
+        report: (message: string) => diagnostics.push(message),
+      });
+
+      expect(diagnostics.filter((message) => message.includes("version"))).toEqual([]);
+    },
+  );
+
+  it("warns about ids expanded from an azure_ai wildcard route and routes found through /health", async () => {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const diagnostics: string[] = [];
+    const options = { modelsDev: false, report: (message: string) => diagnostics.push(message) };
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ ...azureAiClaude, model_name: `${suffix}/*`, litellm_params: { model: "azure_ai/*" } }],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: `${suffix}/claude-opus-5-5` }, { id: `${suffix}/gpt-5` }] }),
+    });
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+    vi.restoreAllMocks();
+    mockEndpoints({
+      "/model/info": () => jsonResponse(404, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () => jsonResponse(200, { healthy_endpoints: [{ model: `health-${suffix}`, model_id: "astra" }] }),
+      "litellm_model_id=astra": () =>
+        jsonResponse(200, { data: [{ ...azureAiRoute, model_name: `health-${suffix}` }] }),
+    });
+    await discoverModels("https://litellm.example.com", "sk-test", options);
+
+    expect(
+      diagnostics.filter((message) => message.includes("version")).map((message) => message.split(": ")[2]),
+    ).toEqual([`${suffix}/claude-opus-5-5`, `health-${suffix}`]);
+  });
+
   it("reports the version it read, and none when it did not ask", async () => {
     mockEndpoints({
       "/model/info": () => jsonResponse(200, { data: [azureAiRoute] }),
@@ -7303,7 +7372,12 @@ describe("native Messages discovery", () => {
     ["a hosted deployment", [hostedClaude]],
     ["a group that mixes direct and hosted deployments", [directClaude, hostedClaude]],
   ])("keeps adaptive Messages but declares no mid-conversation effort for %s", async (_name, rows) => {
-    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
+    mockEndpoints({
+      "/model/info": () => jsonResponse(200, { data: rows }),
+      // A deployment routed through azure_ai takes Messages only from LiteLLM v1.80.12.
+      "/v1/responses/resp_version_probe": () =>
+        new Response("{}", { status: 400, headers: { "x-litellm-version": "1.106.4" } }),
+    });
 
     const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
     const model = { ...result.models[0]!, provider: "litellm", baseUrl: "https://proxy.example.com" };
@@ -7314,6 +7388,20 @@ describe("native Messages discovery", () => {
       compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: false },
     });
     expect(getSupportedThinkingLevels(model)).toContain("high");
+  });
+
+  it.each([
+    ["a hosted deployment", [hostedClaude]],
+    ["a group that mixes direct and hosted deployments", [directClaude, hostedClaude]],
+  ])("keeps %s on Chat when the proxy does not report its version", async (_name, rows) => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockEndpoints({ "/model/info": () => jsonResponse(200, { data: rows }) });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map(({ id, api }) => ({ id, api }))).toEqual([
+      { id: "team-claude", api: "openai-completions" },
+    ]);
   });
 
   it("leaves mid-conversation effort undeclared for a route only through Anthropic", async () => {

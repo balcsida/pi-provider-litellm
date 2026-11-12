@@ -69,7 +69,9 @@ aliases come from settings and from the multi-provider environment variables, as
   `CLAUDE_CAPABLE_ADAPTERS`, under the same two conditions: the configured model contains `claude`
   (`isAzureAIClaudeDeployment`, LiteLLM's own test for its native config) and the proxy reports v1.80.12 or later
   (`azureAIMessagesFloor`). `publishesVersionGatedTransport` asks for the version only when the group would be
-  published on Messages at that floor, and never for `/health` groups, which never select Messages.
+  published on Messages at that floor, and never for `/health` groups, which never select Messages. The same
+  rule binds a hosted deployment reported as `anthropic` through `base_model` (`routesThroughAzureAI`), and
+  `reportUnreadProxyVersion` prints the TypeScript warning when the version was asked for and could not be read.
 
 ## Conventions
 

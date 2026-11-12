@@ -64,6 +64,12 @@ func newRecordingProxy(t *testing.T, rows string) *recordingProxy {
 			w.Write([]byte(`{"data":[` + rows + `]}`))
 			return
 		}
+		// A current proxy: version-gated transports (azure_ai Responses and Messages) are available.
+		if r.URL.Path == "/v1/responses/resp_version_probe" {
+			w.Header().Set("x-litellm-version", "1.106.6")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		proxy.mu.Lock()

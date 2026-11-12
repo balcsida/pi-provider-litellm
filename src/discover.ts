@@ -441,6 +441,8 @@ function anthropicBackendLookupIds(id: string): string[] {
 // alias alone is not evidence that LiteLLM accepts the Anthropic Messages schema.
 // `azure_ai` (Azure AI Foundry) is a generic adapter that serves many vendors, so
 // it qualifies only under `isAzureAiClaudeDeployment` and the proxy-version floor.
+// Both also bind a deployment LiteLLM reports as `anthropic` (the cost-map provider
+// of its `base_model`) while routing it through azure_ai.
 const CLAUDE_CAPABLE_ADAPTERS = new Set([
   "anthropic",
   "azure_ai",
@@ -453,7 +455,7 @@ const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$
 
 // LiteLLM picks its native azure_ai Messages config by `"claude" in model.lower()`
 // on the configured model alone and bridges a deployment named otherwise to Chat
-// Completions, so a row it reports as `azure_ai` stays on Chat here too.
+// Completions, so a deployment routed through azure_ai stays on Chat here too.
 function isAzureAiClaudeDeployment(entry: ModelInfoEntry): boolean {
   return wireString(entry.litellm_params?.model)?.toLowerCase().includes("claude") === true;
 }
@@ -469,13 +471,15 @@ const AZURE_AI_MESSAGES_FLOOR_VERSION: ProxyVersion = {
   prerelease: false,
 };
 
-function reportsAzureAiAdapter(entry: ModelInfoEntry): boolean {
-  return wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase() === "azure_ai";
+function routesThroughAzureAi(entry: ModelInfoEntry): boolean {
+  return (
+    wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase() === "azure_ai" || isAzureAiDeployment(entry)
+  );
 }
 
 // Whether the proxy version decides this deployment's Messages transport.
 function messagesAwaitProxyVersion(entry: ModelInfoEntry): boolean {
-  return reportsAzureAiAdapter(entry) && nativeMessagesCatalog(entry).messagesCompat !== undefined;
+  return routesThroughAzureAi(entry) && nativeMessagesCatalog(entry).messagesCompat !== undefined;
 }
 
 function nativeMessagesCatalog(
@@ -483,7 +487,7 @@ function nativeMessagesCatalog(
 ): Pick<CatalogResolution, "messagesCompat" | "messagesStrictTools" | "messagesThinkingLevelMap"> {
   const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter) || deploymentFamily(entry) !== "claude") return {};
-  if (adapter === "azure_ai" && !isAzureAiClaudeDeployment(entry)) return {};
+  if (routesThroughAzureAi(entry) && !isAzureAiClaudeDeployment(entry)) return {};
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((id) => wireString(id)?.trim())
     .filter((id): id is string => Boolean(id));
@@ -717,6 +721,21 @@ function reportAmbiguousCatalogAuthority(report: Report, routes: readonly string
     (count) =>
       `LiteLLM discovery: ${count} route group(s) have missing or conflicting deployment provider evidence; ` +
       "catalog limits, pricing, and reasoning metadata are withheld",
+  );
+}
+
+const reportedUnreadVersionRoutes = new Set<string>();
+
+// The version decides these routes' transport, and nothing else tells an operator
+// why they stay on the workaround when the proxy does not say which release it is.
+function reportUnreadProxyVersion(report: Report, routes: readonly string[]): void {
+  reportBoundedRoutes(
+    report,
+    reportedUnreadVersionRoutes,
+    routes,
+    (count) =>
+      `LiteLLM discovery: the proxy reported no readable version (x-litellm-version header); ${count} azure_ai ` +
+      "route(s) whose transport depends on it stay on Chat Completions",
   );
 }
 
@@ -996,16 +1015,18 @@ async function discoverFromHealth(
   const publicCatalog = deployments.some((deployment) => deployment && !deployment.synthetic)
     ? await loadDiscoveryPublicCatalog(options)
     : undefined;
-  const proxyVersion = [...groups.values()].some((group) =>
-    // Health discovery never selects Messages, so only Responses can await the version.
-    publishesVersionGatedTransport(
-      group.map(({ entry }) => entry),
-      publicCatalog,
-      false,
-    ),
-  )
-    ? await probeProxyVersion(base, apiKey, options)
-    : undefined;
+  const versionGatedRoutes = [...groups]
+    .filter(([, group]) =>
+      // Health discovery never selects Messages, so only Responses can await the version.
+      publishesVersionGatedTransport(
+        group.map(({ entry }) => entry),
+        publicCatalog,
+        false,
+      ),
+    )
+    .map(([route]) => route);
+  const proxyVersion = versionGatedRoutes.length > 0 ? await probeProxyVersion(base, apiKey, options) : undefined;
+  if (!proxyVersion) reportUnreadProxyVersion(report, versionGatedRoutes);
   const incompatibleModeRoutes: string[] = [];
   const ambiguousRoutes: string[] = [];
   const conflictingFamilyRoutes: string[] = [];
@@ -1296,11 +1317,10 @@ export async function discoverModels(
       proxyVersionRead = true;
       return probeProxyVersion(base, apiKey, options);
     };
-    let proxyVersion = [...groups].some(
-      ([route, group]) => !route.includes("*") && publishesVersionGatedTransport(group, publicCatalog),
-    )
-      ? await readProxyVersion()
-      : undefined;
+    const versionGatedRoutes = [...groups]
+      .filter(([route, group]) => !route.includes("*") && publishesVersionGatedTransport(group, publicCatalog))
+      .map(([route]) => route);
+    let proxyVersion = versionGatedRoutes.length > 0 ? await readProxyVersion() : undefined;
     const ambiguousRoutes: string[] = [];
     const incompatibleModeRoutes: string[] = [];
     const conflictingFamilyRoutes: string[] = [];
@@ -1362,13 +1382,14 @@ export async function discoverModels(
           );
         });
         let sources = wildcards;
-        const expansionAwaitsProxyVersion = candidates.some((entry) => {
+        const versionGatedExpansions = candidates.flatMap((entry) => {
           const id = wireString(entry.id);
-          if (!id || id.includes("*")) return false;
+          if (!id || id.includes("*")) return [];
           const parents = selectedWildcardRows(id, wildcardRows, publishedWildcardIds);
-          return parents !== undefined && publishesVersionGatedTransport(parents, publicCatalog);
+          return parents !== undefined && publishesVersionGatedTransport(parents, publicCatalog) ? [id] : [];
         });
-        if (!proxyVersionRead && expansionAwaitsProxyVersion) {
+        versionGatedRoutes.push(...versionGatedExpansions);
+        if (!proxyVersionRead && versionGatedExpansions.length > 0) {
           proxyVersion = await readProxyVersion();
           // The parents were reduced before the version was known; an expansion
           // must inherit from parents reduced under the version it is published with.
@@ -1398,6 +1419,7 @@ export async function discoverModels(
       }
     }
     reportWithheldToolRepair(report, withheldRepairRoutes);
+    if (!proxyVersion) reportUnreadProxyVersion(report, versionGatedRoutes);
     models = deduplicateModels(models);
     if (process.env.LITELLM_VERBOSE_DISCOVERY === "1") {
       const defaultedWildcards = wildcardRoutes.filter(({ route }) => defaultedContextRoutes.has(route));

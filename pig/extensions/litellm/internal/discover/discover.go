@@ -139,12 +139,15 @@ func discoverFromModelInfo(
 		proxyVersionRead = true
 		return ProbeProxyVersion(ctx, base, apiKey, options)
 	}
-	var proxyVersion *proxyversion.Version
+	var versionGatedRoutes []string
 	for _, route := range groups.routes {
 		if !strings.Contains(route, "*") && publishesVersionGatedTransport(groups.rows[route], publicCatalog, true) {
-			proxyVersion = readProxyVersion()
-			break
+			versionGatedRoutes = append(versionGatedRoutes, route)
 		}
+	}
+	var proxyVersion *proxyversion.Version
+	if len(versionGatedRoutes) > 0 {
+		proxyVersion = readProxyVersion()
 	}
 	ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes := &routeCollector{}, &routeCollector{}, &routeCollector{}
 	var incompatibleModeRoutes []string
@@ -242,13 +245,17 @@ func discoverFromModelInfo(
 				}
 			}
 			sources := wildcards
-			expansionAwaitsProxyVersion := slices.ContainsFunc(candidates, func(entry types.ModelsListEntry) bool {
+			expansionAwaitsProxyVersion := false
+			for _, entry := range candidates {
 				if entry.ID == "" || strings.Contains(entry.ID, "*") {
-					return false
+					continue
 				}
 				parents := selectedWildcardRows(entry.ID, wildcardRows, publishedWildcardIDs)
-				return parents != nil && publishesVersionGatedTransport(parents, publicCatalog, true)
-			})
+				if parents != nil && publishesVersionGatedTransport(parents, publicCatalog, true) {
+					versionGatedRoutes = append(versionGatedRoutes, entry.ID)
+					expansionAwaitsProxyVersion = true
+				}
+			}
 			if !proxyVersionRead && expansionAwaitsProxyVersion {
 				proxyVersion = readProxyVersion()
 				// The parents were reduced before the version was known; an expansion must inherit from
@@ -272,6 +279,9 @@ func discoverFromModelInfo(
 		}
 	}
 	reportWithheldToolRepair(withheldRepairRoutes.list(), options)
+	if proxyVersion == nil {
+		reportUnreadProxyVersion(versionGatedRoutes, options)
+	}
 	models = deduplicateModels(models)
 	if verboseDiscovery() {
 		var defaultedWildcards []reducedGroup
@@ -466,13 +476,19 @@ func discoverFromHealth(ctx context.Context, base, apiKey string, options Option
 		}
 		return entries
 	}
-	var proxyVersion *proxyversion.Version
+	var versionGatedRoutes []string
 	for _, route := range groups.routes {
 		// Health discovery never selects Messages, so only Responses can await the version.
 		if publishesVersionGatedTransport(entriesOf(groups.rows[route]), publicCatalog, false) {
-			proxyVersion = ProbeProxyVersion(ctx, base, apiKey, options)
-			break
+			versionGatedRoutes = append(versionGatedRoutes, route)
 		}
+	}
+	var proxyVersion *proxyversion.Version
+	if len(versionGatedRoutes) > 0 {
+		proxyVersion = ProbeProxyVersion(ctx, base, apiKey, options)
+	}
+	if proxyVersion == nil {
+		reportUnreadProxyVersion(versionGatedRoutes, options)
 	}
 	var incompatibleModeRoutes []string
 	ambiguousRoutes, conflictingFamilyRoutes, withheldRepairRoutes := &routeCollector{}, &routeCollector{}, &routeCollector{}

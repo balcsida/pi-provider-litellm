@@ -208,6 +208,10 @@ export async function createCompatibilityHarness(
         ],
       });
     }
+    // A current proxy: version-gated transports (azure_ai Responses and Messages) are available.
+    if (url.endsWith("/v1/responses/resp_version_probe")) {
+      return Response.json({ error: {} }, { status: 400, headers: { "x-litellm-version": "1.106.6" } });
+    }
     const isAnthropicRequest = new URL(url).pathname === "/v1/messages";
     if (!url.endsWith("/chat/completions") && !url.endsWith("/responses") && !isAnthropicRequest) {
       throw new Error(`unexpected URL: ${url}`);
