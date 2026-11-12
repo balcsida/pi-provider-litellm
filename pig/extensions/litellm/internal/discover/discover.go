@@ -141,7 +141,7 @@ func discoverFromModelInfo(
 	}
 	var proxyVersion *proxyversion.Version
 	for _, route := range groups.routes {
-		if !strings.Contains(route, "*") && publishesVersionGatedTransport(groups.rows[route], publicCatalog) {
+		if !strings.Contains(route, "*") && publishesVersionGatedTransport(groups.rows[route], publicCatalog, true) {
 			proxyVersion = readProxyVersion()
 			break
 		}
@@ -247,7 +247,7 @@ func discoverFromModelInfo(
 					return false
 				}
 				parents := selectedWildcardRows(entry.ID, wildcardRows, publishedWildcardIDs)
-				return parents != nil && publishesVersionGatedTransport(parents, publicCatalog)
+				return parents != nil && publishesVersionGatedTransport(parents, publicCatalog, true)
 			})
 			if !proxyVersionRead && expansionAwaitsProxyVersion {
 				proxyVersion = readProxyVersion()
@@ -468,7 +468,8 @@ func discoverFromHealth(ctx context.Context, base, apiKey string, options Option
 	}
 	var proxyVersion *proxyversion.Version
 	for _, route := range groups.routes {
-		if publishesVersionGatedTransport(entriesOf(groups.rows[route]), publicCatalog) {
+		// Health discovery never selects Messages, so only Responses can await the version.
+		if publishesVersionGatedTransport(entriesOf(groups.rows[route]), publicCatalog, false) {
 			proxyVersion = ProbeProxyVersion(ctx, base, apiKey, options)
 			break
 		}

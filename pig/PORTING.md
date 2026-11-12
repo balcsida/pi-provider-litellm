@@ -63,8 +63,13 @@ aliases come from settings and from the multi-provider environment variables, as
   deployment's backend identity must be OpenAI-family GPT-5.6+, routed only through `openai`, `azure` or `azure_ai`
   (`backend.RoutesOnlyThrough`), on `openai-responses` only. A wildcard child takes its selected parent's value,
   reduced from the backend row its id substitutes into. `promptCache` is part of `modelsCatalogRecord`, so it crosses
-  the SDK wire and needs no sidecar entry. `DiscoveryVersion` is 12, in step with `LITELLM_DISCOVERY_VERSION` (the Go
+  the SDK wire and needs no sidecar entry. `DiscoveryVersion` is 14, in step with `LITELLM_DISCOVERY_VERSION` (the Go
   side stayed at 7 through TypeScript's 8, which only added the classifier routes it withholds).
+- **Claude on Azure AI Foundry.** `azure_ai` is in `claudeCapableAdapters` like the TypeScript
+  `CLAUDE_CAPABLE_ADAPTERS`, under the same two conditions: the configured model contains `claude`
+  (`isAzureAIClaudeDeployment`, LiteLLM's own test for its native config) and the proxy reports v1.80.12 or later
+  (`azureAIMessagesFloor`). `publishesVersionGatedTransport` asks for the version only when the group would be
+  published on Messages at that floor, and never for `/health` groups, which never select Messages.
 
 ## Conventions
 

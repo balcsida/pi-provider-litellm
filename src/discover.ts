@@ -439,8 +439,11 @@ function anthropicBackendLookupIds(id: string): string[] {
 // These are the LiteLLM adapters whose native request path can terminate at a
 // Claude backend. Other adapters may expose Claude-like public aliases, but an
 // alias alone is not evidence that LiteLLM accepts the Anthropic Messages schema.
+// `azure_ai` (Azure AI Foundry) is a generic adapter that serves many vendors, so
+// it qualifies only under `isAzureAiClaudeDeployment` and the proxy-version floor.
 const CLAUDE_CAPABLE_ADAPTERS = new Set([
   "anthropic",
+  "azure_ai",
   "bedrock",
   "bedrock_converse",
   "vertex_ai",
@@ -448,11 +451,39 @@ const CLAUDE_CAPABLE_ADAPTERS = new Set([
 ]);
 const CLAUDE_MODEL_PATTERN = /(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])/i;
 
+// LiteLLM picks its native azure_ai Messages config by `"claude" in model.lower()`
+// on the configured model alone. A deployment named otherwise is bridged to Chat
+// Completions whatever its `base_model` says, so it stays on Chat here too.
+function isAzureAiClaudeDeployment(entry: ModelInfoEntry): boolean {
+  return wireString(entry.litellm_params?.model)?.toLowerCase().includes("claude") === true;
+}
+
+// LiteLLM registers that config in v1.80.10, but v1.80.10 and v1.80.11 send the
+// key as `api-key`, which Azure's Anthropic endpoint refuses; v1.80.12 restores
+// `x-api-key`. Earlier releases bridge `/v1/messages` to Chat Completions.
+const AZURE_AI_MESSAGES_FLOOR: ProxyVersionFloor = [1, 80, 12];
+const AZURE_AI_MESSAGES_FLOOR_VERSION: ProxyVersion = {
+  major: AZURE_AI_MESSAGES_FLOOR[0],
+  minor: AZURE_AI_MESSAGES_FLOOR[1],
+  patch: AZURE_AI_MESSAGES_FLOOR[2],
+  prerelease: false,
+};
+
+function reportsAzureAiAdapter(entry: ModelInfoEntry): boolean {
+  return wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase() === "azure_ai";
+}
+
+// Whether the proxy version decides this deployment's Messages transport.
+function messagesAwaitProxyVersion(entry: ModelInfoEntry): boolean {
+  return reportsAzureAiAdapter(entry) && nativeMessagesCatalog(entry).messagesCompat !== undefined;
+}
+
 function nativeMessagesCatalog(
   entry: ModelInfoEntry,
 ): Pick<CatalogResolution, "messagesCompat" | "messagesStrictTools" | "messagesThinkingLevelMap"> {
   const adapter = wireString(entry.model_info?.litellm_provider)?.trim().toLowerCase();
   if (!adapter || !CLAUDE_CAPABLE_ADAPTERS.has(adapter) || deploymentFamily(entry) !== "claude") return {};
+  if (adapter === "azure_ai" && !isAzureAiClaudeDeployment(entry)) return {};
   const candidates = [entry.litellm_params?.model, entry.model_info?.base_model]
     .map((id) => wireString(id)?.trim())
     .filter((id): id is string => Boolean(id));
@@ -732,7 +763,10 @@ function mapFromModelInfoGroup(
     const model = new Set(generations).size === 1 && family !== "conflicting" ? generations[0] : undefined;
     return {
       ...catalog,
-      ...(options.allowMessages === false ? { messagesCompat: undefined, messagesStrictTools: undefined } : {}),
+      ...(options.allowMessages === false ||
+      (messagesAwaitProxyVersion(entry) && !proxyVersionAtLeast(options.proxyVersion, AZURE_AI_MESSAGES_FLOOR))
+        ? { messagesCompat: undefined, messagesStrictTools: undefined }
+        : {}),
       ...(family ? { semanticFamily: family } : {}),
       ...(model ? { semanticModel: model } : {}),
     };
@@ -865,8 +899,17 @@ function mapFromModelInfoGroup(
 function publishesVersionGatedTransport(
   group: readonly ModelInfoEntry[],
   publicCatalog: PublicCatalog | undefined,
+  allowMessages = true,
 ): boolean {
-  return group.some(transportAwaitsProxyVersion) && mapFromModelInfoGroup(group, publicCatalog) !== undefined;
+  if (group.some(transportAwaitsProxyVersion)) return mapFromModelInfoGroup(group, publicCatalog) !== undefined;
+  // Messages awaits the version only where a proxy at the floor would get it: an
+  // endpoint list or a sibling deployment can keep the group on Chat regardless.
+  return (
+    allowMessages &&
+    group.some(messagesAwaitProxyVersion) &&
+    mapFromModelInfoGroup(group, publicCatalog, { proxyVersion: AZURE_AI_MESSAGES_FLOOR_VERSION })?.api ===
+      "anthropic-messages"
+  );
 }
 
 function catalogProtocol(modelId: string, catalogModel: Model<Api> | undefined): ModelProtocol {
@@ -954,9 +997,11 @@ async function discoverFromHealth(
     ? await loadDiscoveryPublicCatalog(options)
     : undefined;
   const proxyVersion = [...groups.values()].some((group) =>
+    // Health discovery never selects Messages, so only Responses can await the version.
     publishesVersionGatedTransport(
       group.map(({ entry }) => entry),
       publicCatalog,
+      false,
     ),
   )
     ? await probeProxyVersion(base, apiKey, options)

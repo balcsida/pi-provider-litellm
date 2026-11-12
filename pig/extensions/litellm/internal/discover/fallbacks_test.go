@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":13,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":14,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}
@@ -1161,6 +1161,142 @@ func TestFallbacks_VersionGateAsksOnceWhenAnExactRouteAndAWildcardExpansionBothD
 	fbExpectStrings(t, fbIDAPIs(result.Models), "gpt-6-astra=openai-responses", "foundry/gpt-5.5=openai-responses")
 	if got := fbCount(proxy.Requests(), fbVersionProbe); got != 1 {
 		t.Errorf("version probes = %d, want 1", got)
+	}
+}
+
+// fbAzureAIClaudeInfo: LiteLLM reports Claude on Azure AI Foundry under the generic `azure_ai`
+// adapter, with no base_model.
+const (
+	fbAzureAIClaudeInfo = `{"mode":"chat","litellm_provider":"azure_ai","supported_endpoints":null,"base_model":null,"supports_reasoning":true}`
+	fbAzureAIClaude     = `{"model_name":"claude-opus-5-5","litellm_params":{"model":"azure_ai/claude-opus-5-5"},"model_info":` + fbAzureAIClaudeInfo + `}`
+	fbAnthropicClaude   = `{"model_name":"claude-opus-5-5","litellm_params":{"model":"anthropic/claude-opus-5-5","custom_llm_provider":"anthropic"},` +
+		`"model_info":{"mode":"chat","litellm_provider":"anthropic","supports_reasoning":true}}`
+	fbAzureAIClaudeCompat = `{"forceAdaptiveThinking":true,"supportsTemperature":false,"supportsMidConvoEffort":false}`
+)
+
+func TestFallbacks_VersionGateSelectsTheAzureAIClaudeTransportForTheReportedProxyVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		api     ai.API
+	}{
+		{"1.106.4", ai.APIAnthropicMessages},
+		{"1.80.12", ai.APIAnthropicMessages},
+		{"1.80.11", ai.APIOpenAICompletions},
+		{"1.80.12-rc.1", ai.APIOpenAICompletions},
+		{"not-a-version", ai.APIOpenAICompletions},
+		{"", ai.APIOpenAICompletions},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+				"/model/info":  fbData(fbAzureAIClaude),
+				fbVersionProbe: fbVersionReply(tc.version),
+			})
+
+			fbExpectStrings(t, fbIDAPIs(result.Models), "claude-opus-5-5="+string(tc.api))
+		})
+	}
+}
+
+func TestFallbacks_VersionGateKeepsAzureAIClaudeOnChatWhenTheProxyDoesNotAnswerTheVersionProbe(t *testing.T) {
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaude),
+		fbVersionProbe: fbDropConnection,
+	})
+
+	fbExpectStrings(t, fbIDAPIs(result.Models), "claude-opus-5-5=openai-completions")
+}
+
+func TestFallbacks_VersionGateSendsAzureAIClaudeOverConservativeAdaptiveMessagesAtUnchangedPricesAndLimits(t *testing.T) {
+	chatResult, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaude),
+		fbVersionProbe: fbDropConnection,
+	})
+	chat := chatResult.Models[0]
+
+	result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaude),
+		fbVersionProbe: fbVersionReply("1.106.4"),
+	})
+	model := result.Models[0]
+
+	fbMatch(t, model, `{"api":"anthropic-messages","reasoning":true,"promptCache":{"short":300,"long":3600},`+
+		`"cost":{"input":4,"output":20,"cacheRead":0.2,"cacheWrite":5},"contextWindow":1000000,"maxTokens":128000}`)
+	// Azure-hosted Claude rejects thinking.block_binding, and nothing proves strict tools off Anthropic's own API.
+	if got := modelInfoBJSON(model.Compat); got != fbAzureAIClaudeCompat {
+		t.Errorf("compat = %s, want %s", got, fbAzureAIClaudeCompat)
+	}
+	if levels := fbSupportedLevels(model); !slices.Contains(levels, ai.ThinkingHigh) || slices.Contains(levels, ai.ThinkingOff) {
+		t.Errorf("levels = %v, want high and no off", levels)
+	}
+	if chat.API != ai.APIOpenAICompletions {
+		t.Fatalf("chat api = %s", chat.API)
+	}
+	if modelInfoBJSON(model.Cost) != modelInfoBJSON(chat.Cost) || model.ContextWindow != chat.ContextWindow || model.MaxTokens != chat.MaxTokens {
+		t.Errorf("prices or limits changed with the transport: %s %d %d, chat %s %d %d", modelInfoBJSON(model.Cost),
+			model.ContextWindow, model.MaxTokens, modelInfoBJSON(chat.Cost), chat.ContextWindow, chat.MaxTokens)
+	}
+}
+
+func TestFallbacks_VersionGateLetsAnAzureAIDeploymentDecideAGroupSharedWithAnthropic(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		api     ai.API
+	}{
+		{"1.106.4", ai.APIAnthropicMessages},
+		{"", ai.APIOpenAICompletions},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			result, _ := fbDiscover(t, map[string]http.HandlerFunc{
+				"/model/info":  fbData(fbAnthropicClaude, fbAzureAIClaude),
+				fbVersionProbe: fbVersionReply(tc.version),
+			})
+
+			if len(result.Models) != 1 || result.Models[0].API != tc.api {
+				t.Fatalf("models = %v, want one %s", fbIDAPIs(result.Models), tc.api)
+			}
+			if got := modelInfoBJSON(result.Models[0].Compat); tc.api == ai.APIAnthropicMessages && got != fbAzureAIClaudeCompat {
+				t.Errorf("compat = %s, want %s", got, fbAzureAIClaudeCompat)
+			}
+		})
+	}
+}
+
+func TestFallbacks_VersionGateKeepsAnAzureAIRouteOnChatWithoutAskingForTheVersion(t *testing.T) {
+	for _, tc := range []struct{ label, row string }{
+		{"an azure_ai Claude route whose endpoint list omits Messages", fbAzureAIRow("claude-opus-5-5", "azure_ai/claude-opus-5-5",
+			`{"mode":"chat","litellm_provider":"azure_ai","supported_endpoints":["/v1/chat/completions"],"base_model":null,"supports_reasoning":true}`)},
+		{"an azure_ai Claude route of an unknown generation", fbAzureAIRow("claude-opus-5-5", "azure_ai/claude-opus-9-9", fbAzureAIClaudeInfo)},
+		// LiteLLM serves native Messages only when the configured model contains "claude".
+		{"an azure_ai Claude route whose deployment name omits claude", fbAzureAIRow("claude-opus-5-5", "azure_ai/opus-5-5", fbAzureAIClaudeInfo)},
+		{"an azure_ai GPT route", fbAzureAIRow("gpt", "azure_ai/gpt-5", fbAzureAIClaudeInfo)},
+		{"an azure_ai DeepSeek route", fbAzureAIRow("deepseek", "azure_ai/DeepSeek-V3.1", fbAzureAIClaudeInfo)},
+		{"an azure_ai Llama route", fbAzureAIRow("llama", "azure_ai/Llama-3.3-70B-Instruct", fbAzureAIClaudeInfo)},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			result, proxy, _ := fbDiscoverProxy(t, map[string]http.HandlerFunc{
+				"/model/info":  fbData(tc.row),
+				fbVersionProbe: fbVersionReply("1.106.4"),
+			})
+
+			if len(result.Models) != 1 || result.Models[0].API != ai.APIOpenAICompletions {
+				t.Errorf("models = %v, want one openai-completions", fbIDAPIs(result.Models))
+			}
+			fbExpectStrings(t, proxy.Requests(), "/model/info")
+		})
+	}
+}
+
+func TestFallbacks_VersionGateDoesNotAskForTheVersionWhenASiblingDeploymentKeepsAzureAIClaudeOnChat(t *testing.T) {
+	result, proxy, _ := fbDiscoverProxy(t, map[string]http.HandlerFunc{
+		"/model/info":  fbData(fbAzureAIClaude, fbAzureAIRow("claude-opus-5-5", "azure_ai/gpt-5", fbAzureAIClaudeInfo)),
+		fbVersionProbe: fbVersionReply("1.106.4"),
+	})
+
+	if len(result.Models) != 1 || result.Models[0].API != ai.APIOpenAICompletions {
+		t.Errorf("models = %v, want one openai-completions", fbIDAPIs(result.Models))
+	}
+	if got := fbCount(proxy.Requests(), fbVersionProbe); got != 0 {
+		t.Errorf("version probes = %d, want 0", got)
 	}
 }
 

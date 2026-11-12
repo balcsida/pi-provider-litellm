@@ -13,6 +13,7 @@ import (
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/backend"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/catalog"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/modelgroups"
+	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/proxyversion"
 	"github.com/balcsida/pi-provider-litellm/pig/extensions/litellm/internal/types"
 )
 
@@ -271,9 +272,12 @@ func anthropicBackendLookupIds(id string) []string {
 
 // claudeCapableAdapters are the LiteLLM adapters whose native request path can terminate at a Claude
 // backend. Other adapters may expose Claude-like public aliases, but an alias alone is not evidence
-// that LiteLLM accepts the Anthropic Messages schema.
+// that LiteLLM accepts the Anthropic Messages schema. `azure_ai` (Azure AI Foundry) is a generic
+// adapter that serves many vendors, so it qualifies only under isAzureAIClaudeDeployment and the
+// proxy-version floor.
 var claudeCapableAdapters = map[string]bool{
 	"anthropic":                  true,
+	"azure_ai":                   true,
 	"bedrock":                    true,
 	"bedrock_converse":           true,
 	"vertex_ai":                  true,
@@ -281,6 +285,27 @@ var claudeCapableAdapters = map[string]bool{
 }
 
 var claudeModelPattern = regexp.MustCompile(`(?i)(?:^|[./_-])(?:claude|opus|sonnet|haiku|fable)(?:$|[./_:-])`)
+
+// isAzureAIClaudeDeployment: LiteLLM picks its native azure_ai Messages config by
+// `"claude" in model.lower()` on the configured model alone. A deployment named otherwise is bridged
+// to Chat Completions whatever its `base_model` says, so it stays on Chat here too.
+func isAzureAIClaudeDeployment(entry types.ModelInfoEntry) bool {
+	return entry.LiteLLMParams != nil && strings.Contains(strings.ToLower(entry.LiteLLMParams.Model), "claude")
+}
+
+// azureAIMessagesFloor: LiteLLM registers that config in v1.80.10, but v1.80.10 and v1.80.11 send the
+// key as `api-key`, which Azure's Anthropic endpoint refuses; v1.80.12 restores `x-api-key`. Earlier
+// releases bridge `/v1/messages` to Chat Completions.
+var azureAIMessagesFloor = proxyversion.Floor{1, 80, 12}
+
+// messagesAwaitProxyVersion: whether the proxy version decides this deployment's Messages transport.
+func messagesAwaitProxyVersion(entry types.ModelInfoEntry) bool {
+	if entry.ModelInfo == nil || lowerTrim(entry.ModelInfo.LiteLLMProvider) != "azure_ai" {
+		return false
+	}
+	_, ok := nativeMessagesCatalog(entry)
+	return ok
+}
 
 // nativeMessagesCatalog returns the Messages fields of a CatalogResolution; ok false is the empty
 // result.
@@ -290,6 +315,9 @@ func nativeMessagesCatalog(entry types.ModelInfoEntry) (resolution modelgroups.C
 		adapter = lowerTrim(entry.ModelInfo.LiteLLMProvider)
 	}
 	if adapter == "" || !claudeCapableAdapters[adapter] || deploymentFamily(entry) != modelgroups.SemanticFamilyClaude {
+		return resolution, false
+	}
+	if adapter == "azure_ai" && !isAzureAIClaudeDeployment(entry) {
 		return resolution, false
 	}
 	var candidates []string
