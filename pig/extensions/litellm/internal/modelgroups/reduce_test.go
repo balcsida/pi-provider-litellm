@@ -402,10 +402,10 @@ func TestReduceModelGroup(t *testing.T) {
 		}
 	})
 
-	t.Run("retains proven display prices and zeroes only unresolved fields without catalog authority", func(t *testing.T) {
-		// Characterization of the existing per-field cost block. No backend resolves, so cache pricing
-		// is genuinely unknown rather than free: input and output survive at their proven values, the
-		// unresolved cache fields read zero, and `hasCompleteCost` stays false.
+	t.Run("prices omitted cache rates at the explicit input rate without catalog evidence", func(t *testing.T) {
+		// No backend resolves, so the router's price sheet is the only authority, and LiteLLM bills a
+		// cache rate it omits at the input rate (v1.103.0 and later; zero before). The cache fields
+		// take each deployment's input price.
 		priced := func(id string, in, out float64) types.ModelInfoEntry {
 			return row(idMode(id, "chat"), info(func(i *types.ModelInfoDetails) {
 				i.InputCostPerToken, i.OutputCostPerToken = f(in), f(out)
@@ -413,24 +413,44 @@ func TestReduceModelGroup(t *testing.T) {
 			}), backendModel("internal/unknown"))
 		}
 		singleton := mustReduce(t, []types.ModelInfoEntry{priced("only", 0.000003, 0.000015)}, resolveCatalog)
-		eq(t, singleton.Cost, modelCost(3, 15, 0, 0))
-		if singleton.HasCompleteCost || singleton.CatalogProvider != "" {
+		eq(t, singleton.Cost, modelCost(3, 15, 3, 3))
+		if !singleton.HasCompleteCost || singleton.CatalogProvider != "" {
 			t.Fatalf("%s", dump(singleton))
 		}
 
 		// Proven fields still reduce to the maximum across a group.
 		got := mustReduce(t, []types.ModelInfoEntry{priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)}, resolveCatalog)
-		eq(t, got.Cost, modelCost(4, 15, 0, 0))
-		if got.HasCompleteCost {
+		eq(t, got.Cost, modelCost(4, 15, 4, 4))
+		if !got.HasCompleteCost {
 			t.Fatal("hasCompleteCost")
+		}
+
+		// A catalog price for the field says the backend bills something else, and an identified
+		// family may bill writes above input: both keep the price unknown.
+		withCatalog := func(catalog CatalogResolution) *ReducedModelGroup {
+			return mustReduce(t, []types.ModelInfoEntry{priced("a", 0.000003, 0.000015), priced("b", 0.000003, 0.000015)},
+				func(entry types.ModelInfoEntry) *CatalogResolution {
+					own := catalog
+					own.CatalogModelID = "vendor/" + entry.ModelInfo.ID
+					return &own
+				})
+		}
+		read := withCatalog(CatalogResolution{Provider: "vendor", Cost: &CatalogCost{CacheRead: f(0.3)}})
+		if !read.CatalogAuthorityAmbiguous || read.HasCompleteCost || read.Cost.CacheRead != 0 || read.Cost.CacheWrite != 3 {
+			t.Fatalf("%s", dump(read))
+		}
+		family := withCatalog(CatalogResolution{Provider: "vendor", SemanticFamily: SemanticFamilyOpenAI})
+		if family.HasCompleteCost || family.Cost.CacheRead != 3 || family.Cost.CacheWrite != 0 {
+			t.Fatalf("%s", dump(family))
 		}
 	})
 
 	t.Run("treats a missing cache-write price as zero only with evidence the backend bills none", func(t *testing.T) {
 		// LiteLLM omits `cache_creation_input_token_cost` both for a backend that bills no
 		// cache write and for a deployment nobody priced. Only a DeepSeek backend, or a
-		// catalog entry pricing the write at zero, tells the two apart; GPT-5.6+ and other
-		// non-Claude backends bill writes too, so their missing price stays a gap.
+		// catalog entry pricing the write at zero, tells the two apart; Claude and GPT-5.6+
+		// bill writes above input, so their missing price stays a gap. A backend with no
+		// family evidence takes the input rate LiteLLM bills it at.
 		catalogs := map[string]*CatalogResolution{
 			"deepseek/deepseek-v4.1-flash": {Provider: "deepseek", SemanticFamily: SemanticFamilyDeepSeek},
 			"anthropic/claude-sonnet-4-6":  {Provider: "anthropic", SemanticFamily: SemanticFamilyClaude},
@@ -456,7 +476,11 @@ func TestReduceModelGroup(t *testing.T) {
 		if !deepseek.HasCompleteCost || !deepseek.HasCompleteMetadata {
 			t.Fatalf("%s", dump(deepseek))
 		}
-		for _, model := range []string{"anthropic/claude-sonnet-4-6", "openai/gpt-6.1", "hosted_vllm/acme/foo-1"} {
+		unidentified := mustReduce(t, []types.ModelInfoEntry{deployment("hosted_vllm/acme/foo-1", nil)}, resolve)
+		if !unidentified.HasCompleteCost || !unidentified.HasCompleteMetadata || unidentified.Cost.CacheWrite != 0.3 {
+			t.Fatalf("%s", dump(unidentified))
+		}
+		for _, model := range []string{"anthropic/claude-sonnet-4-6", "openai/gpt-6.1"} {
 			gap := mustReduce(t, []types.ModelInfoEntry{deployment(model, nil)}, resolve)
 			if gap.HasCompleteCost || gap.HasCompleteMetadata || gap.Cost.CacheWrite != 0 {
 				t.Fatalf("%s: %s", model, dump(gap))

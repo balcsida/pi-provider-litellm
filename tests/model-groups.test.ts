@@ -780,11 +780,10 @@ describe("reduceModelGroup", () => {
     });
   });
 
-  it("retains proven display prices and zeroes only unresolved fields without catalog authority", () => {
-    // Characterization of the existing per-field cost block. No backend resolves,
-    // so cache pricing is genuinely unknown rather than free: input and output
-    // survive at their proven values, the unresolved cache fields read zero, and
-    // `hasCompleteCost` stays false so the model can be marked incomplete.
+  it("prices omitted cache rates at the explicit input rate without catalog evidence", () => {
+    // No backend resolves, so the router's price sheet is the only authority, and
+    // LiteLLM bills a cache rate it omits at the input rate (v1.103.0 and later; zero
+    // before). The cache fields take each deployment's input price.
     const priced = (id: string, input: number, output: number) =>
       row({
         model_info: {
@@ -800,8 +799,8 @@ describe("reduceModelGroup", () => {
 
     const singleton = reduceModelGroup([priced("only", 0.000003, 0.000015)], resolveCatalog);
     expect(singleton).toMatchObject({
-      hasCompleteCost: false,
-      cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+      hasCompleteCost: true,
+      cost: { input: 3, output: 15, cacheRead: 3, cacheWrite: 3 },
     });
     expect(singleton).not.toHaveProperty("catalogProvider");
     expect(singleton?.cost.tiers).toBeUndefined();
@@ -810,16 +809,34 @@ describe("reduceModelGroup", () => {
     expect(
       reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000004, 0.000015)], resolveCatalog),
     ).toMatchObject({
+      hasCompleteCost: true,
+      cost: { input: 4, output: 15, cacheRead: 4, cacheWrite: 4 },
+    });
+
+    // A catalog price for the field says the backend bills something else, and an
+    // identified family may bill writes above input: both keep the price unknown.
+    const withCatalog = (catalog: CatalogResolution) =>
+      reduceModelGroup([priced("a", 0.000003, 0.000015), priced("b", 0.000003, 0.000015)], (entry) => ({
+        ...catalog,
+        catalogModelId: `vendor/${entry.model_info?.id}`,
+      }));
+    expect(withCatalog({ provider: "vendor", cost: { cacheRead: 0.3 } })).toMatchObject({
+      catalogAuthorityAmbiguous: true,
       hasCompleteCost: false,
-      cost: { input: 4, output: 15, cacheRead: 0, cacheWrite: 0 },
+      cost: { cacheRead: 0, cacheWrite: 3 },
+    });
+    expect(withCatalog({ provider: "vendor", semanticFamily: "openai" })).toMatchObject({
+      hasCompleteCost: false,
+      cost: { cacheRead: 3, cacheWrite: 0 },
     });
   });
 
   it("treats a missing cache-write price as zero only with evidence the backend bills none", () => {
     // LiteLLM omits `cache_creation_input_token_cost` both for a backend that bills no
     // cache write and for a deployment nobody priced. Only a DeepSeek backend, or a
-    // catalog entry pricing the write at zero, tells the two apart; GPT-5.6+ and other
-    // non-Claude backends bill writes too, so their missing price stays a gap.
+    // catalog entry pricing the write at zero, tells the two apart; Claude and GPT-5.6+
+    // bill writes above input, so their missing price stays a gap. A backend with no
+    // family evidence takes the input rate LiteLLM bills it at.
     const catalogs: Record<string, CatalogResolution> = {
       "deepseek/deepseek-v4.1-flash": { provider: "deepseek", semanticFamily: "deepseek" },
       "anthropic/claude-sonnet-4-6": { provider: "anthropic", semanticFamily: "claude" },
@@ -849,7 +866,12 @@ describe("reduceModelGroup", () => {
       hasCompleteCost: true,
       cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
     });
-    for (const model of ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1", "hosted_vllm/acme/foo-1"]) {
+    expect(reduceModelGroup([deployment("hosted_vllm/acme/foo-1")], resolve)).toMatchObject({
+      hasCompleteMetadata: true,
+      hasCompleteCost: true,
+      cost: { cacheWrite: 0.3 },
+    });
+    for (const model of ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1"]) {
       expect(reduceModelGroup([deployment(model)], resolve), model).toMatchObject({
         hasCompleteMetadata: false,
         hasCompleteCost: false,

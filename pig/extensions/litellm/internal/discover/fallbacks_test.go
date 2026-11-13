@@ -625,7 +625,7 @@ func TestFallbacks_WildcardRecomputesKimiCompatibilityFromACatchAllExpansionID(t
 		t.Fatalf("models = %v, want 1", fbIDs(result.Models))
 	}
 	fbContaining(t, result.Models[0], `{"id":"kimi-k2.6","name":"kimi-k2.6 (incomplete metadata)","api":"openai-responses",`+
-		`"reasoning":false,"contextWindow":8000,"maxTokens":1000,"cost":{"input":1,"output":0,"cacheRead":0,"cacheWrite":0},`+
+		`"reasoning":false,"contextWindow":8000,"maxTokens":1000,"cost":{"input":1,"output":0,"cacheRead":1,"cacheWrite":1},`+
 		`"compat":{"supportsDeveloperRole":false,"supportsStrictMode":false}}`)
 }
 
@@ -640,7 +640,7 @@ func TestFallbacks_WildcardPreservesUnresolvedConservativeMetadataOnExpandedCata
 		t.Fatalf("models = %v, want 1", fbIDs(result.Models))
 	}
 	fbContaining(t, result.Models[0], `{"id":"openai/gpt-4o","name":"GPT-4o (incomplete metadata)","reasoning":false,`+
-		`"input":["text"],"contextWindow":8000,"maxTokens":16384,"cost":{"input":1,"output":0,"cacheRead":0,"cacheWrite":0}}`)
+		`"input":["text"],"contextWindow":8000,"maxTokens":16384,"cost":{"input":1,"output":0,"cacheRead":1,"cacheWrite":1}}`)
 }
 
 func TestFallbacks_WildcardAggregatesSuppressionEvidenceOntoExpansions(t *testing.T) {
@@ -798,7 +798,7 @@ func TestFallbacks_WildcardCombinesOverlappingMetadataConservativelyRegardlessOf
 		})
 
 		fbEqual(t, result.Models, `[{"id":"team/claude-sonnet-4-6","name":"Claude Sonnet 4.6","api":"openai-completions",`+
-			`"litellmDiscoveryVersion":14,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
+			`"litellmDiscoveryVersion":15,"reasoning":false,"input":["text"],"contextWindow":40000,"maxTokens":4000,`+
 			`"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},`+
 			`"compat":{"supportsStore":false,"cacheControlFormat":"anthropic"}}]`)
 	}

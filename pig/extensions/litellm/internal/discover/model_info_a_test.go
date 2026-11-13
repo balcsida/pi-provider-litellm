@@ -189,7 +189,7 @@ func TestModelInfoA_ReducesMixedAzureDeploymentVersionsToChatCompletions(t *test
 	model := firstModel(t, base, options)
 
 	if model.ID != "gpt-production" || model.API != ai.APIOpenAICompletions || model.LiteLLMBackendFamily != types.FamilyOpenAI ||
-		model.LiteLLMDiscoveryVersion != 14 {
+		model.LiteLLMDiscoveryVersion != 15 {
 		t.Errorf("model = %+v", model)
 	}
 }
@@ -850,15 +850,16 @@ func TestModelInfoA_DoesNotEnrichAnUnqualifiedOpenAIPublicRouteWithoutBackendIde
 	aExpectIncomplete(t, model, "gpt-4o", 128_000, 16_384)
 }
 
-func TestModelInfoA_KeepsProvenDisplayPricesWhileMarkingAnyUnresolvedCostFieldIncomplete(t *testing.T) {
-	// Display cost reduces per field: proven input/output survive, unresolved fields fall to zero, and the
-	// model stays marked incomplete.
+func TestModelInfoA_PricesOmittedCacheRatesAtTheRoutersInputRateAsLiteLLMBillsThem(t *testing.T) {
+	// LiteLLM bills a cache rate the deployment omits at its input rate, so an unidentified backend
+	// priced with input and output only is complete: the cache fields take each deployment's input price.
 	priced := func(id string, input float64) aMap {
 		return aMap{
 			"model_name":     "priced-without-cache-rates",
 			"litellm_params": aMap{"model": "internal/unknown"},
 			"model_info": aMap{
 				"id": id, "mode": "chat", "max_input_tokens": 32_000, "max_output_tokens": 4_000,
+				"supports_reasoning": false, "supports_vision": false,
 				"input_cost_per_token": input, "output_cost_per_token": 0.000015,
 			},
 		}
@@ -878,8 +879,8 @@ func TestModelInfoA_KeepsProvenDisplayPricesWhileMarkingAnyUnresolvedCostFieldIn
 			t.Fatalf("models = %+v", result.Models)
 		}
 		model := result.Models[0]
-		if model.ID != "priced-without-cache-rates" || model.Name != "priced-without-cache-rates (incomplete metadata)" ||
-			aRates(model.Cost) != [4]float64{tc.expectedInput, 15, 0, 0} || model.ContextWindow != 32_000 || model.MaxTokens != 4_000 {
+		if model.ID != "priced-without-cache-rates" || model.Name != "priced-without-cache-rates" ||
+			aRates(model.Cost) != [4]float64{tc.expectedInput, 15, tc.expectedInput, tc.expectedInput} || model.ContextWindow != 32_000 || model.MaxTokens != 4_000 {
 			t.Errorf("%d rows: model = %+v", len(tc.rows), model)
 		}
 	}
