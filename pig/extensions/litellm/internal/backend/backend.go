@@ -47,6 +47,9 @@ type Identity struct {
 var (
 	genericAdapters         = set("azure", "azure_ai", "custom_openai", "openai_like")
 	genericCatalogProviders = set("azure", "azure_ai", "custom_openai", "openai_like", "openai", "text-completion-openai")
+	// LiteLLM's openai provider is an OpenAI-compatible transport, so a model or base_model id
+	// there may namespace itself by vendor without contradicting the routing provider.
+	openAITransportProviders = set("openai", "text-completion-openai")
 	// openai is deliberately absent: LiteLLM uses that provider for any OpenAI-compatible server.
 	providerFamilies = map[string]Family{
 		"anthropic":  FamilyClaude,
@@ -141,12 +144,21 @@ func ResolveIdentity(entry types.ModelInfoEntry) *Identity {
 		customProvider = ""
 	}
 	if prefixProvider != "" && customProvider != "" && prefixProvider != customProvider {
-		if (baseModel != "" || configuredModel == "") && !modelPathSegments[prefixProvider] {
+		// An OpenAI-compatible transport says nothing about the backend, so a differing first
+		// segment on a base_model is a vendor namespace there too.
+		namespacesOverTransport := openAITransportProviders[customProvider]
+		if (baseModel != "" || configuredModel == "") && !modelPathSegments[prefixProvider] && !namespacesOverTransport {
 			return nil
 		}
-		raw = customProvider + "/" + raw
-		slash = len(customProvider)
-		prefixProvider = customProvider
+		if namespacesOverTransport && openAITransportProviders[prefixProvider] {
+			// Both segments name the same transport, so the prefix carries no vendor and must not
+			// reach the family scan. A transport prefix on a real provider stays.
+			prefixProvider = ""
+		} else {
+			raw = customProvider + "/" + raw
+			slash = len(customProvider)
+			prefixProvider = customProvider
+		}
 	}
 	provider := firstNonEmpty(prefixProvider, customProvider)
 	modelID := raw

@@ -103,6 +103,33 @@ func TestResolveBackendIdentity(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+	t.Run("reads a vendor namespace on the openai transport for a base_model", func(t *testing.T) {
+		// A live LiteLLM deployment routes through the OpenAI-compatible transport while
+		// base_model carries the vendor namespace; the identity must resolve, not be withheld.
+		entry := row("commandcode/deepseek/deepseek-v4.1-flash", &types.ModelInfoParams{CustomLLMProvider: "openai"})
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "deepseek/deepseek-v4.1-flash", LiteLLMProvider: "openai"}
+		got := ResolveIdentity(entry)
+		want := Identity{"openai", "deepseek/deepseek-v4.1-flash", "openai/deepseek/deepseek-v4.1-flash", FamilyDeepSeek}
+		if got == nil || *got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		// Both transport spellings resolve the same way.
+		entry.LiteLLMParams = &types.ModelInfoParams{CustomLLMProvider: "text-completion-openai"}
+		if spelled := ResolveIdentity(entry); spelled == nil || spelled.Family != FamilyDeepSeek || spelled.ModelID != "deepseek/deepseek-v4.1-flash" {
+			t.Errorf("text-completion-openai transport: got %+v", spelled)
+		}
+		// A transport label in the differing segment names no vendor and must not reach the family scan.
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "openai/qwen3", LiteLLMProvider: "text-completion-openai"}
+		entry.LiteLLMParams = &types.ModelInfoParams{Model: "openai/qwen3", CustomLLMProvider: "text-completion-openai"}
+		if label := ResolveIdentity(entry); label == nil || label.Family != "" || label.ModelID != "qwen3" {
+			t.Errorf("transport label reached the family scan: %+v", label)
+		}
+		entry.ModelInfo = &types.ModelInfoDetails{BaseModel: "deepseek/deepseek-v4.1-flash", LiteLLMProvider: "openai"}
+		entry.LiteLLMParams = &types.ModelInfoParams{CustomLLMProvider: "sagemaker"}
+		if conflicting := ResolveIdentity(entry); conflicting != nil {
+			t.Errorf("routing provider conflict resolved as %+v", conflicting)
+		}
+	})
 	t.Run("resolves the OpenRouter model namespace without a routing prefix", func(t *testing.T) {
 		cases := []struct {
 			model  string

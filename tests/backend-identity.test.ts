@@ -117,6 +117,51 @@ describe("resolveBackendIdentity", () => {
     });
   });
 
+  it("reads a vendor namespace on the openai transport instead of withholding the identity", () => {
+    // LiteLLM publishes this deployment with base_model `deepseek/deepseek-v4.1-flash` while
+    // routing it through the OpenAI-compatible transport. The prefix names the vendor, so the
+    // identity resolves; a routing provider that is not an OpenAI-compatible transport still
+    // contradicts an unrecognised first segment.
+    const row = {
+      model_name: "commandcode/deepseek/deepseek-v4.1-flash",
+      litellm_params: { model: "commandcode/deepseek/deepseek-v4.1-flash", custom_llm_provider: "openai" },
+      model_info: { base_model: "deepseek/deepseek-v4.1-flash", litellm_provider: "openai" },
+    };
+    expect(resolveBackendIdentity(row)).toEqual({
+      provider: "openai",
+      modelId: "deepseek/deepseek-v4.1-flash",
+      qualifiedId: "openai/deepseek/deepseek-v4.1-flash",
+      family: "deepseek",
+    });
+    expect(resolveCatalogProvider(row)).toBe("openai");
+    // Both transport spellings resolve the same way.
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        litellm_params: { ...row.litellm_params, custom_llm_provider: "text-completion-openai" },
+      }),
+    ).toMatchObject({
+      provider: "text-completion-openai",
+      modelId: "deepseek/deepseek-v4.1-flash",
+      family: "deepseek",
+    });
+    // A transport label in the differing segment names no vendor, so it must not reach the family
+    // scan: "openai/qwen3" stays familyless instead of being read as OpenAI.
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        model_info: { base_model: "openai/qwen3", litellm_provider: "text-completion-openai" },
+        litellm_params: { model: "openai/qwen3", custom_llm_provider: "text-completion-openai" },
+      }),
+    ).toEqual({ provider: "text-completion-openai", modelId: "qwen3", qualifiedId: "text-completion-openai/qwen3" });
+    expect(
+      resolveBackendIdentity({
+        ...row,
+        litellm_params: { ...row.litellm_params, custom_llm_provider: "sagemaker" },
+      }),
+    ).toBeUndefined();
+  });
+
   it.each([
     ["openai/gpt-4o", "openai"],
     ["deepseek/deepseek-v4.1-flash", "deepseek"],
