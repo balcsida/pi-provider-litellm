@@ -1219,7 +1219,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 14,
+      litellmDiscoveryVersion: 15,
     });
   });
 
@@ -2221,17 +2221,18 @@ describe("discoverModels via /model/info", () => {
     });
   });
 
-  it("keeps proven display prices while marking any unresolved cost field incomplete", async () => {
-    // Display cost reduces per field. Proven input/output survive, only unresolved
-    // fields fall to zero, and the model is still marked incomplete so unknown
-    // cache pricing is never presented as complete or free. A model must not lose
-    // the marker just because input and output happen to be known.
+  it("prices omitted cache rates at the router's input rate, as LiteLLM bills them", async () => {
+    // LiteLLM bills a cache rate the deployment omits at its input rate, so an
+    // unidentified backend priced with input and output only is complete: the
+    // cache fields take each deployment's input price and reduce to the maximum.
     const priced = (id: string, input: number) => ({
       model_name: "priced-without-cache-rates",
       litellm_params: { model: "internal/unknown" },
       model_info: {
         id,
         mode: "chat",
+        supports_reasoning: false,
+        supports_vision: false,
         max_input_tokens: 32_000,
         max_output_tokens: 4_000,
         input_cost_per_token: input,
@@ -2250,12 +2251,53 @@ describe("discoverModels via /model/info", () => {
       expect(result.models).toHaveLength(1);
       expect(result.models[0]).toMatchObject({
         id: "priced-without-cache-rates",
-        name: "priced-without-cache-rates (incomplete metadata)",
-        cost: { input: expectedInput, output: 15, cacheRead: 0, cacheWrite: 0 },
+        name: "priced-without-cache-rates",
+        cost: { input: expectedInput, output: 15, cacheRead: expectedInput, cacheWrite: expectedInput },
         contextWindow: 32_000,
         maxTokens: 4_000,
       });
     }
+  });
+
+  it("publishes a self-hosted vLLM route priced without cache rates as complete (#293)", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            {
+              model_name: "google/gemma-4-31B-it-qat-w4a16-ct",
+              litellm_params: {
+                input_cost_per_token: 1.2e-7,
+                output_cost_per_token: 3.5e-7,
+                api_base: "https://vllm.example.com/v1",
+                custom_llm_provider: "hosted_vllm",
+                model: "google/gemma-4-31B-it-qat-w4a16-ct",
+              },
+              model_info: {
+                input_cost_per_token: 1.2e-7,
+                output_cost_per_token: 3.5e-7,
+                key: "hosted_vllm/google/gemma-4-31B-it-qat-w4a16-ct",
+                max_tokens: 262144,
+                max_input_tokens: 262144,
+                max_output_tokens: 65536,
+                supports_vision: true,
+                supports_reasoning: true,
+                supports_function_calling: true,
+                supported_openai_params: ["tools", "tool_choice", "reasoning_effort", "thinking"],
+              },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models).toHaveLength(1);
+    expect(result.models[0]?.name).toBe("google/gemma-4-31B-it-qat-w4a16-ct");
+    expect(result.models[0]?.cost.input).toBeCloseTo(0.12);
+    expect(result.models[0]?.cost.output).toBeCloseTo(0.35);
+    expect(result.models[0]?.cost.cacheRead).toBeCloseTo(0.12);
+    expect(result.models[0]?.cost.cacheWrite).toBeCloseTo(0.12);
   });
 
   it("marks an ambiguous group incomplete despite complete router pricing and reports withheld authority", async () => {
@@ -5097,7 +5139,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         reasoning: false,
         contextWindow: 8_000,
         maxTokens: 1_000,
-        cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 1, output: 0, cacheRead: 1, cacheWrite: 1 },
         compat: {
           supportsDeveloperRole: false,
           supportsStrictMode: false,
@@ -5136,7 +5178,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
         input: ["text"],
         contextWindow: 8_000,
         maxTokens: 16_384,
-        cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 1, output: 0, cacheRead: 1, cacheWrite: 1 },
       }),
     ]);
   });
@@ -5442,7 +5484,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 14,
+          litellmDiscoveryVersion: 15,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,

@@ -1075,6 +1075,24 @@ func unbilledCacheWrite(catalog *CatalogResolution) bool {
 	return catalog.SemanticFamily == SemanticFamilyDeepSeek
 }
 
+// inputRateCachePrice is inputRateCachePrice in src/model-groups.ts: LiteLLM bills a cache rate
+// the deployment omits at its input rate (v1.103.0 and later; zero before, so this is never an
+// understatement), which makes the router's own input price the missing cache price. A catalog
+// price for the field, usable or not, says the backend bills something else, and an identified
+// family may bill writes above input (Claude, GPT-5.6+), so both keep the price unknown.
+func inputRateCachePrice(entry types.ModelInfoEntry, catalog *CatalogResolution, field costField) *float64 {
+	if field != costCacheRead && field != costCacheWrite {
+		return nil
+	}
+	if catalogCostField(catalog, field) != nil {
+		return nil
+	}
+	if field == costCacheWrite && catalog != nil && catalog.SemanticFamily != "" {
+		return nil
+	}
+	return explicitCost(entry, costInput)
+}
+
 func minOf(values []float64) float64 {
 	out := math.Inf(1)
 	for _, value := range values {
@@ -1437,6 +1455,9 @@ func ReduceModelGroup(entries []types.ModelInfoEntry, resolveCatalog CatalogReso
 			if costValues[field][i] == nil && field == costCacheWrite && unbilledCacheWrite(catalogs[i]) {
 				zero := 0.0
 				costValues[field][i] = &zero
+			}
+			if costValues[field][i] == nil {
+				costValues[field][i] = inputRateCachePrice(entry, catalogs[i], field)
 			}
 			if costValues[field][i] == nil {
 				complete = false

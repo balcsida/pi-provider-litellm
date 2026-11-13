@@ -671,6 +671,22 @@ function unbilledCacheWrite(catalog: CatalogResolution | undefined): boolean {
   return declared === undefined ? catalog?.semanticFamily === "deepseek" : declared === 0;
 }
 
+// LiteLLM bills a cache rate the deployment omits at its input rate (v1.103.0 and later;
+// zero before, so this is never an understatement), which makes the router's own input price
+// the missing cache price. A catalog price for the field, usable or not, says the backend
+// bills something else, and an identified family may bill writes above input (Claude,
+// GPT-5.6+), so both keep the price unknown.
+function inputRateCachePrice(
+  entry: ModelInfoEntry,
+  catalog: CatalogResolution | undefined,
+  field: CostField,
+): number | undefined {
+  if (field !== "cacheRead" && field !== "cacheWrite") return undefined;
+  if (catalog?.cost?.[field] !== undefined) return undefined;
+  if (field === "cacheWrite" && catalog?.semanticFamily !== undefined) return undefined;
+  return explicitCost(entry, "input");
+}
+
 function min(values: readonly number[]): number {
   return Math.min(...values);
 }
@@ -863,7 +879,9 @@ export function reduceModelGroup(
     deployments.map(
       (entry, index) =>
         resolvedCost(entry, catalogAuthority[index], field) ??
-        (field === "cacheWrite" && unbilledCacheWrite(catalogs[index]) ? 0 : undefined),
+        (field === "cacheWrite" && unbilledCacheWrite(catalogs[index])
+          ? 0
+          : inputRateCachePrice(entry, catalogs[index], field)),
     ),
   );
   const completeCostFields = costValues.map((values) => values.every((value) => value !== undefined));
