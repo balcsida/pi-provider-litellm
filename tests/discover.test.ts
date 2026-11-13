@@ -1220,7 +1220,7 @@ describe("discoverModels via /model/info", () => {
       id: "gpt-production",
       api: "openai-completions",
       litellmBackendFamily: "openai",
-      litellmDiscoveryVersion: 15,
+      litellmDiscoveryVersion: 16,
     });
   });
 
@@ -2641,6 +2641,103 @@ describe("discoverModels via /model/info", () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("missing or conflicting");
     expect(diagnostics[0]).toContain(route);
+  });
+
+  it("reduces a route from its active deployments, ignoring paused siblings", async () => {
+    // LiteLLM's Model Management pause sets `model_info.blocked: true`: the router never serves
+    // that deployment, but `/model/info` still lists it (#299).
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const route = `paused-siblings-${process.pid}-${Date.now()}-${Math.random()}`;
+    const active = {
+      model_name: route,
+      litellm_params: { custom_llm_provider: "openai", model: "deepseek-v4-flash-0731" },
+      model_info: { id: "c", mode: "chat", blocked: false, max_input_tokens: 64_000, input_cost_per_token: 1e-6 },
+    };
+    const paused = (id: string, model: string) => ({
+      model_name: route,
+      litellm_params: { custom_llm_provider: "openai", model },
+      model_info: { id, mode: "chat", blocked: true },
+    });
+    const discover = async (data: unknown[]) => {
+      mockEndpoints({ "/model/info": () => jsonResponse(200, { data }) });
+      return (await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false })).models;
+    };
+
+    const alone = await discover([active]);
+    const withPaused = await discover([paused("a", "mimo-v2.6-flash"), paused("b", "glm-5.3-flash"), active]);
+
+    expect(alone).toHaveLength(1);
+    expect(alone[0]?.contextWindow).toBe(64_000);
+    expect(withPaused).toEqual(alone);
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("publishes nothing for a route whose every deployment is paused", async () => {
+    // `/v1/models` hides such a route too, and a request to it finds no deployment.
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [
+            { model_name: "live", litellm_params: { model: "openai/gpt-4o" }, model_info: { id: "a", mode: "chat" } },
+            {
+              model_name: "paused",
+              litellm_params: { model: "openai/gpt-4o" },
+              model_info: { id: "b", mode: "chat", blocked: true },
+            },
+            {
+              model_name: "paused-images",
+              litellm_params: { model: "openai/gpt-image-1" },
+              model_info: { id: "c", mode: "image_generation", blocked: true },
+            },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map((model) => model.id)).toEqual(["live"]);
+    expect(result.imageModels).toBeUndefined();
+  });
+
+  it("falls back to /v1/models when /model/info lists only paused deployments", async () => {
+    mockEndpoints({
+      "/model/info": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "paused", litellm_params: { model: "openai/gpt-4o" }, model_info: { blocked: true } }],
+        }),
+      "/v1/models": () => jsonResponse(200, { data: [{ id: "listed" }] }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.source).toBe("models_list");
+    expect(result.models.map((model) => model.id)).toEqual(["listed"]);
+  });
+
+  it("skips a paused deployment that /health still reports", async () => {
+    mockEndpoints({
+      "/model/info?litellm_model_id=uuid-1": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "paused", litellm_params: { model: "openai/gpt-4o" }, model_info: { blocked: true } }],
+        }),
+      "/model/info?litellm_model_id=uuid-2": () =>
+        jsonResponse(200, {
+          data: [{ model_name: "live", litellm_params: { model: "openai/gpt-4o" }, model_info: { id: "uuid-2" } }],
+        }),
+      "/model/info": () => jsonResponse(403, {}),
+      "/v1/models": () => jsonResponse(404, {}),
+      "/health": () =>
+        jsonResponse(200, {
+          healthy_endpoints: [
+            { model: "paused", model_id: "uuid-1" },
+            { model: "live", model_id: "uuid-2" },
+          ],
+        }),
+    });
+
+    const result = await discoverModels("https://litellm.example.com", "sk-test", { modelsDev: false });
+
+    expect(result.models.map((model) => model.id)).toEqual(["live"]);
   });
 
   it("withholds mixed-mode routes and reports one bounded diagnostic", async () => {
@@ -5507,7 +5604,7 @@ describe("discoverModels wildcard expansion via /v1/models", () => {
           id: "team/claude-sonnet-4-6",
           name: "Claude Sonnet 4.6",
           api: "openai-completions",
-          litellmDiscoveryVersion: 15,
+          litellmDiscoveryVersion: 16,
           reasoning: false,
           input: ["text"],
           contextWindow: 40_000,

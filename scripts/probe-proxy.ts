@@ -132,7 +132,10 @@ export function normalizeBaseUrl(input: string): string {
 
 function rowsFrom(value: unknown): BackendIdentityRow[] {
   if (!isRecord(value) || !Array.isArray(value.data)) return [];
-  return value.data.filter(isRecord) as BackendIdentityRow[];
+  // Discovery ignores paused deployments (`model_info.blocked: true`), so predictions must too.
+  return value.data.filter(
+    (row) => isRecord(row) && !(isRecord(row.model_info) && row.model_info.blocked === true),
+  ) as BackendIdentityRow[];
 }
 
 async function optionalJson(path: string): Promise<unknown | undefined> {

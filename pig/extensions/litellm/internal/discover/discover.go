@@ -62,6 +62,14 @@ func isMissingOrDenied(status int) bool {
 	return status == 401 || status == 403 || status == 404
 }
 
+// isPaused is isPaused: a deployment paused in LiteLLM's Model Management (v1.87.0+) keeps its
+// /model/info row with `model_info.blocked: true`, but the router never serves it and /v1/models
+// hides a route whose every deployment is paused. It is no evidence for its route and publishes
+// nothing.
+func isPaused(entry *types.ModelInfoEntry) bool {
+	return entry != nil && entry.ModelInfo != nil && entry.ModelInfo.Blocked != nil && *entry.ModelInfo.Blocked
+}
+
 // DiscoverModels is discoverModels.
 func DiscoverModels(ctx context.Context, baseURL, apiKey string, options Options) (*types.DiscoveryResult, error) {
 	base, err := protocols.NormalizeBaseURL(baseURL, options.AllowInsecureHTTP)
@@ -75,6 +83,7 @@ func DiscoverModels(ctx context.Context, baseURL, apiKey string, options Options
 	}
 	// An empty /model/info list is treated like an unavailable endpoint: some proxies answer 200
 	// with no rows for keys that can still list models through /v1/models.
+	infoResult.Data.Data = slices.DeleteFunc(infoResult.Data.Data, func(entry types.ModelInfoEntry) bool { return isPaused(&entry) })
 	if infoResult.OK && len(infoResult.Data.Data) > 0 {
 		return discoverFromModelInfo(ctx, base, apiKey, options, infoResult.Data)
 	}
@@ -431,7 +440,9 @@ func discoverFromHealth(ctx context.Context, base, apiKey string, options Option
 			if completed%10 == 0 || completed == len(endpoints) {
 				options.progress(fmt.Sprintf("Fetched %d/%d models...", completed, len(endpoints)))
 			}
-			deployments[index] = healthDeploymentFor(detail, route, deploymentID)
+			if !isPaused(detail) {
+				deployments[index] = healthDeploymentFor(detail, route, deploymentID)
+			}
 			mu.Unlock()
 		}
 	}

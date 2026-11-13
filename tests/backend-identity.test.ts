@@ -290,7 +290,7 @@ describe("resolveBackendIdentity", () => {
     for (const id of ["azure/kimi-k3", "deepseek-v4", "glm-5"]) {
       expect(isOpenAIBackend(id)).toBe(false);
     }
-    expect(LITELLM_DISCOVERY_VERSION).toBe(15);
+    expect(LITELLM_DISCOVERY_VERSION).toBe(16);
   });
 
   it("takes the family from the model id, never from an adapter prefix", () => {

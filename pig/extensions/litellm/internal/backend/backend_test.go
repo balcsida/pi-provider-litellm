@@ -257,7 +257,7 @@ func TestResolveBackendIdentity(t *testing.T) {
 				t.Errorf("%s should not be OpenAI", id)
 			}
 		}
-		if DiscoveryVersion != 15 {
+		if DiscoveryVersion != 16 {
 			t.Errorf("DiscoveryVersion = %d", DiscoveryVersion)
 		}
 	})

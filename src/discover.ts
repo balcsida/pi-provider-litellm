@@ -964,6 +964,13 @@ function mapFromModelsList(entry: ModelsListEntry): DiscoveredModel | undefined 
   };
 }
 
+// A deployment paused in LiteLLM's Model Management (v1.87.0+) keeps its `/model/info` row with
+// `model_info.blocked: true`, but the router never serves it and `/v1/models` hides a route whose
+// every deployment is paused. It is no evidence for its route and publishes nothing.
+function isPaused(entry: ModelInfoEntry | undefined): boolean {
+  return entry?.model_info?.blocked === true;
+}
+
 async function discoverFromHealth(
   base: string,
   apiKey: string,
@@ -1000,7 +1007,7 @@ async function discoverFromHealth(
       if (completed % 10 === 0 || completed === endpoints.length) {
         progress?.(`Fetched ${completed}/${endpoints.length} models...`);
       }
-      deployments[index] = healthDeployment(detail, route, deploymentId);
+      if (!isPaused(detail)) deployments[index] = healthDeployment(detail, route, deploymentId);
     }
   };
   await Promise.all(Array.from({ length: Math.min(HEALTH_DETAIL_CONCURRENCY, endpoints.length) }, () => worker()));
@@ -1298,7 +1305,7 @@ export async function discoverModels(
   const infoResult = await fetchJson<ModelInfoResponse>(`${base}/model/info`, apiKey, options);
   // An empty `/model/info` list is treated like an unavailable endpoint: some proxies
   // answer 200 with no rows for keys that can still list models through `/v1/models`.
-  const infoEntries = infoResult.ok ? (infoResult.data.data ?? []) : [];
+  const infoEntries = (infoResult.ok ? (infoResult.data.data ?? []) : []).filter((entry) => !isPaused(entry));
   if (infoEntries.length > 0) {
     const groups = new Map<string, ModelInfoEntry[]>();
     for (const entry of infoEntries) {

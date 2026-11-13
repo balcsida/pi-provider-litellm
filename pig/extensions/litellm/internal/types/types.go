@@ -27,7 +27,7 @@ const (
 )
 
 // DiscoveryVersion is LITELLM_DISCOVERY_VERSION.
-const DiscoveryVersion = 15
+const DiscoveryVersion = 16
 
 // BackendFamily is a backend vendor family; the empty string means no family.
 type BackendFamily string
@@ -136,6 +136,7 @@ type ModelInfoParams struct {
 
 type ModelInfoDetails struct {
 	ID                             string   `json:"id,omitempty"`
+	Blocked                        *bool    `json:"blocked,omitempty"`
 	Mode                           *string  `json:"mode,omitempty"`
 	BaseModel                      string   `json:"base_model,omitempty"`
 	LiteLLMProvider                string   `json:"litellm_provider,omitempty"`
