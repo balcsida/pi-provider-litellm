@@ -103,6 +103,7 @@ export interface ModelInfoEntry {
   };
   model_info?: {
     id?: string;
+    blocked?: boolean;
     mode?: string | null;
     base_model?: string;
     litellm_provider?: string;

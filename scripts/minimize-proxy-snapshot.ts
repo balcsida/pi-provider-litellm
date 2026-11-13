@@ -6,6 +6,7 @@ const API_BASE_PLACEHOLDER = "https://example.invalid";
 const MODEL_PARAMS = ["model", "custom_llm_provider", "api_base", "api_version", "allowed_openai_params"] as const;
 const MODEL_INFO = [
   "id",
+  "blocked",
   "base_model",
   "litellm_provider",
   "mode",

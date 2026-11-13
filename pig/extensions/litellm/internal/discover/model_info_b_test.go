@@ -325,6 +325,76 @@ func TestModelInfoB_ReportsARouteWhoseDeploymentsSupplyPartialProviderEvidence(t
 	}
 }
 
+func TestModelInfoB_ReducesARouteFromItsActiveDeploymentsIgnoringPausedSiblings(t *testing.T) {
+	// LiteLLM's Model Management pause sets `model_info.blocked: true`: the router never serves that
+	// deployment, but /model/info still lists it (#299).
+	route := "paused-siblings-route"
+	active := fmt.Sprintf(`{"model_name":%q,"litellm_params":{"custom_llm_provider":"openai","model":"deepseek-v4-flash-0731"},`+
+		`"model_info":{"id":"c","mode":"chat","blocked":false,"max_input_tokens":64000,"input_cost_per_token":0.000001}}`, route)
+	paused := func(id, model string) string {
+		return fmt.Sprintf(`{"model_name":%q,"litellm_params":{"custom_llm_provider":"openai","model":%q},`+
+			`"model_info":{"id":%q,"mode":"chat","blocked":true}}`, route, model, id)
+	}
+
+	alone, _ := modelInfoBDiscover(t, active)
+	withPaused, collected := modelInfoBDiscover(t, paused("a", "mimo-v2.6-flash"), paused("b", "glm-5.3-flash"), active)
+
+	if len(alone.Models) != 1 || alone.Models[0].ContextWindow != 64000 {
+		t.Fatalf("alone = %+v", alone.Models)
+	}
+	if !reflect.DeepEqual(withPaused.Models, alone.Models) {
+		t.Errorf("with paused siblings = %+v, want %+v", withPaused.Models, alone.Models)
+	}
+	if lines := collected.Lines(); len(lines) != 0 {
+		t.Errorf("diagnostics = %q, want none", lines)
+	}
+}
+
+func TestModelInfoB_PublishesNothingForARouteWhoseEveryDeploymentIsPaused(t *testing.T) {
+	// /v1/models hides such a route too, and a request to it finds no deployment.
+	result, _ := modelInfoBDiscover(t,
+		`{"model_name":"live","litellm_params":{"model":"openai/gpt-4o"},"model_info":{"id":"a","mode":"chat"}}`,
+		`{"model_name":"paused","litellm_params":{"model":"openai/gpt-4o"},"model_info":{"id":"b","mode":"chat","blocked":true}}`)
+
+	if ids := modelInfoBIDs(result.Models); !reflect.DeepEqual(ids, []string{"live"}) {
+		t.Errorf("ids = %v", ids)
+	}
+}
+
+func TestModelInfoB_FallsBackToV1ModelsWhenModelInfoListsOnlyPausedDeployments(t *testing.T) {
+	options, _ := testOptions(t)
+	result := discover(t, modelInfoBEndpoints(t, map[string]http.HandlerFunc{
+		"/model/info": jsonResponse(200, modelInfoBody(
+			`{"model_name":"paused","litellm_params":{"model":"openai/gpt-4o"},"model_info":{"blocked":true}}`)),
+		"/v1/models": jsonResponse(200, json.RawMessage(`{"data":[{"id":"listed"}]}`)),
+	}), options)
+
+	if result.Source != types.SourceModelsList {
+		t.Errorf("source = %q", result.Source)
+	}
+	if ids := modelInfoBIDs(result.Models); !reflect.DeepEqual(ids, []string{"listed"}) {
+		t.Errorf("ids = %v", ids)
+	}
+}
+
+func TestModelInfoB_SkipsAPausedDeploymentThatHealthStillReports(t *testing.T) {
+	options, _ := testOptions(t)
+	result := discover(t, modelInfoBEndpoints(t, map[string]http.HandlerFunc{
+		"/model/info?litellm_model_id=uuid-1": jsonResponse(200, modelInfoBody(
+			`{"model_name":"paused","litellm_params":{"model":"openai/gpt-4o"},"model_info":{"blocked":true}}`)),
+		"/model/info?litellm_model_id=uuid-2": jsonResponse(200, modelInfoBody(
+			`{"model_name":"live","litellm_params":{"model":"openai/gpt-4o"},"model_info":{"id":"uuid-2"}}`)),
+		"/model/info": jsonResponse(403, json.RawMessage(`{}`)),
+		"/v1/models":  jsonResponse(404, json.RawMessage(`{}`)),
+		"/health": jsonResponse(200, json.RawMessage(
+			`{"healthy_endpoints":[{"model":"paused","model_id":"uuid-1"},{"model":"live","model_id":"uuid-2"}]}`)),
+	}), options)
+
+	if ids := modelInfoBIDs(result.Models); !reflect.DeepEqual(ids, []string{"live"}) {
+		t.Errorf("ids = %v", ids)
+	}
+}
+
 func TestModelInfoB_WithholdsMixedModeRoutesAndReportsOneBoundedDiagnostic(t *testing.T) {
 	routes := []string{"mixed-mode-1", "mixed-mode-2", "mixed-mode-3", "mixed-mode-4"}
 	var rows []string

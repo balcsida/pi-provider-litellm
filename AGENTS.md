@@ -45,6 +45,9 @@
 - Prefer `/model/info` for rich metadata. Use `/v1/models` as the fallback only when `/model/info` returns 401, 403,
   or 404, or succeeds with no entries (some virtual keys see an empty list); after a non-empty `/model/info`, also
   query `/v1/models` only to expand wildcard routes.
+- Drop a paused deployment (`model_info.blocked: true`, LiteLLM's own `is True` test, v1.87.0+) before grouping
+  (`isPaused`): the router never serves it, `/v1/models` hides a route whose every deployment is paused, and
+  `/model/info` still lists it. It is no evidence for chat, image or decision routes; the Go port mirrors it.
 - Treat `model_name` as a public route group, not backend evidence. Resolve backend identity from
   `model_info.base_model` before `litellm_params.model`; treat `custom_llm_provider` as provider evidence. LiteLLM
   prepends a `custom_llm_provider` to a configured `litellm_params.model` whose first segment differs
