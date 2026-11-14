@@ -19,7 +19,8 @@ import (
 
 var hermeticVars = []string{
 	envBaseURL, envAPIKey, envAPIKeyHelper, envStartupKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
-	envVerboseDiscovery, envModelsDev, envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
+	envVerboseDiscovery, envModelsDev, envEnableSkills, envEnableMCP, envEnableBudget,
+	envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
 	envPIOffline, envPIGOffline, "PIG_USE_PI_DIRS", "PIG_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
 	envProviders, envProvidersJSON, "LITELLM_TRUST_PROXY_LIMITS",
 }
@@ -205,6 +206,37 @@ func TestIsFeatureEnabled(t *testing.T) {
 	if !isFeatureEnabled(nil, "skills") {
 		t.Error("nil settings enable every feature")
 	}
+
+	t.Run("a set, non-empty variable overrides the settings block, both ways", func(t *testing.T) {
+		for feature, envName := range featureEnv {
+			for _, value := range []string{"1", "true"} {
+				t.Setenv(envName, value)
+				if !isFeatureEnabled(settings, feature) {
+					t.Errorf("%s=%s: got disabled, want enabled", envName, value)
+				}
+			}
+			for _, value := range []string{"0", "false", "off"} {
+				t.Setenv(envName, value)
+				if isFeatureEnabled(settings, feature) {
+					t.Errorf("%s=%s: got enabled, want disabled", envName, value)
+				}
+			}
+		}
+	})
+
+	t.Run("an empty or unset variable defers to the settings block", func(t *testing.T) {
+		for feature, want := range map[string]bool{"skills": false, "mcp": true, "budget": true} {
+			envName := featureEnv[feature]
+			t.Setenv(envName, "")
+			if got := isFeatureEnabled(settings, feature); got != want {
+				t.Errorf("%s=: got %v, want %v", envName, got, want)
+			}
+			os.Unsetenv(envName)
+			if got := isFeatureEnabled(settings, feature); got != want {
+				t.Errorf("%s unset: got %v, want %v", envName, got, want)
+			}
+		}
+	})
 }
 
 func TestEnvironmentHelpers(t *testing.T) {
