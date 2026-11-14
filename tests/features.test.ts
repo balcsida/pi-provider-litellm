@@ -14,6 +14,7 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isFeatureEnabled } from "../src/index.js";
 import type { LiteLLMModelPolicy } from "../src/types.js";
 import { createPi, loadExtension, type TestPi, useHermeticEnv } from "./test-helpers.js";
 
@@ -369,6 +370,90 @@ describe("feature parity", () => {
     await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, {})).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(requestedUrls.some((url) => url.includes("/skills"))).toBe(false);
+  });
+
+  it("disables LiteLLM skills through LITELLM_ENABLE_SKILLS even when the settings block enables them", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { skills: { enabled: true } } }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    process.env.LITELLM_ENABLE_SKILLS = "0";
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      requestedUrls.push(String(input));
+      return jsonResponse(200, { data: [] });
+    });
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+    fetchMock.mockClear();
+
+    expect(pi.tools.map((tool) => tool.name)).not.toContain("litellm_skill_list");
+    const beforeAgentStart = pi.handlers.get("before_agent_start")?.[0];
+    await expect(beforeAgentStart?.({ systemPrompt: "Base prompt" }, {})).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(requestedUrls.some((url) => url.includes("/skills"))).toBe(false);
+  });
+
+  it("enables LiteLLM skills through LITELLM_ENABLE_SKILLS even when the settings block disables them", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-provider-litellm-"));
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ litellm: { skills: { enabled: false } } }),
+      "utf8",
+    );
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-test";
+    process.env.LITELLM_ENABLE_SKILLS = "1";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse(200, { data: [] }));
+
+    const extension = await loadExtension(agentDir);
+    const pi = createPi();
+    await extension(pi);
+
+    expect(pi.tools.map((tool) => tool.name)).toContain("litellm_skill_list");
+  });
+
+  describe("LITELLM_ENABLE_* feature overrides", () => {
+    const env = process.env;
+    const features: Array<["skills" | "mcp" | "budget", string]> = [
+      ["skills", "LITELLM_ENABLE_SKILLS"],
+      ["mcp", "LITELLM_ENABLE_MCP"],
+      ["budget", "LITELLM_ENABLE_BUDGET"],
+    ];
+
+    it("a set, non-empty variable overrides the settings block, both ways", () => {
+      for (const [feature, name] of features) {
+        const enabled: Record<string, unknown> = { [feature]: { enabled: true } };
+        const disabled: Record<string, unknown> = { [feature]: { enabled: false } };
+        for (const value of ["1", "true"]) {
+          env[name] = value;
+          expect(isFeatureEnabled(disabled, feature)).toBe(true);
+        }
+        for (const value of ["0", "false", "off"]) {
+          env[name] = value;
+          expect(isFeatureEnabled(enabled, feature)).toBe(false);
+        }
+      }
+    });
+
+    it("an empty or unset variable defers to the settings block", () => {
+      for (const [feature, name] of features) {
+        const enabled: Record<string, unknown> = { [feature]: { enabled: true } };
+        const disabled: Record<string, unknown> = { [feature]: { enabled: false } };
+        delete env[name];
+        expect(isFeatureEnabled(enabled, feature)).toBe(true);
+        expect(isFeatureEnabled(disabled, feature)).toBe(false);
+        env[name] = "";
+        expect(isFeatureEnabled(enabled, feature)).toBe(true);
+        expect(isFeatureEnabled(disabled, feature)).toBe(false);
+      }
+    });
   });
 
   it("requests models.dev only when LITELLM_MODELS_DEV opts in", async () => {
