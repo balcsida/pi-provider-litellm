@@ -422,6 +422,30 @@ func TestSkillsThroughTheHooks(t *testing.T) {
 		}
 	})
 
+	t.Run("disables LiteLLM skills through LITELLM_ENABLE_SKILLS even when the settings block enables them", func(t *testing.T) {
+		server, seen := skillsServer(t, scriptedReply{200, `{"data":[]}`})
+		hooks, _, host := wireEnv(t, `{"litellm":{"skills":{"enabled":true},"budget":{"enabled":false}}}`, map[string]string{envEnableSkills: "0"})
+		host.setAuth(providerName, &types.LiteLLMRuntimeAuth{BaseURL: server.URL, APIKey: "sk-test"})
+		if len(hooks.tools) != 0 {
+			t.Fatalf("tools = %v", hooks.tools)
+		}
+		for _, result := range hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("Base prompt")}) {
+			if result != nil {
+				t.Fatalf("a before_agent_start handler answered: %v", result)
+			}
+		}
+		if len(seen()) != 0 {
+			t.Fatalf("requests = %v", paths(seen()))
+		}
+	})
+
+	t.Run("enables LiteLLM skills through LITELLM_ENABLE_SKILLS even when the settings block disables them", func(t *testing.T) {
+		hooks, _, _ := wireEnv(t, `{"litellm":{"skills":{"enabled":false},"budget":{"enabled":false}}}`, map[string]string{envEnableSkills: "1"})
+		if !slices.Contains(hooks.tools, "litellm_skill_list") {
+			t.Fatalf("tools = %v", hooks.tools)
+		}
+	})
+
 	t.Run("clears cached Skills auth when the host reports revoked credentials", func(t *testing.T) {
 		server, seen := skillsServer(t, scriptedReply{200, `[]`})
 		hooks, state, host := wire(t, `{"litellm":{"budget":{"enabled":false}}}`)
