@@ -959,8 +959,8 @@ func normalizeProviderSettings(raw any) map[string]any {
 }
 
 // featureEnv maps a "skills", "mcp" or "budget" feature to the environment variable that overrides its
-// settings block: a set, non-empty value decides the feature on its own (parseBooleanSetting), and an
-// unset or empty value defers to the block.
+// settings block: 1, true, yes or on switch the feature on and any other value off, so a misspelt kill
+// switch still kills. An unset or blank value defers to the block.
 var featureEnv = map[string]string{
 	"skills": envEnableSkills,
 	"mcp":    envEnableMCP,
@@ -969,8 +969,8 @@ var featureEnv = map[string]string{
 
 // isFeatureEnabled reports whether the "skills", "mcp" or "budget" block is not disabled.
 func isFeatureEnabled(settings *litellmSettings, feature string) bool {
-	if raw := os.Getenv(featureEnv[feature]); raw != "" {
-		return parseBooleanSetting(raw)
+	if value := strings.ToLower(strings.TrimSpace(os.Getenv(featureEnv[feature]))); value != "" {
+		return slices.Contains([]string{"1", "true", "yes", "on"}, value)
 	}
 	if settings == nil {
 		return true

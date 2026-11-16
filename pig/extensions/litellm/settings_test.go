@@ -207,33 +207,40 @@ func TestIsFeatureEnabled(t *testing.T) {
 		t.Error("nil settings enable every feature")
 	}
 
+	block := func(feature string, enabled bool) *litellmSettings {
+		return &litellmSettings{Values: map[string]any{feature: map[string]any{"enabled": enabled}}}
+	}
+
 	t.Run("a set, non-empty variable overrides the settings block, both ways", func(t *testing.T) {
 		for feature, envName := range featureEnv {
-			for _, value := range []string{"1", "true"} {
+			for _, value := range []string{"1", "true", "yes", "on", "TRUE", " 1 "} {
 				t.Setenv(envName, value)
-				if !isFeatureEnabled(settings, feature) {
-					t.Errorf("%s=%s: got disabled, want enabled", envName, value)
+				if !isFeatureEnabled(block(feature, false), feature) {
+					t.Errorf("%s=%q: got disabled, want enabled", envName, value)
 				}
 			}
-			for _, value := range []string{"0", "false", "off"} {
+			for _, value := range []string{"0", "false", "no", "off", "enabled"} {
 				t.Setenv(envName, value)
-				if isFeatureEnabled(settings, feature) {
-					t.Errorf("%s=%s: got enabled, want disabled", envName, value)
+				if isFeatureEnabled(block(feature, true), feature) {
+					t.Errorf("%s=%q: got enabled, want disabled", envName, value)
 				}
 			}
 		}
 	})
 
-	t.Run("an empty or unset variable defers to the settings block", func(t *testing.T) {
-		for feature, want := range map[string]bool{"skills": false, "mcp": true, "budget": true} {
-			envName := featureEnv[feature]
-			t.Setenv(envName, "")
-			if got := isFeatureEnabled(settings, feature); got != want {
-				t.Errorf("%s=: got %v, want %v", envName, got, want)
-			}
-			os.Unsetenv(envName)
-			if got := isFeatureEnabled(settings, feature); got != want {
-				t.Errorf("%s unset: got %v, want %v", envName, got, want)
+	t.Run("an empty, blank or unset variable defers to the settings block", func(t *testing.T) {
+		for feature, envName := range featureEnv {
+			for _, want := range []bool{true, false} {
+				for _, value := range []string{"", " "} {
+					t.Setenv(envName, value)
+					if got := isFeatureEnabled(block(feature, want), feature); got != want {
+						t.Errorf("%s=%q: got %v, want %v", envName, value, got, want)
+					}
+				}
+				os.Unsetenv(envName)
+				if got := isFeatureEnabled(block(feature, want), feature); got != want {
+					t.Errorf("%s unset: got %v, want %v", envName, got, want)
+				}
 			}
 		}
 	})

@@ -431,27 +431,29 @@ describe("feature parity", () => {
       for (const [feature, name] of features) {
         const enabled: Record<string, unknown> = { [feature]: { enabled: true } };
         const disabled: Record<string, unknown> = { [feature]: { enabled: false } };
-        for (const value of ["1", "true"]) {
+        for (const value of ["1", "true", "yes", "on", "TRUE", " 1 "]) {
           env[name] = value;
           expect(isFeatureEnabled(disabled, feature)).toBe(true);
         }
-        for (const value of ["0", "false", "off"]) {
+        for (const value of ["0", "false", "no", "off", "enabled"]) {
           env[name] = value;
           expect(isFeatureEnabled(enabled, feature)).toBe(false);
         }
       }
     });
 
-    it("an empty or unset variable defers to the settings block", () => {
+    it("an empty, blank or unset variable defers to the settings block", () => {
       for (const [feature, name] of features) {
         const enabled: Record<string, unknown> = { [feature]: { enabled: true } };
         const disabled: Record<string, unknown> = { [feature]: { enabled: false } };
         delete env[name];
         expect(isFeatureEnabled(enabled, feature)).toBe(true);
         expect(isFeatureEnabled(disabled, feature)).toBe(false);
-        env[name] = "";
-        expect(isFeatureEnabled(enabled, feature)).toBe(true);
-        expect(isFeatureEnabled(disabled, feature)).toBe(false);
+        for (const value of ["", " "]) {
+          env[name] = value;
+          expect(isFeatureEnabled(enabled, feature)).toBe(true);
+          expect(isFeatureEnabled(disabled, feature)).toBe(false);
+        }
       }
     });
   });
