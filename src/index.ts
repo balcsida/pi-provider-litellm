@@ -781,9 +781,9 @@ function normalizeProviderSettings(raw: unknown): RawProviderSettings | undefine
   };
 }
 
-// A feature's LITELLM_ENABLE_* variable overrides its settings block: 1, true, yes or on switch the
-// feature on and any other value off, so a misspelt kill switch still kills. An unset or blank value
-// defers to the block.
+// A feature's LITELLM_ENABLE_* variable overrides its settings block, read like every other boolean
+// here: 1 or true switch the feature on and any other value off, so a misspelt kill switch still
+// kills. An unset or blank value defers to the block.
 const ENV_FEATURES: Record<"skills" | "mcp" | "budget", string> = {
   skills: "LITELLM_ENABLE_SKILLS",
   mcp: "LITELLM_ENABLE_MCP",
@@ -794,8 +794,8 @@ export function isFeatureEnabled(
   settings: Record<string, unknown> | undefined,
   feature: "skills" | "mcp" | "budget",
 ): boolean {
-  const envValue = process.env[ENV_FEATURES[feature]]?.trim().toLowerCase();
-  if (envValue) return ["1", "true", "yes", "on"].includes(envValue);
+  const envValue = process.env[ENV_FEATURES[feature]];
+  if (envValue?.trim()) return parseBooleanSetting(envValue);
   const raw = settings?.[feature];
   return !isPlainObject(raw) || raw.enabled !== false;
 }

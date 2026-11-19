@@ -431,11 +431,11 @@ describe("feature parity", () => {
       for (const [feature, name] of features) {
         const enabled: Record<string, unknown> = { [feature]: { enabled: true } };
         const disabled: Record<string, unknown> = { [feature]: { enabled: false } };
-        for (const value of ["1", "true", "yes", "on", "TRUE", " 1 "]) {
+        for (const value of ["1", "true", "TRUE", " 1 "]) {
           env[name] = value;
           expect(isFeatureEnabled(disabled, feature)).toBe(true);
         }
-        for (const value of ["0", "false", "no", "off", "enabled"]) {
+        for (const value of ["0", "false", "no", "off", "yes", "on", "enabled"]) {
           env[name] = value;
           expect(isFeatureEnabled(enabled, feature)).toBe(false);
         }

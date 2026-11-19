@@ -213,13 +213,13 @@ func TestIsFeatureEnabled(t *testing.T) {
 
 	t.Run("a set, non-empty variable overrides the settings block, both ways", func(t *testing.T) {
 		for feature, envName := range featureEnv {
-			for _, value := range []string{"1", "true", "yes", "on", "TRUE", " 1 "} {
+			for _, value := range []string{"1", "true", "TRUE", " 1 "} {
 				t.Setenv(envName, value)
 				if !isFeatureEnabled(block(feature, false), feature) {
 					t.Errorf("%s=%q: got disabled, want enabled", envName, value)
 				}
 			}
-			for _, value := range []string{"0", "false", "no", "off", "enabled"} {
+			for _, value := range []string{"0", "false", "no", "off", "yes", "on", "enabled"} {
 				t.Setenv(envName, value)
 				if isFeatureEnabled(block(feature, true), feature) {
 					t.Errorf("%s=%q: got enabled, want disabled", envName, value)
