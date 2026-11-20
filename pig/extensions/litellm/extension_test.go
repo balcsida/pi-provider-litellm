@@ -720,7 +720,16 @@ func (h *fakeHookHost) FindModel(provider, modelID string) map[string]any {
 // wire builds the state from the settings file and registers every handler into a recording registrar.
 func wire(t *testing.T, settings string) (*recordingHooks, *extensionState, *fakeHookHost) {
 	t.Helper()
+	return wireEnv(t, settings, nil)
+}
+
+// wireEnv is wire with variables set before the hooks register: the feature switches are read then.
+func wireEnv(t *testing.T, settings string, env map[string]string) (*recordingHooks, *extensionState, *fakeHookHost) {
+	t.Helper()
 	dir := hermeticAgentDir(t)
+	for name, value := range env {
+		t.Setenv(name, value)
+	}
 	if settings == "" {
 		settings = `{"litellm":{}}`
 	}
@@ -775,6 +784,20 @@ func TestHookRegistration(t *testing.T) {
 		got = counts(disabled)
 		if _, ok := disabled.commands["litellm-budget"]; ok || got[sdk.EventTurnEnd] != 0 || got[sdk.EventModelSelect] != 0 {
 			t.Fatalf("budget registered while disabled: %v %v", disabled.commands, got)
+		}
+	})
+
+	t.Run("lets LITELLM_ENABLE_BUDGET override the budget block, both ways", func(t *testing.T) {
+		off, _, _ := wireEnv(t, `{"litellm":{"budget":{"enabled":true}}}`, map[string]string{envEnableBudget: "0"})
+		got := counts(off)
+		if _, ok := off.commands["litellm-budget"]; ok || got[sdk.EventTurnEnd] != 0 || got[sdk.EventModelSelect] != 0 {
+			t.Fatalf("budget registered while switched off: %v %v", off.commands, got)
+		}
+
+		on, _, _ := wireEnv(t, `{"litellm":{"budget":{"enabled":false}}}`, map[string]string{envEnableBudget: "1"})
+		got = counts(on)
+		if _, ok := on.commands["litellm-budget"]; !ok || got[sdk.EventTurnEnd] == 0 || got[sdk.EventModelSelect] == 0 {
+			t.Fatalf("budget not registered while switched on: %v %v", on.commands, got)
 		}
 	})
 

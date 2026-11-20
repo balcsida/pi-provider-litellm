@@ -118,6 +118,22 @@ describe("LiteLLM MCP server registration", () => {
     expect(pi.tools.map((tool) => tool.name)).toContain("litellm_skill_list");
   });
 
+  it("lets LITELLM_ENABLE_MCP override the mcp block, both ways", async () => {
+    mockProxy();
+    process.env.LITELLM_BASE_URL = "https://proxy.example.com";
+    process.env.LITELLM_API_KEY = "sk-default";
+
+    process.env.LITELLM_ENABLE_MCP = "0";
+    let pi = await load(await makeAgentDir({ mcp: { enabled: true } }));
+    await startTurn(pi);
+    expect(pi.mcpServers.size).toBe(0);
+
+    process.env.LITELLM_ENABLE_MCP = "1";
+    pi = await load(await makeAgentDir({ mcp: { enabled: false } }));
+    await startTurn(pi);
+    expect(pi.mcpServers.get("litellm")).toMatchObject({ url: "https://proxy.example.com/mcp" });
+  });
+
   it.each([
     ["LITELLM_OFFLINE", "1"],
     ["LITELLM_DISCOVERY_TIMEOUT_MS", "0"],

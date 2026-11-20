@@ -768,6 +768,22 @@ describe("through the extension", () => {
     expect(disabled.handlers.has("model_select")).toBe(false);
   });
 
+  it("lets LITELLM_ENABLE_BUDGET override the budget block, both ways", async () => {
+    process.env.LITELLM_ENABLE_BUDGET = "0";
+    const off = createPi();
+    await (await loadExtension(await agentDir({ litellm: { budget: { enabled: true } } })))(off);
+    expect(off.commands.has("litellm-budget")).toBe(false);
+    expect(off.handlers.has("turn_end")).toBe(false);
+    expect(off.handlers.has("model_select")).toBe(false);
+
+    process.env.LITELLM_ENABLE_BUDGET = "1";
+    const on = createPi();
+    await (await loadExtension(await agentDir({ litellm: { budget: { enabled: false } } })))(on);
+    expect(on.commands.has("litellm-budget")).toBe(true);
+    expect(on.handlers.has("turn_end")).toBe(true);
+    expect(on.handlers.has("model_select")).toBe(true);
+  });
+
   it("explains budget refusals through every message_end handler, also with budget.enabled false", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no network in this test"));
     const loaded = createPi();

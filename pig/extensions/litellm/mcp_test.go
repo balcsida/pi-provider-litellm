@@ -422,6 +422,27 @@ func TestMcpRegistersNothingWhenMCPIsDisabledAndKeepsSkills(t *testing.T) {
 	}
 }
 
+func TestMcpEnableVariableOverridesTheMCPBlockBothWays(t *testing.T) {
+	startTurn := func(settings, value string) *fakeHookHost {
+		hooks, _, host := wireEnv(t, settings, map[string]string{envEnableMCP: value})
+		defaultEnv(t, "https://proxy.example.com")
+		hooks.emit(t, sdk.EventSessionStart, host, nil)
+		hooks.emit(t, sdk.EventBeforeAgentStart, host, map[string]any{"systemPrompt": fakePrompt("")})
+		return host
+	}
+
+	off := startTurn(`{"litellm":{"mcp":{"enabled":true}}}`, "0")
+	if off.registers != 0 || len(off.servers) != 0 {
+		t.Fatalf("registers %d, servers %s", off.registers, mcpJSON(t, off.fakeRegistrar))
+	}
+
+	on := startTurn(`{"litellm":{"mcp":{"enabled":false}}}`, "1")
+	want := `{"litellm":{"type":"http","url":"https://proxy.example.com/mcp","auth":{"provider":"litellm"}}}`
+	if got := mcpJSON(t, on.fakeRegistrar); got != want {
+		t.Fatalf("servers = %s, want %s", got, want)
+	}
+}
+
 func TestMcpLoginStartDropsTheServerThroughTheSessionHost(t *testing.T) {
 	hooks, state, host := wire(t, "")
 	defaultEnv(t, "https://proxy.example.com")

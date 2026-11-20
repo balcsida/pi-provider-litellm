@@ -19,7 +19,8 @@ import (
 
 var hermeticVars = []string{
 	envBaseURL, envAPIKey, envAPIKeyHelper, envStartupKeyHelper, envHeaders, envDisplayName, envTimeout, envOffline,
-	envVerboseDiscovery, envModelsDev, envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
+	envVerboseDiscovery, envModelsDev, envEnableSkills, envEnableMCP, envEnableBudget,
+	envCLIJWTExpirationHours, envGcloudTokenAuth, envGoogleCredentials,
 	envPIOffline, envPIGOffline, "PIG_USE_PI_DIRS", "PIG_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
 	envProviders, envProvidersJSON, "LITELLM_TRUST_PROXY_LIMITS",
 }
@@ -205,6 +206,44 @@ func TestIsFeatureEnabled(t *testing.T) {
 	if !isFeatureEnabled(nil, "skills") {
 		t.Error("nil settings enable every feature")
 	}
+
+	block := func(feature string, enabled bool) *litellmSettings {
+		return &litellmSettings{Values: map[string]any{feature: map[string]any{"enabled": enabled}}}
+	}
+
+	t.Run("a set, non-empty variable overrides the settings block, both ways", func(t *testing.T) {
+		for feature, envName := range featureEnv {
+			for _, value := range []string{"1", "true", "TRUE", " 1 "} {
+				t.Setenv(envName, value)
+				if !isFeatureEnabled(block(feature, false), feature) {
+					t.Errorf("%s=%q: got disabled, want enabled", envName, value)
+				}
+			}
+			for _, value := range []string{"0", "false", "no", "off", "yes", "on", "enabled"} {
+				t.Setenv(envName, value)
+				if isFeatureEnabled(block(feature, true), feature) {
+					t.Errorf("%s=%q: got enabled, want disabled", envName, value)
+				}
+			}
+		}
+	})
+
+	t.Run("an empty, blank or unset variable defers to the settings block", func(t *testing.T) {
+		for feature, envName := range featureEnv {
+			for _, want := range []bool{true, false} {
+				for _, value := range []string{"", " "} {
+					t.Setenv(envName, value)
+					if got := isFeatureEnabled(block(feature, want), feature); got != want {
+						t.Errorf("%s=%q: got %v, want %v", envName, value, got, want)
+					}
+				}
+				os.Unsetenv(envName)
+				if got := isFeatureEnabled(block(feature, want), feature); got != want {
+					t.Errorf("%s unset: got %v, want %v", envName, got, want)
+				}
+			}
+		}
+	})
 }
 
 func TestEnvironmentHelpers(t *testing.T) {

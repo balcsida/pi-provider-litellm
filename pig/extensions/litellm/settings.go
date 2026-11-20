@@ -41,6 +41,9 @@ const (
 	envOffline                  = "LITELLM_OFFLINE"
 	envVerboseDiscovery         = "LITELLM_VERBOSE_DISCOVERY"
 	envModelsDev                = "LITELLM_MODELS_DEV"
+	envEnableSkills             = "LITELLM_ENABLE_SKILLS"
+	envEnableMCP                = "LITELLM_ENABLE_MCP"
+	envEnableBudget             = "LITELLM_ENABLE_BUDGET"
 	envStartupKeyHelper         = "LITELLM_STARTUP_KEY_HELPER"
 	envPIOffline                = "PI_OFFLINE"
 	envPIGOffline               = "PIG_OFFLINE"
@@ -955,8 +958,20 @@ func normalizeProviderSettings(raw any) map[string]any {
 	return normalized
 }
 
+// featureEnv maps a "skills", "mcp" or "budget" feature to the environment variable that overrides its
+// settings block, read like every other boolean here: 1 or true switch the feature on and any other
+// value off, so a misspelt kill switch still kills. An unset or blank value defers to the block.
+var featureEnv = map[string]string{
+	"skills": envEnableSkills,
+	"mcp":    envEnableMCP,
+	"budget": envEnableBudget,
+}
+
 // isFeatureEnabled reports whether the "skills", "mcp" or "budget" block is not disabled.
 func isFeatureEnabled(settings *litellmSettings, feature string) bool {
+	if value := os.Getenv(featureEnv[feature]); strings.TrimSpace(value) != "" {
+		return parseBooleanSetting(value)
+	}
 	if settings == nil {
 		return true
 	}

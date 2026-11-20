@@ -320,9 +320,11 @@ LiteLLM Skills, MCP integration, and the budget footer are enabled by default. D
 
 Setting `skills.enabled` to `false` disables the Skills Gateway management tools, skill fetching, and system-prompt injection. Setting `mcp.enabled` to `false` stops the extension from registering the proxy's MCP server. Setting `budget.enabled` to `false` registers no budget footer, polls, or `/litellm-budget` command; `budget.display` is described under [Budget status](#budget-status). Restart Pi after changing these settings.
 
-MCP can also be enabled or disabled per provider, though a provider setting cannot turn it on while `mcp.enabled` is `false`:
+MCP can also be enabled or disabled per provider, though a provider setting cannot turn it on while MCP is off as a whole (`mcp.enabled` is `false`, or `LITELLM_ENABLE_MCP` switches it off):
 - In `~/.pi/agent/settings.json`: set `providers.<name>.mcp.enabled` (or `providers.<name>.enableMcp`) to `false` (or `true`).
 - In environment variables: set `LITELLM_PROVIDER_<NAME>_ENABLE_MCP` or `LITELLM_PROVIDER_<NAME>_MCP_ENABLED` to `"0"` or `"false"` to disable MCP for a specific provider.
+
+The three features also read global environment variables that override the `settings.json` block: `LITELLM_ENABLE_SKILLS`, `LITELLM_ENABLE_MCP`, and `LITELLM_ENABLE_BUDGET`. A set value replaces the block's `enabled`, read like every other boolean here: `1` or `true` (in any case) turns the feature on, and anything else, including `0` and `false`, turns it off. An unset, empty or blank value defers to the block. A provider with MCP disabled stays without it under `LITELLM_ENABLE_MCP=1`. They let one settings file serve hosts whose features differ, and a container or CI job can run with model sync only: `LITELLM_ENABLE_MCP=0 LITELLM_ENABLE_SKILLS=0 LITELLM_ENABLE_BUDGET=0 pi`.
 
 Restart Pi after changing these settings.
 
@@ -455,6 +457,9 @@ such as OpenAI's GPT-6 Luna, is published as both a chat model and a classifier.
 |---|---|---|
 | `LITELLM_API_KEY_HELPER` | unset | Command that prints a fresh LiteLLM bearer token. Takes precedence over `LITELLM_API_KEY`. The extension runs it while resolving request auth, and Pi's per-request auth path is uncached, so rotating/short-lived tokens stay fresh. |
 | `LITELLM_DISPLAY_NAME` | `LiteLLM` | Custom display name for the default `litellm` provider in the Pi UI. |
+| `LITELLM_ENABLE_BUDGET` | unset (feature on) | When set, overrides `litellm.budget.enabled` from `settings.json`: `1` or `true` keeps the budget footer, polls and `/litellm-budget`, anything else, including `0` and `false`, removes them; unset, empty or blank defers to the block. See [Optional LiteLLM features](#optional-litellm-features). |
+| `LITELLM_ENABLE_MCP` | unset (feature on) | When set, overrides `litellm.mcp.enabled` from `settings.json`: `1` or `true` registers the proxy's MCP server, anything else, including `0` and `false`, registers none; unset, empty or blank defers to the block. See [Optional LiteLLM features](#optional-litellm-features). |
+| `LITELLM_ENABLE_SKILLS` | unset (feature on) | When set, overrides `litellm.skills.enabled` from `settings.json`: `1` or `true` keeps the Skills tools and prompt injection, anything else, including `0` and `false`, removes them; unset, empty or blank defers to the block. See [Optional LiteLLM features](#optional-litellm-features). |
 | `LITELLM_HEADERS` | unset | JSON object of extra headers sent to LiteLLM provider, discovery, MCP, and Skills Gateway requests. Provider aliases can use it with `"headers": "$LITELLM_HEADERS"`. |
 | `LITELLM_PROVIDERS` | unset | Canonical comma- or whitespace-separated list of provider IDs to register. |
 | `LITELLM_PROVIDERS_JSON` | unset | JSON string of provider configuration objects matching the `litellm.providers` settings schema. |
